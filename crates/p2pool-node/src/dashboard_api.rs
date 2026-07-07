@@ -698,7 +698,7 @@ async fn idena_service_status(
     } else {
         (syncing.current_block as f64 / syncing.highest_block as f64 * 100.0).clamp(0.0, 100.0)
     };
-    let state = if syncing.syncing {
+    let state = if syncing.is_effectively_syncing() {
         "syncing"
     } else {
         "connected"

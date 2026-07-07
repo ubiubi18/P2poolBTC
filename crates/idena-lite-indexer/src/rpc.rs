@@ -330,6 +330,12 @@ pub struct SyncingResponse {
     pub message: String,
 }
 
+impl SyncingResponse {
+    pub fn is_effectively_syncing(&self) -> bool {
+        self.syncing && !(self.highest_block > 0 && self.current_block >= self.highest_block)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EpochResponse {

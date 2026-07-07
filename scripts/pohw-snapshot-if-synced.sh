@@ -224,6 +224,8 @@ if not isinstance(result, dict):
 
 syncing = result.get("syncing")
 wrong_time = result.get("wrongTime")
+current_block = int(result.get("currentBlock") or 0)
+highest_block = int(result.get("highestBlock") or 0)
 if not isinstance(syncing, bool):
     print("sync response result.syncing must be boolean", file=sys.stderr)
     sys.exit(1)
@@ -231,10 +233,12 @@ if wrong_time is not None and not isinstance(wrong_time, bool):
     print("sync response result.wrongTime must be boolean when present", file=sys.stderr)
     sys.exit(1)
 
-if syncing:
-    print("syncing")
-elif wrong_time:
+effectively_syncing = syncing and not (highest_block > 0 and current_block >= highest_block)
+
+if wrong_time:
     print("wrong_time")
+elif effectively_syncing:
+    print("syncing")
 else:
     print("ready")
 PY

@@ -32,7 +32,7 @@ pub async fn build_current_snapshot(
         .syncing()
         .await
         .context("failed to read Idena sync status")?;
-    if options.require_synced && syncing.syncing {
+    if options.require_synced && syncing.is_effectively_syncing() {
         bail!(
             "Idena node is still syncing at block {} of {}; refusing consensus snapshot",
             syncing.current_block,

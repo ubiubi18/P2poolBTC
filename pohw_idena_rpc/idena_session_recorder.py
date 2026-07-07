@@ -10,6 +10,7 @@ replay engine that consumes this cache and validates computed roots.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -109,6 +110,21 @@ def safe_text(value: Any, field: str, *, max_bytes: int = MAX_TEXT_FIELD_BYTES) 
     return text
 
 
+def safe_payload_text(value: Any, field: str, *, max_bytes: int = MAX_TEXT_FIELD_BYTES) -> str:
+    text = str(value or "")
+    text_bytes = text.encode("utf-8")
+    if len(text_bytes) <= max_bytes and all(ord(ch) >= 32 for ch in text):
+        return text
+
+    encoded = json.dumps(text, ensure_ascii=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) <= max_bytes:
+        return f"json:{encoded}"
+
+    digest = hashlib.sha256(text_bytes).hexdigest()
+    preview = text_bytes[:256].hex()
+    return f"sha256:{digest};bytes:{len(text_bytes)};head_hex:{preview}"
+
+
 def parse_int(value: Any, field: str, *, minimum: int = 0) -> int:
     try:
         if isinstance(value, bool):
@@ -119,6 +135,16 @@ def parse_int(value: Any, field: str, *, minimum: int = 0) -> int:
     if parsed < minimum:
         raise ValueError(f"{field} must be >= {minimum}")
     return parsed
+
+
+def idena_sync_ready(sync_state: Dict[str, Any]) -> bool:
+    if bool(sync_state.get("wrongTime")):
+        return False
+    if not bool(sync_state.get("syncing")):
+        return True
+    current_block = parse_int(sync_state.get("currentBlock") or 0, "sync.currentBlock", minimum=0)
+    highest_block = parse_int(sync_state.get("highestBlock") or 0, "sync.highestBlock", minimum=0)
+    return highest_block > 0 and current_block >= highest_block
 
 
 def validate_rpc_url(raw_url: str, *, allow_remote_rpc: bool = False) -> str:
@@ -207,7 +233,7 @@ def normalize_transaction(tx_hash: str, tx: Any) -> Dict[str, Any]:
         "used_fee": safe_text(tx.get("usedFee") or "0", "transaction.usedFee", max_bytes=128),
         "epoch": parse_int(tx.get("epoch") or 0, "transaction.epoch", minimum=0),
         "nonce": parse_int(tx.get("nonce") or 0, "transaction.nonce", minimum=0),
-        "payload": safe_text(tx.get("payload"), "transaction.payload"),
+        "payload": safe_payload_text(tx.get("payload"), "transaction.payload"),
         "raw": tx,
     }
 
@@ -703,7 +729,7 @@ class SessionRecorder:
 
     def scan_once(self, *, start_height: Optional[int] = None) -> Dict[str, Any]:
         sync_state = self.syncing()
-        if bool(sync_state.get("syncing")) or bool(sync_state.get("wrongTime")):
+        if not idena_sync_ready(sync_state):
             return {
                 "status": "skipped",
                 "reason": "idena node is syncing or reports wrong time",

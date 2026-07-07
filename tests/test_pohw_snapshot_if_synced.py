@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,13 +22,14 @@ class SnapshotIfSyncedScriptTest(unittest.TestCase):
         fake.chmod(0o700)
         return fake
 
-    def write_fake_curl(self, root: Path) -> Path:
+    def write_fake_curl(self, root: Path, response: Optional[str] = None) -> Path:
         fake_bin = root / "bin"
-        fake_bin.mkdir()
+        fake_bin.mkdir(exist_ok=True)
         fake = fake_bin / "curl"
+        response = response or '{"result":{"syncing":false,"wrongTime":false}}'
         fake.write_text(
             "#!/usr/bin/env bash\n"
-            "printf '{\"result\":{\"syncing\":false,\"wrongTime\":false}}\\n'\n",
+            f"printf '%s\\n' '{response}'\n",
             encoding="utf-8",
         )
         fake.chmod(0o700)
@@ -56,6 +58,31 @@ class SnapshotIfSyncedScriptTest(unittest.TestCase):
             }
         )
         return env
+
+    def test_treats_stale_syncing_boolean_at_head_as_ready(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-snapshot-stale-sync-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            stale_response = (
+                '{"result":{"syncing":true,"wrongTime":false,'
+                '"currentBlock":11005935,"highestBlock":11005934}}'
+            )
+            env["PATH"] = (
+                f"{self.write_fake_curl(root, stale_response)}"
+                f"{os.pathsep}{os.environ.get('PATH', '')}"
+            )
+
+            result = subprocess.run(
+                ["bash", str(SNAPSHOT_SCRIPT)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Wrote", result.stdout)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_refuses_symlinked_snapshot_output_ancestor(self) -> None:

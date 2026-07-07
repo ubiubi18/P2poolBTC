@@ -44,11 +44,21 @@ def tx(tx_hash, tx_type="send"):
 
 
 class FakeClient:
-    def __init__(self, blocks, transactions=None, syncing=False, wrong_time=False):
+    def __init__(
+        self,
+        blocks,
+        transactions=None,
+        syncing=False,
+        wrong_time=False,
+        current_block=None,
+        highest_block=None,
+    ):
         self.blocks = {item["height"]: item for item in blocks}
         self.transactions = transactions or {}
         self.syncing = syncing
         self.wrong_time = wrong_time
+        self.current_block = current_block
+        self.highest_block = highest_block
 
     def call(self, method, params=None):
         params = params or []
@@ -57,8 +67,8 @@ class FakeClient:
             return {
                 "syncing": self.syncing,
                 "wrongTime": self.wrong_time,
-                "currentBlock": head,
-                "highestBlock": head,
+                "currentBlock": self.current_block if self.current_block is not None else head,
+                "highestBlock": self.highest_block if self.highest_block is not None else head,
                 "genesisBlock": 1,
                 "message": "",
             }
@@ -142,6 +152,22 @@ class SessionRecorderTests(unittest.TestCase):
             self.assertEqual(status["recentFlags"][0]["flag"], "OfflineCommit")
             ledger.close()
 
+    def test_record_block_caches_non_printable_transaction_payload(self):
+        tx_hash = "0x" + "1" * 64
+        raw_tx = tx(tx_hash)
+        raw_tx["payload"] = "hello\x00world"
+        with TemporaryDirectory() as tmp:
+            ledger = SessionLedger(Path(tmp) / "sessions.sqlite3")
+            ledger.record_block(block(20, ["OfflineCommit"], [tx_hash]), [raw_tx])
+
+            stored = ledger.conn.execute(
+                "SELECT payload, raw_json FROM block_transactions WHERE tx_hash = ?",
+                (tx_hash,),
+            ).fetchone()
+            self.assertEqual(stored["payload"], 'json:"hello\\u0000world"')
+            self.assertIn("\\u0000", stored["raw_json"])
+            ledger.close()
+
     def test_record_block_rejects_same_height_different_hash(self):
         with TemporaryDirectory() as tmp:
             ledger = SessionLedger(Path(tmp) / "sessions.sqlite3")
@@ -174,11 +200,17 @@ class SessionRecorderTests(unittest.TestCase):
             child_dir = real_dir / "child"
             link_dir = base / "link"
             child_dir.mkdir(parents=True)
+            real_dir.chmod(0o700)
+            child_dir.chmod(0o700)
             os.symlink(real_dir, link_dir)
 
-            with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor"):
-                SessionLedger(link_dir / "child" / "sessions.sqlite3")
-            self.assertFalse((child_dir / "sessions.sqlite3").exists())
+            try:
+                with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor"):
+                    SessionLedger(link_dir / "child" / "sessions.sqlite3")
+                self.assertFalse((child_dir / "sessions.sqlite3").exists())
+            finally:
+                child_dir.chmod(0o700)
+                real_dir.chmod(0o700)
 
     def test_session_ledger_readonly_uri_escapes_question_mark_path(self):
         with TemporaryDirectory() as tmp:
@@ -227,7 +259,7 @@ class SessionRecorderTests(unittest.TestCase):
             ledger = SessionLedger(Path(tmp) / "sessions.sqlite3")
             recorder = SessionRecorder(
                 ledger=ledger,
-                client=FakeClient([block(40)], syncing=True),
+                client=FakeClient([block(40)], syncing=True, current_block=40, highest_block=41),
                 poll_interval=1,
                 max_blocks_per_pass=10,
                 fetch_transactions=False,
@@ -235,6 +267,21 @@ class SessionRecorderTests(unittest.TestCase):
             result = recorder.scan_once()
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(ledger.status()["blocks"], 0)
+            ledger.close()
+
+    def test_scan_once_treats_stale_syncing_boolean_at_head_as_ready(self):
+        with TemporaryDirectory() as tmp:
+            ledger = SessionLedger(Path(tmp) / "sessions.sqlite3")
+            recorder = SessionRecorder(
+                ledger=ledger,
+                client=FakeClient([block(40)], syncing=True, current_block=40, highest_block=40),
+                poll_interval=1,
+                max_blocks_per_pass=10,
+                fetch_transactions=False,
+            )
+            result = recorder.scan_once()
+            self.assertEqual(result["status"], "scanned")
+            self.assertEqual(ledger.status()["blocks"], 1)
             ledger.close()
 
 
