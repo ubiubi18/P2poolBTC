@@ -5,6 +5,8 @@ It explores a voluntary mining layer where every node can replay the same sharec
 
 Bitcoin and Idena stay unchanged. This repo builds the experimental coordination layer between them.
 
+![P2poolBTC dashboard demo](docs/screenshots/p2poolbtc-dashboard-demo.png)
+
 The idea is simple:
 
 - Bitcoin hashrate still mines the block.
@@ -14,6 +16,12 @@ The idea is simple:
 - Smaller balances become non-transferable withdrawal claims against a weekly FROST vault epoch.
 
 This repo is not a production Bitcoin node, not a token bridge, and not ready for real funds.
+
+## Start Here
+
+If you want to help test, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the tester roles, the safety boundaries, and the shortest path to a first report bundle.
+
+Use [Experiment 0](EXPERIMENT-0.md) as the detailed operator runbook once you are ready to run a multi-node test.
 
 ## Status
 
@@ -77,7 +85,9 @@ Keep Bitcoin and Idena RPC on loopback. Expose gossip, dashboard, or Stratum onl
 
 ## Community Experiment
 
-Start with [Experiment 0](EXPERIMENT-0.md) when multiple people help. It defines the no-value scope, env template, preflight, miner registration, snapshot voting, report bundles, deterministic report comparison, success criteria, and stop conditions for a decentralized dry run.
+Start with [Beta Testing P2poolBTC](BETA-TESTING.md) when multiple people help. It gives a shorter, more welcoming path for observers, gossip testers, Idena testers, and Bitcoin testers.
+
+Use [Experiment 0](EXPERIMENT-0.md) for the complete no-value scope, env template, preflight, miner registration, snapshot voting, report bundles, deterministic report comparison, success criteria, and stop conditions for a decentralized dry run.
 
 Build a participant source package:
 

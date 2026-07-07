@@ -1,6 +1,16 @@
 # Experiment 0: Multi-Node PoHW P2Pool Dry Run
 
-This runbook is for the first community experiment. It is a no-value, replay-only test of the decentralized P2Pool layer. It is not Bitcoin mainnet mining, not a token launch, not a bridge, and not a deposit system.
+This is the detailed operator runbook for the first community experiment.
+
+If you are joining as a beta tester for the first time, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the roles, the shortest path to a first report bundle, and what feedback is useful.
+
+Experiment 0 is a no-value, replay-only test of the decentralized P2Pool layer. It is not Bitcoin mainnet mining, not a token launch, not a bridge, and not a deposit system.
+
+## Why This Test Matters
+
+P2poolBTC tests whether independent participants can verify the same Bitcoin-hashrate work, Idena human-work accounting, payout schedule, and vault-claim state without trusting one central pool server.
+
+The goal is not to pay anyone in this round. The goal is to learn whether the protocol and user journey are clear enough for community testers to run independently.
 
 ## Goal
 
