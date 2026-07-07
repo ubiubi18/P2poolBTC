@@ -8,6 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MINING_ADAPTER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-mining-adapter.sh"
 DASHBOARD_UI_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-ui.sh"
+LOCAL_GOSSIP_PEER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-local-gossip-peer.sh"
 
 
 class RunWrapperValidationTest(unittest.TestCase):
@@ -292,6 +293,42 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Dashboard UI build is missing", result.stderr)
+
+    def test_local_gossip_peer_runner_uses_explicit_peer_settings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-local-gossip-peer-wrapper-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_LOCAL_GOSSIP_DATADIR": str(root / "local-peer"),
+                    "POHW_LOCAL_GOSSIP_BIND_ADDR": "192.0.2.10:40416",
+                    "POHW_LOCAL_GOSSIP_ADVERTISE_ADDR": "192.0.2.10:40416",
+                    "POHW_LOCAL_GOSSIP_PEER_ADDRS": "192.0.2.10:40406,192.0.2.11:40406",
+                    "POHW_PEER_ADDRS": "192.0.2.99:40406",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(LOCAL_GOSSIP_PEER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-gossip-mesh", args)
+        self.assertIn(str(root / "local-peer"), args)
+        self.assertIn("192.0.2.10:40416", args)
+        self.assertIn("192.0.2.10:40406", args)
+        self.assertIn("192.0.2.11:40406", args)
+        self.assertNotIn("192.0.2.99:40406", args)
 
 
 if __name__ == "__main__":

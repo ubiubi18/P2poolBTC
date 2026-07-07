@@ -645,6 +645,7 @@ sudo chmod 600 /etc/pohw/stratum.password
 sudo chown ubuntu:ubuntu /etc/pohw/dashboard-api.token /etc/pohw/stratum.password
 sudo install -m 600 -o ubuntu -g ubuntu deploy/mining-adapter-job.example.json /mnt/ssd/pohw-p2pool/mining-job.example.json
 sudo cp deploy/systemd/pohw-gossip-mesh.service /etc/systemd/system/
+sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-ui.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-mining-adapter.service /etc/systemd/system/
@@ -662,6 +663,10 @@ Use `/etc/pohw/p2pool.env` for Pi-specific paths, peer hints, allowed dashboard 
 ```sh
 POHW_SNAPSHOT_DIR=/mnt/ssd/pohw-p2pool/snapshots
 POHW_GOSSIP_BIND_ADDR=<pi-wlan-ip>:40406
+POHW_PEER_ADDRS=<peer-host-or-ip>:40406
+POHW_LOCAL_GOSSIP_BIND_ADDR=<pi-wlan-ip>:40416
+POHW_LOCAL_GOSSIP_ADVERTISE_ADDR=<pi-wlan-ip>:40416
+POHW_LOCAL_GOSSIP_PEER_ADDRS=<pi-wlan-ip>:40406
 POHW_DASHBOARD_ALLOW_NON_LOOPBACK=true
 POHW_DASHBOARD_BIND_ADDR=<pi-wlan-ip>:40407
 POHW_DASHBOARD_API_TOKEN_FILE=/etc/pohw/dashboard-api.token
@@ -681,6 +686,13 @@ POHW_IDENA_SNAPSHOT_PROOF_ROOT=<32-byte-root-hex>
 ```
 
 Set `POHW_DASHBOARD_ALLOWED_ORIGINS` to the browser UI origin you actually use, for example `http://<pi-wlan-ip>:5176` if the UI is served from the Pi.
+
+`pohw-gossip-mesh-local-peer.service` is optional. It runs a second local gossip
+node with its own datadir so a single Pi can exercise peer inventory, sync, and
+rebroadcast plumbing. Bind it to the specific Pi LAN IP instead of `0.0.0.0`,
+and keep it off public interfaces. For real multi-node testing, replace
+`POHW_PEER_ADDRS` with actual trusted participant peers and disable the local
+test peer.
 
 For remote workstation access, prefer SSH forwarding instead of non-loopback dashboard binds:
 

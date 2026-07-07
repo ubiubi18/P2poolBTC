@@ -311,6 +311,11 @@ scripts/pohw-experiment-preflight.sh .pohw-experiment.env
 scripts/pohw-experiment-start-gossip.sh .pohw-experiment.env
 ```
 
+For a one-machine gossip plumbing check on a Pi, install
+`pohw-gossip-mesh-local-peer.service` and set the `POHW_LOCAL_GOSSIP_*`
+variables in `/etc/pohw/p2pool.env`. Use real participant peers for a
+decentralized dry run.
+
 ## 5. Register, Vote, Report
 
 ```sh
