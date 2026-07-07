@@ -1,0 +1,37 @@
+[Unit]
+Description=PoHW Idena snapshot if local idena-go is fully synced
+Wants=idena.service idena-reward-indexer.service
+After=idena.service idena-reward-indexer.service network-online.target
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/mnt/ssd/p2pool
+Environment=IDENA_API_KEY_FILE=/mnt/ssd/idena/idena-data/api.key
+Environment=IDENA_REWARD_LEDGER_DB=/mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3
+Environment=IDENA_REWARD_INDEXER_SCRIPT=/mnt/ssd/p2pool/pohw_idena_rpc/idena_reward_indexer.py
+Environment=POHW_SNAPSHOT_DIR=/mnt/ssd/pohw-p2pool/snapshots
+ExecStart=/mnt/ssd/p2pool/scripts/pohw-snapshot-if-synced.sh
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/mnt/ssd/p2pool /mnt/ssd/idena/idena-data
+ReadWritePaths=/mnt/ssd/pohw-p2pool

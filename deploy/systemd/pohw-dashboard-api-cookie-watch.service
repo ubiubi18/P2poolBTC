@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart PoHW dashboard API after Bitcoin RPC cookie rotation
+After=pohw-dashboard-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl try-restart pohw-dashboard-api.service

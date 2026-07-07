@@ -1,0 +1,31 @@
+[Unit]
+Description=PoHW Idena reward ledger indexer
+After=idena.service
+Wants=idena.service
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/mnt/ssd/p2pool/pohw_idena_rpc
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /mnt/ssd/p2pool/pohw_idena_rpc/idena_reward_indexer.py --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 --rolling-data-dir /mnt/ssd/p2pool/pohw_idena_rpc/data --rpc-url http://127.0.0.1:9009 --api-key-file /mnt/ssd/idena/idena-data/api.key --poll-interval 1 run
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/mnt/ssd/p2pool /mnt/ssd/idena/idena-data
+ReadWritePaths=/mnt/ssd/pohw-p2pool/rewards
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

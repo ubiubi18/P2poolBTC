@@ -1,0 +1,11 @@
+{
+  "job_id": "experiment-0-example",
+  "version": "20000000",
+  "prevhash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase1": "0100000001",
+  "coinbase2": "ffffffff0100f2052a01000000160014ffffffffffffffffffffffffffffffffffffffff00000000",
+  "merkle_branches": [],
+  "nbits": "ffff7f20",
+  "ntime": "00000000",
+  "clean_jobs": true
+}

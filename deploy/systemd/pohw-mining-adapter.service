@@ -1,0 +1,39 @@
+[Unit]
+Description=PoHW P2Pool local Stratum mining adapter
+Wants=network-online.target pohw-gossip-mesh.service
+After=network-online.target pohw-gossip-mesh.service
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/mnt/ssd/p2pool
+EnvironmentFile=-/etc/pohw/p2pool.env
+ExecStart=/mnt/ssd/p2pool/scripts/pohw-run-mining-adapter.sh
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/mnt/ssd/p2pool /etc/pohw
+ReadWritePaths=/mnt/ssd/pohw-p2pool
+
+[Install]
+WantedBy=multi-user.target

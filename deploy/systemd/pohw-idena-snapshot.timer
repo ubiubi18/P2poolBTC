@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily PoHW Idena snapshot timer
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+Persistent=true
+Unit=pohw-idena-snapshot.service
+
+[Install]
+WantedBy=timers.target
+
