@@ -317,8 +317,12 @@ scripts/pohw-experiment-start-gossip.sh .pohw-experiment.env
 scripts/pohw-experiment-register-miner.sh .pohw-experiment.env --idena-address 0x...
 # sign the printed challenge in Idena, then rerun with --idena-signature-hex
 scripts/pohw-experiment-publish-snapshot-vote.sh .pohw-experiment.env
+scripts/pohw-bootstrap-readiness.sh .pohw-experiment.env --mode real
 scripts/pohw-experiment-report.sh .pohw-experiment.env
 ```
+
+If Bitcoin Core is still in initial block download, the bootstrap command exits
+cleanly with `bitcoin_not_ready` and does not append synthetic Bitcoin work.
 
 Share only the generated report `.tar.gz`. Never share `.pohw-experiment.env`,
 private keys, API keys, Bitcoin cookies, dashboard tokens, seed phrases, raw

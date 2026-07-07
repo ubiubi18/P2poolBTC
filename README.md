@@ -297,6 +297,32 @@ cargo run -p p2pool-node -- publish-share \
 Each node still verifies the append locally. Use `--accept-locally` only after Bitcoin RPC validation, unless you deliberately pass `--allow-unverified-local-accept` for a controlled test fixture.
 `publish-share` defaults `--parent-share-hash` to the local best share tip; on an empty sharechain it uses the zero parent.
 
+Bootstrap the remaining readiness checks from one command once miner registration
+and a verified Idena snapshot exist:
+
+```sh
+scripts/pohw-bootstrap-readiness.sh .pohw-experiment.env --mode real
+```
+
+Real mode builds the Bitcoin work candidate from local Bitcoin Core RPC, publishes
+and locally accepts a signed `BitcoinWorkTemplate` only after RPC validation, then
+publishes the first share bound to the selected Idena snapshot. The default
+bootstrap share target is the maximum accepted rehearsal target; set
+`POHW_BOOTSTRAP_SHARE_TARGET` or pass `--share-target` for stricter accounting.
+If Bitcoin Core is still in initial block download, it writes `status.json` with
+`bitcoin_not_ready` and exits without appending synthetic work.
+
+For isolated single-node plumbing tests only, use:
+
+```sh
+scripts/pohw-bootstrap-readiness.sh .pohw-experiment.env \
+  --mode dev \
+  --dev-ack I_UNDERSTAND_DEV_ONLY
+```
+
+Dev mode uses synthetic local work and must not be used for Bitcoin mining or
+shared experiment consensus.
+
 Mesh sync can admit peer work templates automatically when it has local Bitcoin RPC access:
 
 ```sh
