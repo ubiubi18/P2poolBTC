@@ -15,6 +15,18 @@ The idea is simple:
 
 This repo is not a production Bitcoin node, not a token bridge, and not ready for real funds.
 
+## Preview
+
+These screenshots use demo data only; they show the user flow, not live payout claims.
+
+![P2poolBTC dashboard overview](docs/assets/dashboard-overview.png)
+
+<p align="center">
+  <img src="docs/assets/dashboard-mobile.png" alt="P2poolBTC mobile dashboard overview" width="360">
+</p>
+
+![PoHW pool flow: solve flips, join p2pool, mine Bitcoin, decentralize Bitcoin mining](docs/assets/pohw-flow.png)
+
 ## Start Here
 
 If you want to help test, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the tester roles, the safety boundaries, and the shortest path to a first report bundle.
