@@ -492,14 +492,14 @@ function DashboardIntro({
       <div className={participation.isReady ? "intro-status ready" : "intro-status pending"}>
         {participation.isReady ? <CheckCircle2 size={18} /> : <KeyRound size={18} />}
         <div>
-          <span>{participation.isReady ? "Ready" : "Human access"}</span>
+          <span>{participation.isReady ? "Ready" : "Start here"}</span>
           <strong>
-            {participation.isReady ? "Puzzle + miner linked" : "Solve puzzle, join mining"}
+            {participation.isReady ? "Puzzle + miner linked" : "Prove human ownership"}
           </strong>
           <small>
             {participation.isReady
               ? "Your shares can earn payout."
-              : "Cheap for brains, costly for AI."}
+              : "Then point your miner."}
           </small>
         </div>
       </div>

@@ -5,8 +5,6 @@ It explores a voluntary mining layer where every node can replay the same sharec
 
 Bitcoin and Idena stay unchanged. This repo builds the experimental coordination layer between them.
 
-![P2poolBTC dashboard demo](docs/screenshots/p2poolbtc-dashboard-demo.png)
-
 The idea is simple:
 
 - Bitcoin hashrate still mines the block.

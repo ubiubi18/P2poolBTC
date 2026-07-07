@@ -4,8 +4,6 @@ P2poolBTC is looking for careful early testers who want to help check whether a 
 
 You are not mining real BTC in this test. You are helping prove that independent nodes can see the same registrations, snapshots, sharechain messages, and payout accounting.
 
-![P2poolBTC dashboard demo](docs/screenshots/p2poolbtc-dashboard-demo.png)
-
 ## Who Can Help
 
 You can join at different levels. Stop at the role that fits your machine and time.
