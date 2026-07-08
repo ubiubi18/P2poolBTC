@@ -482,6 +482,17 @@ python3 pohw_idena_rpc/idena_reward_indexer.py \
 
 `sync-official-indexer` runs `scripts/pohw-export-idena-indexer-rewards.sql` against the official `idena-indexer` Postgres schema, imports only exact StatsCollector-derived validation/mining reward events, and keeps invitation/contract/oracle rewards excluded from eligible replay. The snapshot timer can run the sync automatically when `IDENA_INDEXER_DATABASE_URL_FILE` or `IDENA_INDEXER_DATABASE_URL` is configured.
 
+If local Postgres `idena-indexer` data is not available yet, import completed-epoch rewards from the official public Idena API:
+
+```sh
+python3 pohw_idena_rpc/idena_reward_indexer.py \
+  --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 \
+  sync-official-api \
+  --completed-epochs 1
+```
+
+`sync-official-api` defaults to the previous completed epoch. It imports exact validation/staking/session reward categories from `/Epoch/{epoch}/IdentityRewards`, imports aggregate epoch mining summaries from `/Address/{address}/MiningRewardSummaries`, and records invitation/invitee rewards as ignored replay events. Set `IDENA_OFFICIAL_API_SYNC=true` in the snapshot environment to let `pohw-idena-snapshot.service` run this fallback automatically when no Postgres URL is configured.
+
 Build the snapshot registry ABI:
 
 ```sh

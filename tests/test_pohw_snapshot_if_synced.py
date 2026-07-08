@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import subprocess
 import tempfile
@@ -42,6 +43,39 @@ class SnapshotIfSyncedScriptTest(unittest.TestCase):
         key_file.write_text("local-test-key", encoding="utf-8")
         key_file.chmod(0o600)
         return key_file
+
+    def write_fake_reward_indexer(self, root: Path, calls_file: Path) -> Path:
+        fake = root / "fake_reward_indexer.py"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import pathlib\n"
+            "import sys\n"
+            f"calls = pathlib.Path({str(calls_file)!r})\n"
+            "with calls.open('a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if 'sync-official-api' in sys.argv:\n"
+            "    db = pathlib.Path(sys.argv[sys.argv.index('--db') + 1])\n"
+            "    db.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    db.write_text('fake sqlite placeholder', encoding='utf-8')\n"
+            "    print('{\"importedEvents\": 1}')\n"
+            "    raise SystemExit(0)\n"
+            "if 'export-replay' in sys.argv:\n"
+            "    print(json.dumps([\n"
+            "        {\n"
+            "            'idena_address': '0x' + 'a' * 40,\n"
+            "            'kind': 'Validation',\n"
+            "            'amount_atoms': 1,\n"
+            "            'source_height': 1,\n"
+            "            'source_hash': '0x' + '1' * 64,\n"
+            "        }\n"
+            "    ]))\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit('unexpected fake reward indexer args: ' + ' '.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        return fake
 
     def base_env(self, root: Path) -> dict[str, str]:
         env = dict(os.environ)
@@ -189,6 +223,43 @@ class SnapshotIfSyncedScriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("leaving existing file unchanged", result.stdout)
             self.assertEqual(existing.read_text(encoding="utf-8"), "keep-me")
+
+    def test_can_sync_rewards_from_official_api_before_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-snapshot-api-sync-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            calls_file = root / "reward-indexer-calls.jsonl"
+            env.pop("POHW_ALLOW_EMPTY_REWARD_REPLAY", None)
+            env.update(
+                {
+                    "IDENA_REWARD_LEDGER_DB": str(root / "rewards" / "reward.sqlite3"),
+                    "IDENA_REWARD_INDEXER_SCRIPT": str(
+                        self.write_fake_reward_indexer(root, calls_file)
+                    ),
+                    "IDENA_OFFICIAL_API_SYNC": "true",
+                    "IDENA_OFFICIAL_API_COMPLETED_EPOCHS": "1",
+                    "IDENA_OFFICIAL_API_REQUEST_DELAY_SECONDS": "0",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(SNAPSHOT_SCRIPT)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [
+                json_line
+                for json_line in calls_file.read_text(encoding="utf-8").splitlines()
+                if json_line
+            ]
+            self.assertTrue(any("sync-official-api" in call for call in calls))
+            self.assertTrue(any("export-replay" in call for call in calls))
+            self.assertIn("Wrote", result.stdout)
 
 
 if __name__ == "__main__":

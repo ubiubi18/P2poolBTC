@@ -61,17 +61,23 @@ ROLLING_DATA_DIR = Path("data")
 DEFAULT_OFFICIAL_INDEXER_SQL_FILE = (
     Path(__file__).resolve().parents[1] / "scripts" / "pohw-export-idena-indexer-rewards.sql"
 )
+DEFAULT_OFFICIAL_API_BASE_URL = "https://api.idena.io/api"
 POLL_INTERVAL_SECONDS = 5
 DNA_BASE = Decimal("1000000000000000000")
 MAX_DATABASE_URL_BYTES = 4096
 MAX_OFFICIAL_INDEXER_SQL_BYTES = 256 * 1024
 MAX_OFFICIAL_INDEXER_EXPORT_BYTES = 512 * 1024 * 1024
+MAX_OFFICIAL_API_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_ROLLING_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_ROLLING_DELTA_BYTES = 256 * 1024 * 1024
 DEFAULT_PSQL_TIMEOUT_SECONDS = 300
+DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS = 30
+DEFAULT_OFFICIAL_API_PAGE_LIMIT = 100
+DEFAULT_OFFICIAL_API_RETRIES = 4
 TRACKED_STATES = {"Candidate", "Newbie", "Verified", "Human", "Suspended", "Zombie"}
 LIABILITY_WINDOW_EPOCHS = 10
 STATS_COLLECTOR_SOURCE = "idena_stats_collector"
+OFFICIAL_API_SOURCE = "idena_public_api"
 REPLAY_KINDS = {
     "Validation",
     "Proposer",
@@ -735,43 +741,46 @@ class RewardLedger:
             params.append(max_height)
         where_sql = " AND ".join(where)
         eligible_kinds = sorted(ELIGIBLE_REPLAY_KIND_BY_LEDGER_KIND)
-        if require_exact:
-            placeholders = ",".join("?" for _ in eligible_kinds)
-            row = self.conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM reward_events
-                WHERE {where_sql}
-                  AND kind IN ({placeholders})
-                  AND confidence = 'exact'
-                """,
-                [*params, *eligible_kinds],
-            ).fetchone()
-            if int(row[0] or 0) == 0:
-                raise ValueError(
-                    "reward replay export has no exact eligible reward events; "
-                    "run sync-official-indexer first or use --allow-inferred only for development"
-                )
+        placeholders = ",".join("?" for _ in eligible_kinds)
+        exact_count_row = self.conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM reward_events
+            WHERE {where_sql}
+              AND kind IN ({placeholders})
+              AND confidence = 'exact'
+            """,
+            [*params, *eligible_kinds],
+        ).fetchone()
+        exact_count = int(exact_count_row[0] or 0)
+        if require_exact and exact_count == 0:
+            raise ValueError(
+                "reward replay export has no exact eligible reward events; "
+                "run sync-official-indexer first or use --allow-inferred only for development"
+            )
         if not allow_inferred:
-            placeholders = ",".join("?" for _ in eligible_kinds)
-            row = self.conn.execute(
-                f"""
-                SELECT address, height, kind, confidence, source
-                FROM reward_events
-                WHERE {where_sql}
-                  AND kind IN ({placeholders})
-                  AND confidence <> 'exact'
-                LIMIT 1
-                """,
-                [*params, *eligible_kinds],
-            ).fetchone()
-            if row is not None:
-                raise ValueError(
-                    "reward replay export contains non-exact eligible reward "
-                    f"at height {row['height']} for {row['address']} "
-                    f"(kind={row['kind']}, confidence={row['confidence']}, source={row['source']}); "
-                    "run with --allow-inferred only for non-consensus development snapshots"
-                )
+            if exact_count == 0:
+                inferred_row = self.conn.execute(
+                    f"""
+                    SELECT address, height, kind, confidence, source
+                    FROM reward_events
+                    WHERE {where_sql}
+                      AND kind IN ({placeholders})
+                      AND confidence <> 'exact'
+                    LIMIT 1
+                    """,
+                    [*params, *eligible_kinds],
+                ).fetchone()
+                if inferred_row is not None:
+                    raise ValueError(
+                        "reward replay export contains only non-exact eligible reward "
+                        f"data at height {inferred_row['height']} for {inferred_row['address']} "
+                        f"(kind={inferred_row['kind']}, confidence={inferred_row['confidence']}, "
+                        f"source={inferred_row['source']}); run sync-official-indexer first or "
+                        "use --allow-inferred only for non-consensus development snapshots"
+                    )
+            where.append("confidence = 'exact'")
+            where_sql = " AND ".join(where)
         rows = self.conn.execute(
             f"""
             SELECT address, epoch, height, block_hash, kind, amount_atoms, confidence, source
@@ -1132,6 +1141,485 @@ def sync_official_indexer_rewards(
         "sqlFile": str(sql_file),
         "exportedEvents": exported_count,
         "importedEvents": imported_count,
+        "exactEventsInLedger": int(row[0] or 0),
+        "lastExactRewardHeight": int(row[1] or 0),
+    }
+
+
+def validate_official_api_base_url(raw_url: str) -> str:
+    raw_url = str(raw_url or "").strip().rstrip("/")
+    if not raw_url or len(raw_url) > 2048 or any(ord(ch) < 32 for ch in raw_url):
+        raise ValueError("official Idena API base URL is empty, too long, or contains control characters")
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("official Idena API base URL scheme must be http or https")
+    if parsed.username or parsed.password:
+        raise ValueError("official Idena API base URL must not include userinfo")
+    if parsed.query or parsed.fragment:
+        raise ValueError("official Idena API base URL must not include query or fragment data")
+    if not parsed.hostname:
+        raise ValueError("official Idena API base URL must include a host")
+    if parsed.scheme == "http":
+        host = parsed.hostname
+        is_loopback = host.lower() == "localhost"
+        if not is_loopback:
+            try:
+                is_loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                is_loopback = False
+        if not is_loopback:
+            raise ValueError("official Idena API base URL must use https unless the host is loopback")
+    return raw_url
+
+
+def official_api_url(base_url: str, path: str, params: Optional[Dict[str, Any]] = None) -> str:
+    base_url = validate_official_api_base_url(base_url)
+    query = urllib.parse.urlencode(
+        {key: value for key, value in (params or {}).items() if value not in (None, "")}
+    )
+    url = f"{base_url}/{path.lstrip('/')}"
+    return f"{url}?{query}" if query else url
+
+
+def read_bounded_http_json_response(resp: Any, label: str, max_bytes: int) -> Any:
+    body = resp.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise RuntimeError(f"{label} response exceeded {max_bytes} bytes")
+    raw = body.decode("utf-8").strip()
+    if not raw:
+        raise RuntimeError(f"{label} response was empty")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} response was not valid JSON: {exc}") from exc
+
+
+def official_api_get_json(
+    *,
+    base_url: str,
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout_seconds: int = DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS,
+    retries: int = DEFAULT_OFFICIAL_API_RETRIES,
+    max_response_bytes: int = MAX_OFFICIAL_API_RESPONSE_BYTES,
+    retry_delay_seconds: float = 1.0,
+) -> Any:
+    if timeout_seconds <= 0:
+        raise ValueError("official Idena API timeout must be greater than zero")
+    if retries < 0:
+        raise ValueError("official Idena API retries must be >= 0")
+    if max_response_bytes <= 0:
+        raise ValueError("official Idena API max response bytes must be greater than zero")
+    url = official_api_url(base_url, path, params)
+    last_error: Optional[BaseException] = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "pohw-idena-reward-indexer/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                status = int(resp.getcode() or 0)
+                if status != 200:
+                    raise RuntimeError(f"official Idena API returned HTTP {status} for {path}")
+                return read_bounded_http_json_response(
+                    resp,
+                    f"official Idena API {path}",
+                    max_response_bytes,
+                )
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in {429, 500, 502, 503, 504} or attempt >= retries:
+                body = exc.read(4096).decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"official Idena API returned HTTP {exc.code} for {path}: {body}"
+                ) from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            delay = retry_delay_seconds * (2**attempt)
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    pass
+            time.sleep(delay)
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+            RuntimeError,
+        ) as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise RuntimeError(f"official Idena API request failed for {path}: {exc}") from exc
+            time.sleep(retry_delay_seconds * (2**attempt))
+    raise RuntimeError(f"official Idena API request failed for {path}: {last_error}")
+
+
+def official_api_result(response: Any, label: str) -> Any:
+    if not isinstance(response, dict):
+        raise RuntimeError(f"{label} response must be a JSON object")
+    if response.get("error"):
+        raise RuntimeError(f"{label} returned error: {response['error']}")
+    return response.get("result")
+
+
+def iter_official_api_pages(
+    *,
+    base_url: str,
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    page_limit: int = DEFAULT_OFFICIAL_API_PAGE_LIMIT,
+    timeout_seconds: int = DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS,
+    retries: int = DEFAULT_OFFICIAL_API_RETRIES,
+    request_delay_seconds: float = 0.0,
+    max_pages: int = 10000,
+) -> Sequence[List[Dict[str, Any]]]:
+    if page_limit <= 0:
+        raise ValueError("official Idena API page limit must be greater than zero")
+    if max_pages <= 0:
+        raise ValueError("official Idena API max pages must be greater than zero")
+    base_params = dict(params or {})
+    base_params["limit"] = page_limit
+    pages: List[List[Dict[str, Any]]] = []
+    continuation_token = base_params.get("continuationToken")
+    for _ in range(max_pages):
+        request_params = dict(base_params)
+        if continuation_token:
+            request_params["continuationToken"] = continuation_token
+        response = official_api_get_json(
+            base_url=base_url,
+            path=path,
+            params=request_params,
+            timeout_seconds=timeout_seconds,
+            retries=retries,
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError(f"official Idena API {path} page response must be an object")
+        result = official_api_result(response, f"official Idena API {path}")
+        if result is None:
+            result = []
+        if not isinstance(result, list):
+            raise RuntimeError(f"official Idena API {path} result must be an array")
+        page: List[Dict[str, Any]] = []
+        for index, item in enumerate(result):
+            if not isinstance(item, dict):
+                raise RuntimeError(f"official Idena API {path} item {index} must be an object")
+            page.append(item)
+        pages.append(page)
+        continuation_token = response.get("continuationToken")
+        if not continuation_token:
+            return pages
+        if request_delay_seconds > 0:
+            time.sleep(request_delay_seconds)
+    raise RuntimeError(f"official Idena API {path} exceeded {max_pages} pages")
+
+
+def get_official_api_last_epoch(
+    *,
+    base_url: str,
+    timeout_seconds: int,
+    retries: int,
+) -> int:
+    response = official_api_get_json(
+        base_url=base_url,
+        path="Epoch/Last",
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+    )
+    result = official_api_result(response, "official Idena API Epoch/Last")
+    if not isinstance(result, dict):
+        raise RuntimeError("official Idena API Epoch/Last result must be an object")
+    return parse_int_field(result.get("epoch"), "last epoch", minimum=1)
+
+
+def get_official_api_epoch_source_block(
+    *,
+    base_url: str,
+    epoch: int,
+    timeout_seconds: int,
+    retries: int,
+) -> Dict[str, Any]:
+    response = official_api_get_json(
+        base_url=base_url,
+        path=f"Epoch/{epoch}/Blocks",
+        params={"limit": 1},
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+    )
+    result = official_api_result(response, f"official Idena API Epoch/{epoch}/Blocks")
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(f"official Idena API returned no blocks for epoch {epoch}")
+    block = result[0]
+    if not isinstance(block, dict):
+        raise RuntimeError(f"official Idena API block for epoch {epoch} must be an object")
+    return {
+        "height": parse_int_field(block.get("height"), "epoch source block height", minimum=1),
+        "hash": normalize_hash(block.get("hash"), "epoch source block hash"),
+        "timestamp": block.get("timestamp") or utc_now(),
+    }
+
+
+def decimal_fields_have_positive_amount(item: Dict[str, Any]) -> bool:
+    return decimal_to_atoms(item.get("balance", 0)) + decimal_to_atoms(item.get("stake", 0)) > 0
+
+
+def collect_official_api_validation_rewards(
+    *,
+    base_url: str,
+    epoch: int,
+    source_block: Dict[str, Any],
+    page_limit: int,
+    timeout_seconds: int,
+    retries: int,
+    request_delay_seconds: float,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    events: List[Dict[str, Any]] = []
+    addresses: List[str] = []
+    seen_addresses = set()
+    pages = iter_official_api_pages(
+        base_url=base_url,
+        path=f"Epoch/{epoch}/IdentityRewards",
+        page_limit=page_limit,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+        request_delay_seconds=request_delay_seconds,
+    )
+    for page in pages:
+        for identity_rewards in page:
+            address = normalize_address(identity_rewards.get("address"))
+            if not IDENA_ADDRESS_RE.fullmatch(address):
+                raise ValueError(f"invalid Idena address in official API rewards: {address!r}")
+            if address not in seen_addresses:
+                seen_addresses.add(address)
+                addresses.append(address)
+            raw_rewards = identity_rewards.get("rewards") or []
+            if not isinstance(raw_rewards, list):
+                raise RuntimeError("official Idena API identity rewards field must be an array")
+            for reward in raw_rewards:
+                if not isinstance(reward, dict):
+                    raise RuntimeError("official Idena API reward item must be an object")
+                if not decimal_fields_have_positive_amount(reward):
+                    continue
+                event = {
+                    "idena_address": address,
+                    "epoch": epoch,
+                    "source_height": source_block["height"],
+                    "source_hash": source_block["hash"],
+                    "timestamp": source_block["timestamp"],
+                    "reward_type": reward.get("type"),
+                    "balance": reward.get("balance", "0"),
+                    "stake": reward.get("stake", "0"),
+                    "source_table": "official_api_epoch_identity_rewards",
+                }
+                events.append(event)
+    return events, addresses
+
+
+def collect_official_api_epoch_identity_addresses(
+    *,
+    base_url: str,
+    epoch: int,
+    page_limit: int,
+    timeout_seconds: int,
+    retries: int,
+    request_delay_seconds: float,
+) -> List[str]:
+    addresses: List[str] = []
+    seen = set()
+    pages = iter_official_api_pages(
+        base_url=base_url,
+        path=f"Epoch/{epoch}/Identities",
+        page_limit=page_limit,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+        request_delay_seconds=request_delay_seconds,
+    )
+    for page in pages:
+        for identity in page:
+            address = normalize_address(identity.get("address"))
+            if not IDENA_ADDRESS_RE.fullmatch(address):
+                raise ValueError(f"invalid Idena address in official API identities: {address!r}")
+            if address not in seen:
+                seen.add(address)
+                addresses.append(address)
+    return addresses
+
+
+def collect_official_api_mining_rewards_for_address(
+    *,
+    base_url: str,
+    address: str,
+    epoch: int,
+    source_block: Dict[str, Any],
+    page_limit: int,
+    timeout_seconds: int,
+    retries: int,
+    request_delay_seconds: float,
+) -> List[Dict[str, Any]]:
+    address = normalize_address(address)
+    pages = iter_official_api_pages(
+        base_url=base_url,
+        path=f"Address/{address}/MiningRewardSummaries",
+        page_limit=page_limit,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+        request_delay_seconds=request_delay_seconds,
+        max_pages=1000,
+    )
+    events: List[Dict[str, Any]] = []
+    for page in pages:
+        older_than_target = False
+        for summary in page:
+            item_epoch = parse_int_field(summary.get("epoch"), "mining summary epoch", minimum=1)
+            if item_epoch < epoch:
+                older_than_target = True
+                continue
+            if item_epoch != epoch:
+                continue
+            amount = summary.get("amount", "0")
+            if decimal_to_atoms(amount) <= 0:
+                continue
+            events.append(
+                {
+                    "idena_address": address,
+                    "epoch": epoch,
+                    "source_height": source_block["height"],
+                    "source_hash": source_block["hash"],
+                    "timestamp": source_block["timestamp"],
+                    "kind": "FinalCommittee",
+                    "amount": amount,
+                    "source_table": "official_api_mining_reward_summaries",
+                    "penalty": summary.get("penalty", "0"),
+                }
+            )
+        if older_than_target:
+            break
+    return events
+
+
+def sync_official_api_rewards(
+    *,
+    ledger: RewardLedger,
+    api_base_url: str = DEFAULT_OFFICIAL_API_BASE_URL,
+    epochs: Optional[Sequence[int]] = None,
+    completed_epochs: int = 1,
+    include_mining_summaries: bool = True,
+    page_limit: int = DEFAULT_OFFICIAL_API_PAGE_LIMIT,
+    mining_page_limit: int = 20,
+    timeout_seconds: int = DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS,
+    retries: int = DEFAULT_OFFICIAL_API_RETRIES,
+    request_delay_seconds: float = 0.0,
+    source: str = OFFICIAL_API_SOURCE,
+) -> Dict[str, Any]:
+    api_base_url = validate_official_api_base_url(api_base_url)
+    source = validate_source_label(source)
+    if epochs:
+        selected_epochs = sorted({parse_int_field(epoch, "epoch", minimum=1) for epoch in epochs})
+    else:
+        if completed_epochs <= 0:
+            raise ValueError("completed_epochs must be greater than zero when no explicit epochs are provided")
+        last_epoch = get_official_api_last_epoch(
+            base_url=api_base_url,
+            timeout_seconds=timeout_seconds,
+            retries=retries,
+        )
+        first_epoch = max(1, last_epoch - completed_epochs)
+        selected_epochs = list(range(first_epoch, last_epoch))
+    if not selected_epochs:
+        raise ValueError("no completed official API epochs selected")
+
+    epoch_results: List[Dict[str, Any]] = []
+    total_exported = 0
+    total_imported = 0
+    for epoch in selected_epochs:
+        source_block = get_official_api_epoch_source_block(
+            base_url=api_base_url,
+            epoch=epoch,
+            timeout_seconds=timeout_seconds,
+            retries=retries,
+        )
+        validation_events, reward_addresses = collect_official_api_validation_rewards(
+            base_url=api_base_url,
+            epoch=epoch,
+            source_block=source_block,
+            page_limit=page_limit,
+            timeout_seconds=timeout_seconds,
+            retries=retries,
+            request_delay_seconds=request_delay_seconds,
+        )
+        events = list(validation_events)
+        mining_events: List[Dict[str, Any]] = []
+        if include_mining_summaries:
+            identity_addresses = collect_official_api_epoch_identity_addresses(
+                base_url=api_base_url,
+                epoch=epoch,
+                page_limit=page_limit,
+                timeout_seconds=timeout_seconds,
+                retries=retries,
+                request_delay_seconds=request_delay_seconds,
+            )
+            addresses = sorted(set(reward_addresses) | set(identity_addresses))
+            for address in addresses:
+                mining_events.extend(
+                    collect_official_api_mining_rewards_for_address(
+                        base_url=api_base_url,
+                        address=address,
+                        epoch=epoch,
+                        source_block=source_block,
+                        page_limit=mining_page_limit,
+                        timeout_seconds=timeout_seconds,
+                        retries=retries,
+                        request_delay_seconds=request_delay_seconds,
+                    )
+                )
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+            events.extend(mining_events)
+        if not events:
+            raise RuntimeError(f"official Idena API exported no reward events for epoch {epoch}")
+        epoch_source = f"{source}:epoch:{epoch}"
+        imported = ledger.import_statscollector_replay_events(
+            events,
+            source=epoch_source,
+            replace_source=True,
+        )
+        total_exported += len(events)
+        total_imported += imported
+        epoch_results.append(
+            {
+                "epoch": epoch,
+                "source": epoch_source,
+                "sourceHeight": source_block["height"],
+                "sourceHash": source_block["hash"],
+                "validationEvents": len(validation_events),
+                "miningEvents": len(mining_events),
+                "exportedEvents": len(events),
+                "importedEvents": imported,
+            }
+        )
+
+    row = ledger.conn.execute(
+        """
+        SELECT COUNT(*), COALESCE(MAX(height), 0)
+        FROM reward_events
+        WHERE source LIKE ? AND confidence = 'exact'
+        """,
+        (f"{source}:epoch:%",),
+    ).fetchone()
+    ledger.set_meta("last_official_api_sync_at", utc_now(), commit=False)
+    ledger.set_meta("last_official_api_base_url", api_base_url, commit=False)
+    ledger.set_meta("last_official_api_epochs", ",".join(str(epoch) for epoch in selected_epochs), commit=False)
+    ledger.conn.commit()
+    return {
+        "source": source,
+        "apiBaseUrl": api_base_url,
+        "epochs": epoch_results,
+        "exportedEvents": total_exported,
+        "importedEvents": total_imported,
         "exactEventsInLedger": int(row[0] or 0),
         "lastExactRewardHeight": int(row[1] or 0),
     }
@@ -2223,6 +2711,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     exact_sync.add_argument("--max-output-bytes", type=int, default=MAX_OFFICIAL_INDEXER_EXPORT_BYTES)
     exact_sync.add_argument("--source", default=STATS_COLLECTOR_SOURCE)
 
+    api_sync = sub.add_parser(
+        "sync-official-api",
+        help="Import exact completed-epoch rewards from the official public Idena API",
+    )
+    api_sync.add_argument("--api-base-url", default=DEFAULT_OFFICIAL_API_BASE_URL)
+    api_sync.add_argument(
+        "--epoch",
+        type=int,
+        action="append",
+        help="Completed epoch to import; repeat for multiple epochs. Defaults to previous completed epoch.",
+    )
+    api_sync.add_argument("--completed-epochs", type=int, default=1)
+    api_sync.add_argument("--page-limit", type=int, default=DEFAULT_OFFICIAL_API_PAGE_LIMIT)
+    api_sync.add_argument("--mining-page-limit", type=int, default=20)
+    api_sync.add_argument("--timeout-seconds", type=int, default=DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS)
+    api_sync.add_argument("--retries", type=int, default=DEFAULT_OFFICIAL_API_RETRIES)
+    api_sync.add_argument("--request-delay-seconds", type=float, default=0.0)
+    api_sync.add_argument("--source", default=OFFICIAL_API_SOURCE)
+    api_sync.add_argument(
+        "--skip-mining-summaries",
+        action="store_true",
+        help="Import validation/staking/session rewards only; mining summaries are included by default.",
+    )
+
     query = sub.add_parser("query")
     query.add_argument("address")
     query.add_argument("--epoch", type=int)
@@ -2318,6 +2830,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     psql_bin=args.psql_bin,
                     timeout_seconds=args.timeout_seconds,
                     max_output_bytes=args.max_output_bytes,
+                    source=args.source,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            print_json(result)
+            return 0
+        if args.command == "sync-official-api":
+            try:
+                result = sync_official_api_rewards(
+                    ledger=ledger,
+                    api_base_url=args.api_base_url,
+                    epochs=args.epoch,
+                    completed_epochs=args.completed_epochs,
+                    include_mining_summaries=not args.skip_mining_summaries,
+                    page_limit=args.page_limit,
+                    mining_page_limit=args.mining_page_limit,
+                    timeout_seconds=args.timeout_seconds,
+                    retries=args.retries,
+                    request_delay_seconds=args.request_delay_seconds,
                     source=args.source,
                 )
             except (OSError, RuntimeError, ValueError) as exc:

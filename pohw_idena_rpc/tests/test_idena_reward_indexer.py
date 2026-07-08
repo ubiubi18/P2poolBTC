@@ -16,6 +16,7 @@ from pohw_idena_rpc.idena_reward_indexer import (
     classify_delta,
     collapse_rolling_changes,
     decimal_to_atoms,
+    sync_official_api_rewards,
     sync_official_indexer_rewards,
     validate_rpc_url,
 )
@@ -87,7 +88,7 @@ class RewardIndexerTests(unittest.TestCase):
             child_dir.mkdir(parents=True)
             os.symlink(real_dir, link_dir)
 
-            with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor"):
+            with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor|group/world writable"):
                 RewardLedger(link_dir / "child" / "rewards.sqlite3")
             self.assertFalse((child_dir / "rewards.sqlite3").exists())
 
@@ -268,6 +269,57 @@ class RewardIndexerTests(unittest.TestCase):
         )
         self.assertEqual(exported[0]["idena_address"], "0xabc")
         self.assertEqual(exported[0]["amount_atoms"], 100)
+
+    def test_export_replay_uses_exact_rows_when_legacy_inferred_rows_exist(self):
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "rewards.sqlite3"
+            ledger = RewardLedger(db)
+            base_event = {
+                "id": "inferred",
+                "address": "0x" + "a" * 40,
+                "epoch": 211,
+                "height": 10,
+                "block_hash": "0x" + "1" * 64,
+                "timestamp": "2026-07-03T00:00:00Z",
+                "kind": "session_reward",
+                "direction": "credit",
+                "amount_atoms": 100,
+                "balance_atoms_delta": 100,
+                "stake_atoms_delta": 0,
+                "replenished_stake_atoms_delta": 0,
+                "locked_stake_atoms_delta": 0,
+                "source": "rolling_delta_import",
+                "confidence": "inferred",
+                "liability_status": "",
+                "counterparty_address": "",
+                "tx_hash": "",
+                "notes": "",
+                "raw_json": "{}",
+                "created_at": "2026-07-03T00:00:00Z",
+            }
+            self.assertTrue(ledger.insert_event(base_event))
+            self.assertTrue(
+                ledger.insert_event(
+                    {
+                        **base_event,
+                        "id": "exact",
+                        "height": 20,
+                        "block_hash": "0x" + "2" * 64,
+                        "kind": "stats_validation_reward",
+                        "amount_atoms": 200,
+                        "balance_atoms_delta": 200,
+                        "source": "idena_public_api:epoch:211",
+                        "confidence": "exact",
+                    }
+                )
+            )
+            ledger.conn.commit()
+            exported = ledger.export_replay_events(require_exact=True)
+            ledger.close()
+
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["amount_atoms"], 200)
+        self.assertEqual(exported[0]["source_height"], 20)
 
     def test_export_replay_require_exact_rejects_empty_ledger(self):
         with TemporaryDirectory() as tmp:
@@ -564,6 +616,95 @@ class RewardIndexerTests(unittest.TestCase):
         self.assertEqual(len(exported), 1)
         self.assertEqual(exported[0]["idena_address"], "0x" + "3" * 40)
 
+    def test_sync_official_api_imports_completed_epoch_rewards_and_mining(self):
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "rewards.sqlite3"
+            ledger = RewardLedger(db)
+            address_a = "0x" + "a" * 40
+            address_b = "0x" + "b" * 40
+            source_hash = "0x" + "7" * 64
+
+            def response(payload):
+                return FakeRpcResponse(body=json.dumps(payload).encode("utf-8"))
+
+            def fake_urlopen(req, timeout=0):
+                url = req.full_url
+                parsed = reward_indexer.urllib.parse.urlparse(url)
+                path = parsed.path
+                if path == "/api/Epoch/Last":
+                    return response({"result": {"epoch": 212}})
+                if path == "/api/Epoch/211/Blocks":
+                    return response(
+                        {
+                            "result": [
+                                {
+                                    "height": 11000449,
+                                    "hash": source_hash,
+                                    "timestamp": "2026-07-06T15:33:48Z",
+                                }
+                            ]
+                        }
+                    )
+                if path == "/api/Epoch/211/IdentityRewards":
+                    return response(
+                        {
+                            "result": [
+                                {
+                                    "address": address_a,
+                                    "rewards": [
+                                        {"balance": "1", "stake": "2", "type": "Staking"},
+                                        {"balance": "3", "stake": "0", "type": "Invitations"},
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                if path == "/api/Epoch/211/Identities":
+                    return response(
+                        {
+                            "result": [
+                                {"address": address_a},
+                                {"address": address_b},
+                            ]
+                        }
+                    )
+                if path == f"/api/Address/{address_a}/MiningRewardSummaries":
+                    return response({"result": [{"epoch": 211, "amount": "4", "penalty": "0"}]})
+                if path == f"/api/Address/{address_b}/MiningRewardSummaries":
+                    return response({"result": [{"epoch": 210, "amount": "5", "penalty": "0"}]})
+                raise AssertionError(f"unexpected official API URL: {url}")
+
+            with patch.object(reward_indexer.urllib.request, "urlopen", side_effect=fake_urlopen):
+                result = sync_official_api_rewards(
+                    ledger=ledger,
+                    api_base_url="https://api.example.test/api",
+                    completed_epochs=1,
+                    include_mining_summaries=True,
+                    retries=0,
+                )
+            exported = ledger.export_replay_events(require_exact=True)
+            query = ledger.query_address(address_a, 211)
+            ledger.close()
+
+        self.assertEqual(result["exportedEvents"], 3)
+        self.assertEqual(result["importedEvents"], 3)
+        self.assertEqual(
+            [(event["kind"], event["amount_atoms"]) for event in exported],
+            [
+                ("Validation", decimal_to_atoms("3")),
+                ("FinalCommittee", decimal_to_atoms("4")),
+            ],
+        )
+        self.assertEqual(exported[0]["source_hash"], source_hash)
+        self.assertEqual(
+            sorted(total["kind"] for total in query["totals"]),
+            [
+                "stats_final_committee_reward",
+                "stats_invitation_reward",
+                "stats_validation_reward",
+            ],
+        )
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_database_url_file_rejects_symlink_ancestor(self):
         with TemporaryDirectory() as tmp:
@@ -580,7 +721,7 @@ class RewardIndexerTests(unittest.TestCase):
             )
             url_file.chmod(0o600)
 
-            with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor"):
+            with self.assertRaisesRegex(ValueError, "unsafe symlink ancestor|group/world writable"):
                 reward_indexer.load_official_indexer_database_url(
                     database_url_file=link_dir / "child" / "idena-indexer-db.url",
                     database_url_env="IDENA_INDEXER_DATABASE_URL",
@@ -752,7 +893,7 @@ class RewardIndexerTests(unittest.TestCase):
             key_file.write_text("secret-key\n", encoding="utf-8")
             key_file.chmod(0o600)
 
-            with self.assertRaisesRegex(RuntimeError, "unsafe symlink ancestor"):
+            with self.assertRaisesRegex(RuntimeError, "unsafe symlink ancestor|group/world writable"):
                 IdenaRPCClientMinimal(
                     url="http://127.0.0.1:9009",
                     api_key_file=str(link_dir / "child" / "api.key"),

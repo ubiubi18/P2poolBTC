@@ -67,6 +67,15 @@ ensure_local_dir() {
   fi
 }
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 if ! python3 - "$RPC_URL" "$ALLOW_REMOTE_RPC" <<'PY'
 import ipaddress
 import sys
@@ -277,7 +286,14 @@ if [[ -n "${IDENA_REWARD_EVENTS_FILE:-}" ]]; then
   indexer_args+=(--reward-events-file "$IDENA_REWARD_EVENTS_FILE")
 elif [[ -n "${IDENA_REWARD_LEDGER_DB:-}" ]]; then
   exact_sync_configured=false
+  official_indexer_sync_configured=false
+  official_api_sync_configured=false
   if [[ -n "${IDENA_INDEXER_DATABASE_URL_FILE:-}" || -n "${IDENA_INDEXER_DATABASE_URL:-}" ]]; then
+    official_indexer_sync_configured=true
+    exact_sync_configured=true
+  fi
+  if is_truthy "${IDENA_OFFICIAL_API_SYNC:-}"; then
+    official_api_sync_configured=true
     exact_sync_configured=true
   fi
   if [[ -L "$IDENA_REWARD_LEDGER_DB" ]]; then
@@ -298,7 +314,10 @@ elif [[ -n "${IDENA_REWARD_LEDGER_DB:-}" ]]; then
     echo "Idena reward indexer script must be readable: $REWARD_INDEXER_SCRIPT" >&2
     exit 1
   fi
-  if [[ "$exact_sync_configured" == true ]]; then
+  if [[ "$official_indexer_sync_configured" == true ]]; then
+    if [[ "$official_api_sync_configured" == true ]]; then
+      echo "Both official idena-indexer Postgres and public API sync are configured; using Postgres exact reward sync."
+    fi
     exact_sync_args=(
       --db "$IDENA_REWARD_LEDGER_DB"
       sync-official-indexer
@@ -315,6 +334,50 @@ elif [[ -n "${IDENA_REWARD_LEDGER_DB:-}" ]]; then
     fi
     if ! python3 "$REWARD_INDEXER_SCRIPT" "${exact_sync_args[@]}"; then
       echo "Official idena-indexer exact reward sync failed; skipping consensus snapshot."
+      exit 0
+    fi
+  elif [[ "$official_api_sync_configured" == true ]]; then
+    exact_sync_args=(
+      --db "$IDENA_REWARD_LEDGER_DB"
+      sync-official-api
+    )
+    if [[ -n "${IDENA_OFFICIAL_API_BASE_URL:-}" ]]; then
+      exact_sync_args+=(--api-base-url "$IDENA_OFFICIAL_API_BASE_URL")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_EPOCHS:-}" ]]; then
+      IFS=',' read -r -a official_api_epochs <<< "$IDENA_OFFICIAL_API_EPOCHS"
+      for official_api_epoch in "${official_api_epochs[@]}"; do
+        official_api_epoch="${official_api_epoch//[[:space:]]/}"
+        if [[ -n "$official_api_epoch" ]]; then
+          exact_sync_args+=(--epoch "$official_api_epoch")
+        fi
+      done
+    elif [[ -n "${IDENA_OFFICIAL_API_COMPLETED_EPOCHS:-}" ]]; then
+      exact_sync_args+=(--completed-epochs "$IDENA_OFFICIAL_API_COMPLETED_EPOCHS")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_PAGE_LIMIT:-}" ]]; then
+      exact_sync_args+=(--page-limit "$IDENA_OFFICIAL_API_PAGE_LIMIT")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_MINING_PAGE_LIMIT:-}" ]]; then
+      exact_sync_args+=(--mining-page-limit "$IDENA_OFFICIAL_API_MINING_PAGE_LIMIT")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_TIMEOUT_SECONDS:-}" ]]; then
+      exact_sync_args+=(--timeout-seconds "$IDENA_OFFICIAL_API_TIMEOUT_SECONDS")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_RETRIES:-}" ]]; then
+      exact_sync_args+=(--retries "$IDENA_OFFICIAL_API_RETRIES")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_REQUEST_DELAY_SECONDS:-}" ]]; then
+      exact_sync_args+=(--request-delay-seconds "$IDENA_OFFICIAL_API_REQUEST_DELAY_SECONDS")
+    fi
+    if [[ -n "${IDENA_OFFICIAL_API_SOURCE:-}" ]]; then
+      exact_sync_args+=(--source "$IDENA_OFFICIAL_API_SOURCE")
+    fi
+    if is_truthy "${IDENA_OFFICIAL_API_SKIP_MINING_SUMMARIES:-}"; then
+      exact_sync_args+=(--skip-mining-summaries)
+    fi
+    if ! python3 "$REWARD_INDEXER_SCRIPT" "${exact_sync_args[@]}"; then
+      echo "Official Idena public API exact reward sync failed; skipping consensus snapshot."
       exit 0
     fi
   fi
