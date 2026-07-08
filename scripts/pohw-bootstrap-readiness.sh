@@ -245,6 +245,9 @@ SNAPSHOT_DIR="${POHW_SNAPSHOT_DIR:-$DATADIR/snapshots}"
 OUTPUT_ROOT="${POHW_EXPERIMENT_OUTPUT_ROOT:-$WORKDIR/output}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/work-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)}"
 MINER_ID="${POHW_MINER_ID:-}"
+HEALTH_STATUS_FILE="${POHW_HEALTH_STATUS_FILE:-$DATADIR/health/status.json}"
+HEALTH_SCRIPT="${POHW_HEALTH_SCRIPT:-$WORKDIR/scripts/pohw-health-status.py}"
+HEALTH_MAX_AGE_SECONDS="${POHW_HEALTH_MAX_AGE_SECONDS:-180}"
 if [[ -z "$MINER_ID" ]]; then
   echo "POHW_MINER_ID is required." >&2
   exit 1
@@ -283,6 +286,55 @@ reject_symlink_ancestor "$(dirname "$OUTPUT_DIR")"
 mkdir -p "$(dirname "$OUTPUT_DIR")"
 mkdir "$OUTPUT_DIR"
 chmod 700 "$OUTPUT_DIR"
+
+if [[ "$MODE" == "real" && "${POHW_BOOTSTRAP_IGNORE_HEALTH:-false}" != "true" && -f "$HEALTH_STATUS_FILE" ]]; then
+  if [[ ! -r "$HEALTH_SCRIPT" ]]; then
+    echo "PoHW health script is not readable: $HEALTH_SCRIPT" >&2
+    exit 1
+  fi
+  set +e
+  python3 "$HEALTH_SCRIPT" \
+    --check-mining-ready \
+    --status-file "$HEALTH_STATUS_FILE" \
+    --max-age-seconds "$HEALTH_MAX_AGE_SECONDS" \
+    > "$OUTPUT_DIR/health-readiness.txt" 2>&1
+  health_status=$?
+  set -e
+  if (( health_status != 0 )); then
+    cat "$OUTPUT_DIR/health-readiness.txt" >&2
+    python3 - "$OUTPUT_DIR/status.json" "$HEALTH_STATUS_FILE" <<'PY'
+import json
+import pathlib
+import sys
+
+out = pathlib.Path(sys.argv[1])
+health_file = pathlib.Path(sys.argv[2])
+try:
+    health = json.loads(health_file.read_text(encoding="utf-8"))
+except Exception:
+    health = {}
+readiness = health.get("readiness") if isinstance(health, dict) else {}
+blockers = readiness.get("blockers") if isinstance(readiness, dict) else []
+if not isinstance(blockers, list):
+    blockers = []
+out.write_text(
+    json.dumps(
+        {
+            "status": "bitcoin_not_ready",
+            "detail": "PoHW health status is not mining-ready; no work template or share was appended.",
+            "healthBlockers": blockers,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+    echo "PoHW health is not mining-ready; wrote $OUTPUT_DIR/status.json" >&2
+    exit 0
+  fi
+fi
 
 split_words() {
   printf '%s\n' "$1" | tr ',' ' ' | tr '\n' ' '

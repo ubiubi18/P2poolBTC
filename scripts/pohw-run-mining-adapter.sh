@@ -37,6 +37,27 @@ if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" && "${POHW_STRATUM_B
   exit 1
 fi
 
+check_health_ready_for_rpc_job() {
+  local health_file="${POHW_HEALTH_STATUS_FILE:-$DATADIR/health/status.json}"
+  local health_script="${POHW_HEALTH_SCRIPT:-$WORKDIR/scripts/pohw-health-status.py}"
+  local max_age_seconds="${POHW_HEALTH_MAX_AGE_SECONDS:-180}"
+  if [[ "${POHW_STRATUM_IGNORE_HEALTH:-false}" == "true" || ! -f "$health_file" ]]; then
+    return 0
+  fi
+  if [[ ! -r "$health_script" ]]; then
+    echo "PoHW health script is not readable: $health_script" >&2
+    exit 1
+  fi
+  python3 "$health_script" \
+    --check-mining-ready \
+    --status-file "$health_file" \
+    --max-age-seconds "$max_age_seconds"
+}
+
+if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+  check_health_ready_for_rpc_job
+fi
+
 if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
   if [[ -z "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" ]]; then
     echo "POHW_STRATUM_PAYOUT_SCHEDULE_FILE is required when building a PoHW Stratum job from RPC." >&2

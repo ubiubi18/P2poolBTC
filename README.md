@@ -649,12 +649,15 @@ pnpm --dir ui/pohw-dashboard install
 pnpm --dir ui/pohw-dashboard build
 sudo install -d -m 700 -o ubuntu -g ubuntu /etc/pohw /mnt/ssd/pohw-p2pool
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/dashboard-ui-cache
+sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/health
 openssl rand -hex 32 | sudo tee /etc/pohw/dashboard-api.token >/dev/null
 openssl rand -hex 24 | sudo tee /etc/pohw/stratum.password >/dev/null
 sudo chmod 600 /etc/pohw/dashboard-api.token
 sudo chmod 600 /etc/pohw/stratum.password
 sudo chown ubuntu:ubuntu /etc/pohw/dashboard-api.token /etc/pohw/stratum.password
 sudo install -m 600 -o ubuntu -g ubuntu deploy/mining-adapter-job.example.json /mnt/ssd/pohw-p2pool/mining-job.example.json
+sudo cp deploy/systemd/pohw-health-status.service /etc/systemd/system/
+sudo cp deploy/systemd/pohw-health-status.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
@@ -664,7 +667,7 @@ sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.service /etc/systemd/syst
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.path /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
+sudo systemctl enable --now pohw-health-status.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
 ```
 
 Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and POHW commitment file paths for the payout-aware job. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
@@ -687,6 +690,7 @@ POHW_DASHBOARD_UI_PORT=5176
 POHW_DASHBOARD_UI_API_URL=http://127.0.0.1:40407/dashboard.json
 POHW_DASHBOARD_UI_CACHE_DIR=/mnt/ssd/pohw-p2pool/dashboard-ui-cache
 POHW_DASHBOARD_IDENA_ADDRESS=0x...
+POHW_HEALTH_STATUS_FILE=/mnt/ssd/pohw-p2pool/health/status.json
 POHW_STRATUM_BIND_ADDR=<pi-wlan-ip>:3333
 POHW_STRATUM_ALLOW_NON_LOOPBACK=true
 POHW_STRATUM_PASSWORD_FILE=/etc/pohw/stratum.password
@@ -713,6 +717,14 @@ open http://127.0.0.1:5176/
 ```
 
 This requires SSH reachability to the Pi. Away from home, use a private VPN such as WireGuard/Tailscale, or expose only SSH with key auth and firewalling; do not expose `5176` or `40407` directly.
+
+For a vacation-safe command-line status that avoids keys, cookies, addresses, and blockchain data, use the health monitor summary:
+
+```sh
+ssh <pi-ssh-host> '/usr/bin/python3 /mnt/ssd/p2pool/scripts/pohw-health-status.py --format summary'
+```
+
+The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure.
 
 The default cookie watcher assumes `BITCOIN_RPC_COOKIE_FILE=/mnt/ssd/bitcoin/bitcoin-core-mainnet/.cookie`. If you use a different Bitcoin cookie path, enable the templated watcher for that path instead:
 

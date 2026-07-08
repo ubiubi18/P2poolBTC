@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import datetime as dt
 from pathlib import Path
 
 
@@ -106,6 +107,50 @@ esac
             self.assertEqual(len(status_files), 1)
             status = json.loads(status_files[0].read_text(encoding="utf-8"))
             self.assertEqual(status["status"], "bitcoin_not_ready")
+
+    def test_real_mode_uses_health_status_before_bitcoin_rpc(self) -> None:
+        fake = """#!/usr/bin/env bash
+printf 'unexpected call\\n' >> "$(dirname "$0")/calls.txt"
+exit 99
+"""
+        with tempfile.TemporaryDirectory(prefix="pohw-bootstrap-health-") as temp:
+            root = Path(temp)
+            env_file = self.make_fixture(root, fake)
+            health_file = root / "health.json"
+            health_file.write_text(
+                json.dumps(
+                    {
+                        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "readiness": {
+                            "miningReady": False,
+                            "blockers": ["bitcoin_node_network_limited"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with env_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"POHW_HEALTH_STATUS_FILE={health_file}\n")
+                handle.write(f"POHW_HEALTH_SCRIPT={REPO_ROOT / 'scripts' / 'pohw-health-status.py'}\n")
+
+            result = subprocess.run(
+                [str(BOOTSTRAP_SCRIPT), str(env_file), "--mode", "real"],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            calls_file = root / "calls.txt"
+            status_files = list((root / "output").glob("work-bootstrap-*/status.json"))
+            status = json.loads(status_files[0].read_text(encoding="utf-8")) if status_files else {}
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PoHW health is not mining-ready", result.stderr)
+        self.assertFalse(calls_file.exists())
+        self.assertEqual(len(status_files), 1)
+        self.assertEqual(status["status"], "bitcoin_not_ready")
+        self.assertEqual(status["healthBlockers"], ["bitcoin_node_network_limited"])
 
     def test_real_mode_fails_on_non_ibd_bitcoin_rpc_error(self) -> None:
         fake = """#!/usr/bin/env bash

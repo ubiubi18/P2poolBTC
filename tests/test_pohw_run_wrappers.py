@@ -2,6 +2,8 @@ import os
 import subprocess
 import tempfile
 import unittest
+import json
+import datetime as dt
 from pathlib import Path
 
 
@@ -144,6 +146,47 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertNotIn("--rpc-password", args)
         self.assertNotIn("super-secret-rpc-password", args)
         self.assertIn("run-mining-adapter", args)
+
+    def test_mining_adapter_health_gate_blocks_rpc_job_refresh(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-health-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            health_file = root / "health.json"
+            health_file.write_text(
+                json.dumps(
+                    {
+                        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "readiness": {
+                            "miningReady": False,
+                            "blockers": ["bitcoin_rpc_timeout"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_BUILD_JOB_FROM_RPC": "true",
+                    "POHW_HEALTH_STATUS_FILE": str(health_file),
+                    "POHW_HEALTH_SCRIPT": str(REPO_ROOT / "scripts" / "pohw-health-status.py"),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PoHW health is not mining-ready", result.stderr)
+        self.assertFalse(args_out.exists())
 
     def test_mining_adapter_can_refresh_pohw_job_from_local_rpc_before_start(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-pohw-rpc-job-") as temp:

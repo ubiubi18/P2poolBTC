@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic PoHW host health status
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=pohw-health-status.service
+
+[Install]
+WantedBy=timers.target
