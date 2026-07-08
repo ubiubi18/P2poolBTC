@@ -652,6 +652,7 @@ sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/dashboard-ui-cac
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/health
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/auto-bootstrap
 sudo install -d -m 700 -o root -g root /mnt/ssd/pohw-p2pool/network-watchdog
+sudo install -d -m 700 -o root -g root /mnt/ssd/pohw-p2pool/idena-priority
 openssl rand -hex 32 | sudo tee /etc/pohw/dashboard-api.token >/dev/null
 openssl rand -hex 24 | sudo tee /etc/pohw/stratum.password >/dev/null
 sudo chmod 600 /etc/pohw/dashboard-api.token
@@ -664,6 +665,8 @@ sudo cp deploy/systemd/pohw-auto-bootstrap.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-auto-bootstrap.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-network-watchdog.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-network-watchdog.timer /etc/systemd/system/
+sudo cp deploy/systemd/pohw-idena-priority-guard.service /etc/systemd/system/
+sudo cp deploy/systemd/pohw-idena-priority-guard.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
@@ -675,7 +678,7 @@ sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system
 sudo install -d -m 755 /etc/systemd/system.conf.d
 sudo cp deploy/systemd/system.conf.d/10-pohw-watchdog.conf /etc/systemd/system.conf.d/
 sudo systemctl daemon-reload
-sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-network-watchdog.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
+sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-network-watchdog.timer pohw-idena-priority-guard.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
 ```
 
 Or install only the self-recovery layer idempotently:
@@ -713,6 +716,12 @@ POHW_NETWORK_WATCHDOG_TARGETS=
 POHW_NETWORK_WATCHDOG_RESTART_THRESHOLD=3
 POHW_NETWORK_WATCHDOG_REBOOT_THRESHOLD=8
 POHW_NETWORK_WATCHDOG_DRY_RUN=false
+POHW_IDENA_PRIORITY_STATE_DIR=/mnt/ssd/pohw-p2pool/idena-priority
+POHW_IDENA_PRIORITY_LEAD_SECONDS=3600
+POHW_IDENA_PRIORITY_COOLDOWN_SECONDS=1800
+POHW_IDENA_PRIORITY_RESTORE_BITCOIN=true
+POHW_IDENA_PRIORITY_FORCE=false
+POHW_IDENA_PRIORITY_DRY_RUN=false
 POHW_STRATUM_BIND_ADDR=<pi-wlan-ip>:3333
 POHW_STRATUM_ALLOW_NON_LOOPBACK=true
 POHW_STRATUM_PASSWORD_FILE=/etc/pohw/stratum.password
@@ -751,6 +760,13 @@ The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 
 `pohw-network-watchdog.timer` is the host self-recovery layer for cases where the Pi stays powered but disappears from the LAN. By default it pings the current default gateway once per minute, restarts the active network manager after 3 failed checks, and requests a reboot after 8 failed checks. Set `POHW_NETWORK_WATCHDOG_TARGETS` to comma-separated stable targets if the default gateway is not enough for your network. The timer writes secret-free state to `/mnt/ssd/pohw-p2pool/network-watchdog/status.json`.
+
+`pohw-idena-priority-guard.timer` protects validation/flip sessions from Bitcoin background validation load. It checks local `dna_epoch` once per minute, stops `bitcoind-mainnet.service` when the current Idena period looks like a flip, short, long, or validation period, or when `nextValidation` is inside `POHW_IDENA_PRIORITY_LEAD_SECONDS`, and restarts Bitcoin after `POHW_IDENA_PRIORITY_COOLDOWN_SECONDS` only if the guard stopped it itself. The default lead is 1 hour and the default cooldown is 30 minutes. For an emergency manual pause, set `POHW_IDENA_PRIORITY_FORCE=true` in `/etc/pohw/p2pool.env` and restart the timer service; set it back to `false` after validation.
+
+```sh
+sudo systemctl start pohw-idena-priority-guard.service
+sudo cat /mnt/ssd/pohw-p2pool/idena-priority/status.json
+```
 
 The hardware watchdog config in `deploy/systemd/system.conf.d/10-pohw-watchdog.conf` lets systemd feed the Raspberry Pi watchdog device. After the next reboot, the host should reboot itself if PID 1 or the kernel stops scheduling long enough that the watchdog is no longer fed. Check support with:
 
