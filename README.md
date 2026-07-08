@@ -651,6 +651,7 @@ sudo install -d -m 700 -o ubuntu -g ubuntu /etc/pohw /mnt/ssd/pohw-p2pool
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/dashboard-ui-cache
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/health
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/auto-bootstrap
+sudo install -d -m 700 -o root -g root /mnt/ssd/pohw-p2pool/network-watchdog
 openssl rand -hex 32 | sudo tee /etc/pohw/dashboard-api.token >/dev/null
 openssl rand -hex 24 | sudo tee /etc/pohw/stratum.password >/dev/null
 sudo chmod 600 /etc/pohw/dashboard-api.token
@@ -661,6 +662,8 @@ sudo cp deploy/systemd/pohw-health-status.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-health-status.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-auto-bootstrap.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-auto-bootstrap.timer /etc/systemd/system/
+sudo cp deploy/systemd/pohw-network-watchdog.service /etc/systemd/system/
+sudo cp deploy/systemd/pohw-network-watchdog.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
@@ -669,8 +672,16 @@ sudo cp deploy/systemd/pohw-mining-adapter.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.path /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
+sudo install -d -m 755 /etc/systemd/system.conf.d
+sudo cp deploy/systemd/system.conf.d/10-pohw-watchdog.conf /etc/systemd/system.conf.d/
 sudo systemctl daemon-reload
-sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
+sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-network-watchdog.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
+```
+
+Or install only the self-recovery layer idempotently:
+
+```sh
+sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
 Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and POHW commitment file paths for the payout-aware job. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
@@ -697,6 +708,11 @@ POHW_HEALTH_STATUS_FILE=/mnt/ssd/pohw-p2pool/health/status.json
 POHW_AUTO_BOOTSTRAP_DIR=/mnt/ssd/pohw-p2pool/auto-bootstrap
 POHW_AUTO_BOOTSTRAP_OUTPUT_ROOT=/mnt/ssd/pohw-p2pool/output
 POHW_AUTO_BOOTSTRAP_APPEND=true
+POHW_NETWORK_WATCHDOG_STATE_DIR=/mnt/ssd/pohw-p2pool/network-watchdog
+POHW_NETWORK_WATCHDOG_TARGETS=
+POHW_NETWORK_WATCHDOG_RESTART_THRESHOLD=3
+POHW_NETWORK_WATCHDOG_REBOOT_THRESHOLD=8
+POHW_NETWORK_WATCHDOG_DRY_RUN=false
 POHW_STRATUM_BIND_ADDR=<pi-wlan-ip>:3333
 POHW_STRATUM_ALLOW_NON_LOOPBACK=true
 POHW_STRATUM_PASSWORD_FILE=/etc/pohw/stratum.password
@@ -733,6 +749,15 @@ ssh <pi-ssh-host> '/usr/bin/python3 /mnt/ssd/p2pool/scripts/pohw-health-status.p
 The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure.
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
+
+`pohw-network-watchdog.timer` is the host self-recovery layer for cases where the Pi stays powered but disappears from the LAN. By default it pings the current default gateway once per minute, restarts the active network manager after 3 failed checks, and requests a reboot after 8 failed checks. Set `POHW_NETWORK_WATCHDOG_TARGETS` to comma-separated stable targets if the default gateway is not enough for your network. The timer writes secret-free state to `/mnt/ssd/pohw-p2pool/network-watchdog/status.json`.
+
+The hardware watchdog config in `deploy/systemd/system.conf.d/10-pohw-watchdog.conf` lets systemd feed the Raspberry Pi watchdog device. After the next reboot, the host should reboot itself if PID 1 or the kernel stops scheduling long enough that the watchdog is no longer fed. Check support with:
+
+```sh
+ls -l /dev/watchdog*
+systemctl show -p RuntimeWatchdogUSec -p RebootWatchdogUSec
+```
 
 The default cookie watcher assumes `BITCOIN_RPC_COOKIE_FILE=/mnt/ssd/bitcoin/bitcoin-core-mainnet/.cookie`. If you use a different Bitcoin cookie path, enable the templated watcher for that path instead:
 

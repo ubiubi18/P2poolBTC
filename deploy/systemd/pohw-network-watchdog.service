@@ -1,0 +1,31 @@
+[Unit]
+Description=PoHW network self-recovery watchdog
+After=network.target
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/ssd/p2pool
+EnvironmentFile=-/etc/pohw/p2pool.env
+ExecStart=/mnt/ssd/p2pool/scripts/pohw-network-watchdog.sh
+TimeoutStartSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_NET_RAW CAP_SYS_BOOT
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_NET_RAW CAP_SYS_BOOT
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+UMask=0077
+ReadOnlyPaths=/mnt/ssd/p2pool
+ReadWritePaths=/mnt/ssd/pohw-p2pool

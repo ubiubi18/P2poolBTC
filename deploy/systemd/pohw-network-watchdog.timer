@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic PoHW network self-recovery watchdog
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=pohw-network-watchdog.service
+
+[Install]
+WantedBy=timers.target
