@@ -749,6 +749,29 @@ open http://127.0.0.1:5176/
 
 This requires SSH reachability to the Pi. Away from home, use a private VPN such as WireGuard/Tailscale, or expose only SSH with key auth and firewalling; do not expose `5176` or `40407` directly.
 
+For holiday-safe access from changing networks, use Tailscale instead of router port forwarding:
+
+```sh
+# On the Mac: install Tailscale from https://tailscale.com/download and sign in.
+# On the Pi, create a reusable or ephemeral auth key in the Tailscale admin UI,
+# paste it into a protected local file, then install/connect:
+sudo install -d -m 700 /etc/pohw
+sudo install -m 600 /dev/null /etc/pohw/tailscale.authkey
+sudo sh -c 'printf "%s\n" "tskey-auth-..." > /etc/pohw/tailscale.authkey'
+sudo POHW_TAILSCALE_AUTHKEY_FILE=/etc/pohw/tailscale.authkey \
+  /mnt/ssd/p2pool/scripts/pohw-install-tailscale-remote-access.sh
+```
+
+After both the Mac and Pi are in the same tailnet, SSH and the dashboard tunnel work from any IP range:
+
+```sh
+ssh ubuntu@pibtc
+scripts/pohw-dashboard-tunnel.sh ubuntu@pibtc
+open http://127.0.0.1:5176/
+```
+
+If MagicDNS is disabled in Tailscale, replace `pibtc` with the Pi's `100.x.y.z` Tailscale IPv4 from `tailscale ip -4`. Keep the Tailscale auth key out of Git and delete it from `/etc/pohw/tailscale.authkey` after the Pi is connected if it is not reusable.
+
 For a vacation-safe command-line status that avoids keys, cookies, addresses, and blockchain data, use the health monitor summary:
 
 ```sh
