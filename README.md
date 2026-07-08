@@ -728,10 +728,13 @@ Install host hardening drop-ins after Bitcoin Core and idena-go are already conf
 sudo install -d -m 755 /etc/ssh/sshd_config.d /etc/systemd/system/bitcoind-mainnet.service.d /etc/systemd/system/idena.service.d
 sudo install -m 644 deploy/ssh/sshd-pohw-hardening.conf /etc/ssh/sshd_config.d/99-pohw-hardening.conf
 sudo install -m 644 deploy/systemd/bitcoind-mainnet-hardening.conf /etc/systemd/system/bitcoind-mainnet.service.d/30-hardening.conf
+sudo install -m 644 deploy/systemd/bitcoind-mainnet-runtime.conf /etc/systemd/system/bitcoind-mainnet.service.d/50-runtime.conf
 sudo install -m 644 deploy/systemd/idena-hardening.conf /etc/systemd/system/idena.service.d/30-hardening.conf
 sudo sshd -t
 sudo systemctl daemon-reload
 ```
+
+For a Pi with Bitcoin Core on `/mnt/ssd`, start from `deploy/bitcoin/bitcoin-mainnet.conf.example` and copy only non-secret settings into the live `bitcoin.conf`. The template keeps RPC local-only, keeps a full unpruned chain for fork/testing work, and uses `dbcache=1536` for a 4 GiB Pi to reduce SSD pressure during AssumeUTXO background validation. Reduce `dbcache` if the host shows real memory pressure.
 
 If UFW is enabled, expose only the intended ports:
 

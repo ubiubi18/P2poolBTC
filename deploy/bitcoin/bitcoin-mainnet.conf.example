@@ -1,0 +1,33 @@
+# Bitcoin Core mainnet config for a Raspberry Pi 4/5 with the datadir on SSD.
+# Keep this file as a template; do not commit live .cookie, wallet, bind,
+# externalip, or credential values.
+
+server=1
+listen=1
+port=8333
+
+# RPC stays local-only. Dashboard/API services should use SSH tunnels or local
+# cookie auth instead of exposing RPC on the LAN.
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=8332
+
+# Full blockchain data for fork/testing work. Switch prune on only if historical
+# block availability is no longer needed.
+txindex=0
+prune=0
+
+# Pi resource limits. 1536 MiB was chosen for the 4 GiB Pi because the Idena
+# services still left enough available memory and the lower 768 MiB cache made
+# background validation saturate the SSD.
+maxconnections=32
+dbcache=1536
+maxmempool=100
+
+# Keep RPC worker capacity high enough for local health checks and dashboard
+# probes while validation is busy.
+rpcthreads=8
+rpcworkqueue=64
+rpcservertimeout=120
+
+debuglogfile=debug.log

@@ -2599,6 +2599,15 @@ class RewardIndexer:
             self.ledger.set_meta(f"seeded_epoch_{epoch}", "1")
 
         cursor = int(self.ledger.get_meta("last_height", "0") or 0)
+        if cursor >= height:
+            return {
+                "epoch": epoch,
+                "height": height,
+                "importedRollingEvents": imported,
+                "seededPositions": seeded,
+                "liveChanges": 0,
+                "skippedLiveBlock": True,
+            }
         if cursor and height > cursor + 1:
             self.ledger.record_gap(
                 cursor + 1,
@@ -2619,7 +2628,8 @@ class RewardIndexer:
         while True:
             try:
                 result = self.once()
-                print(f"[INFO] {utc_now()} {json.dumps(result, sort_keys=True)}", flush=True)
+                if not result.get("skippedLiveBlock"):
+                    print(f"[INFO] {utc_now()} {json.dumps(result, sort_keys=True)}", flush=True)
             except (IdenaRPCError, OSError, ValueError, sqlite3.Error) as exc:
                 print(f"[ERROR] {utc_now()} {exc}", file=sys.stderr, flush=True)
             time.sleep(self.poll_interval)

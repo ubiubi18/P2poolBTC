@@ -10,7 +10,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/mnt/ssd/p2pool/pohw_idena_rpc
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /mnt/ssd/p2pool/pohw_idena_rpc/idena_reward_indexer.py --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 --rolling-data-dir /mnt/ssd/p2pool/pohw_idena_rpc/data --rpc-url http://127.0.0.1:9009 --api-key-file /mnt/ssd/idena/idena-data/api.key --poll-interval 1 run
+ExecStart=/usr/bin/python3 /mnt/ssd/p2pool/pohw_idena_rpc/idena_reward_indexer.py --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 --rolling-data-dir /mnt/ssd/p2pool/pohw_idena_rpc/data --rpc-url http://127.0.0.1:9009 --api-key-file /mnt/ssd/idena/idena-data/api.key --poll-interval 5 run
 Restart=always
 RestartSec=30
 NoNewPrivileges=true
