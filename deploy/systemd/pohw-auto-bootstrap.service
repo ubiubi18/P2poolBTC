@@ -1,0 +1,35 @@
+[Unit]
+Description=PoHW auto-bootstrap once mining readiness is available
+Wants=network-online.target pohw-health-status.service
+After=network-online.target pohw-health-status.service bitcoind-mainnet.service idena.service pohw-gossip-mesh.service
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/mnt/ssd/p2pool
+EnvironmentFile=-/etc/pohw/p2pool.env
+ExecStart=/mnt/ssd/p2pool/scripts/pohw-auto-bootstrap-if-ready.sh
+TimeoutStartSec=20min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/mnt/ssd/p2pool /mnt/ssd/idena/idena-data /mnt/ssd/bitcoin/bitcoin-core-mainnet
+ReadWritePaths=/mnt/ssd/pohw-p2pool

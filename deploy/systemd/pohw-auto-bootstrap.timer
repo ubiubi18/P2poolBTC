@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic PoHW auto-bootstrap readiness check
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=pohw-auto-bootstrap.service
+
+[Install]
+WantedBy=timers.target
