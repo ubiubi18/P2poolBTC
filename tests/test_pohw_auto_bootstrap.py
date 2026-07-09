@@ -151,6 +151,62 @@ JSON
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists())
 
+    def test_recovers_stale_empty_lock_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-auto-bootstrap-stale-lock-") as temp:
+            root = Path(temp)
+            health_file = root / "health.json"
+            self.write_health(health_file, ready=True)
+            fake_bootstrap = self.write_fake_bootstrap(root)
+            env = self.base_env(root, health_file, fake_bootstrap)
+            env["POHW_AUTO_BOOTSTRAP_LOCK_STALE_SECONDS"] = "0"
+            lock = root / "auto-bootstrap" / "bootstrap.lock"
+            lock.mkdir(parents=True)
+
+            result = subprocess.run(
+                ["bash", str(AUTO_BOOTSTRAP)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            calls = (root / "calls.txt").read_text(encoding="utf-8").splitlines()
+            marker = root / "auto-bootstrap" / "bootstrap.done.json"
+            self.assertTrue(marker.exists())
+            self.assertFalse(lock.exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Removing stale PoHW auto-bootstrap lock without pid", result.stdout)
+        self.assertEqual(len(calls), 1)
+
+    def test_active_lock_pid_skips_without_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-auto-bootstrap-active-lock-") as temp:
+            root = Path(temp)
+            health_file = root / "health.json"
+            self.write_health(health_file, ready=True)
+            fake_bootstrap = self.write_fake_bootstrap(root)
+            env = self.base_env(root, health_file, fake_bootstrap)
+            lock = root / "auto-bootstrap" / "bootstrap.lock"
+            lock.mkdir(parents=True)
+            (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", str(AUTO_BOOTSTRAP)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            calls_file = root / "calls.txt"
+            self.assertFalse(calls_file.exists())
+            self.assertTrue(lock.exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already running", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

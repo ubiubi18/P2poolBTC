@@ -13,6 +13,19 @@ MARKER_FILE="${POHW_AUTO_BOOTSTRAP_MARKER_FILE:-$AUTO_DIR/bootstrap.done.json}"
 OUTPUT_ROOT="${POHW_AUTO_BOOTSTRAP_OUTPUT_ROOT:-${POHW_EXPERIMENT_OUTPUT_ROOT:-$DATADIR/output}}"
 MODE="${POHW_AUTO_BOOTSTRAP_MODE:-real}"
 APPEND="${POHW_AUTO_BOOTSTRAP_APPEND:-true}"
+LOCK_STALE_SECONDS="${POHW_AUTO_BOOTSTRAP_LOCK_STALE_SECONDS:-3600}"
+
+stat_mtime_epoch() {
+  local path="$1"
+  if stat -c %Y "$path" 2>/dev/null; then
+    return 0
+  fi
+  stat -f %m "$path"
+}
+
+is_unsigned_int() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
 
 reject_symlink_ancestor() {
   local path="$1"
@@ -52,6 +65,64 @@ ensure_private_dir() {
   chmod 700 "$dir"
 }
 
+acquire_lock() {
+  local lock_dir="$1" stale_seconds="$2" pid_file started_file mtime now age pid
+  if ! is_unsigned_int "$stale_seconds"; then
+    echo "POHW_AUTO_BOOTSTRAP_LOCK_STALE_SECONDS must be an unsigned integer." >&2
+    exit 1
+  fi
+  if mkdir "$lock_dir" 2>/dev/null; then
+    pid_file="$lock_dir/pid"
+    started_file="$lock_dir/started-at"
+    printf '%s\n' "$$" > "$pid_file"
+    date -u +%Y%m%dT%H%M%SZ > "$started_file"
+    chmod 600 "$pid_file" "$started_file"
+    trap 'rm -f "$LOCK_DIR/pid" "$LOCK_DIR/started-at"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+    return 0
+  fi
+  if [[ -L "$lock_dir" ]]; then
+    echo "Refusing symlinked auto-bootstrap lock directory: $lock_dir" >&2
+    exit 1
+  fi
+  if [[ ! -d "$lock_dir" ]]; then
+    echo "PoHW auto-bootstrap lock path exists but is not a directory: $lock_dir" >&2
+    exit 1
+  fi
+  pid_file="$lock_dir/pid"
+  if [[ -f "$pid_file" ]]; then
+    pid="$(tr -cd '0-9' < "$pid_file" || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "PoHW auto-bootstrap is already running: $lock_dir pid=$pid"
+      exit 0
+    fi
+    echo "Removing stale PoHW auto-bootstrap lock with dead pid: $lock_dir pid=${pid:-unknown}"
+    rm -f "$lock_dir/pid" "$lock_dir/started-at"
+    if rmdir "$lock_dir" 2>/dev/null; then
+      acquire_lock "$lock_dir" "$stale_seconds"
+      return 0
+    fi
+    echo "PoHW auto-bootstrap lock is stale but not empty; leaving it in place: $lock_dir" >&2
+    exit 0
+  fi
+  if ! mtime="$(stat_mtime_epoch "$lock_dir")"; then
+    echo "Could not inspect auto-bootstrap lock age; assuming it is active: $lock_dir"
+    exit 0
+  fi
+  now="$(date +%s)"
+  age=$((now - mtime))
+  if (( age >= stale_seconds )); then
+    echo "Removing stale PoHW auto-bootstrap lock without pid: $lock_dir age=${age}s"
+    if rmdir "$lock_dir" 2>/dev/null; then
+      acquire_lock "$lock_dir" "$stale_seconds"
+      return 0
+    fi
+    echo "PoHW auto-bootstrap lock is stale but not empty; leaving it in place: $lock_dir" >&2
+    exit 0
+  fi
+  echo "PoHW auto-bootstrap is already running: $lock_dir age=${age}s"
+  exit 0
+}
+
 if [[ "$MODE" != "real" && "$MODE" != "dev" ]]; then
   echo "POHW_AUTO_BOOTSTRAP_MODE must be real or dev." >&2
   exit 1
@@ -64,11 +135,7 @@ if [[ -e "$MARKER_FILE" && "${POHW_AUTO_BOOTSTRAP_FORCE:-false}" != "true" ]]; t
   exit 0
 fi
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "PoHW auto-bootstrap is already running: $LOCK_DIR"
-  exit 0
-fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+acquire_lock "$LOCK_DIR" "$LOCK_STALE_SECONDS"
 
 if [[ ! -f "$HEALTH_STATUS_FILE" ]]; then
   echo "PoHW health status file is not available yet: $HEALTH_STATUS_FILE"

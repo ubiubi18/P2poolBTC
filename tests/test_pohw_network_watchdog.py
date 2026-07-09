@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import subprocess
@@ -48,7 +50,13 @@ exit 0
         fake.chmod(0o700)
         return fake
 
-    def run_watchdog(self, root: Path, *, ping_ok: bool = False) -> subprocess.CompletedProcess[str]:
+    def run_watchdog(
+        self,
+        root: Path,
+        *,
+        ping_ok: bool = False,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env.update(
             {
@@ -64,6 +72,8 @@ exit 0
                 "POHW_FAKE_PING_OK": "true" if ping_ok else "false",
             }
         )
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             ["bash", str(WATCHDOG)],
             cwd=REPO_ROOT,
@@ -152,6 +162,43 @@ exit 0
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid watchdog thresholds", result.stderr)
         self.assertFalse((root / "systemctl.log").exists())
+
+    def test_recovers_stale_empty_lock_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-network-watchdog-stale-lock-") as temp:
+            root = Path(temp)
+            self.write_fake_ping(root)
+            self.write_fake_systemctl(root)
+            lock = root / "state" / "lock"
+            lock.mkdir(parents=True)
+
+            result = self.run_watchdog(
+                root,
+                ping_ok=True,
+                extra_env={"POHW_NETWORK_WATCHDOG_LOCK_STALE_SECONDS": "0"},
+            )
+            status = self.read_status(root)
+            self.assertFalse(lock.exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Removing stale PoHW network watchdog lock without pid", result.stdout)
+        self.assertEqual(status["status"], "ok")
+
+    def test_active_lock_pid_skips_without_probe(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-network-watchdog-active-lock-") as temp:
+            root = Path(temp)
+            self.write_fake_ping(root)
+            self.write_fake_systemctl(root)
+            lock = root / "state" / "lock"
+            lock.mkdir(parents=True)
+            (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+            result = self.run_watchdog(root, ping_ok=True)
+            self.assertFalse((root / "state" / "status.json").exists())
+            self.assertFalse((root / "systemctl.log").exists())
+            self.assertTrue(lock.exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already running", result.stdout)
 
 
 if __name__ == "__main__":
