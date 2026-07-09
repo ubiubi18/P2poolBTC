@@ -136,8 +136,8 @@ Set one local account selector (`--dashboard-idena-address`, `--dashboard-miner-
 Run the UI:
 
 ```sh
-pnpm --dir ui/pohw-dashboard install
-pnpm --dir ui/pohw-dashboard dev
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard install
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
 ```
 
 When both dashboard services run on the Pi, keep them bound to Pi loopback and open an SSH tunnel from your workstation:
@@ -155,7 +155,7 @@ PI_POHW_API=http://<pi-wlan-ip>:40407/dashboard.json
 
 VITE_POHW_DASHBOARD_API_URL="$PI_POHW_API" \
 VITE_POHW_DASHBOARD_API_TOKEN='<dashboard-token-from-your-local-secret-file>' \
-pnpm --dir ui/pohw-dashboard dev
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
 ```
 
 Keep the Vite UI bound to loopback. `VITE_POHW_DASHBOARD_API_TOKEN` is visible to that browser session.
@@ -163,7 +163,7 @@ Keep the Vite UI bound to loopback. `VITE_POHW_DASHBOARD_API_TOKEN` is visible t
 The dashboard intentionally shows an offline state if the local API is unavailable. Demo data is opt-in:
 
 ```sh
-VITE_POHW_DASHBOARD_DEMO=true pnpm --dir ui/pohw-dashboard dev
+VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
 ```
 
 ## Core Commands
@@ -382,6 +382,8 @@ cargo run -p p2pool-node -- build-stratum-job-rpc \
 The generated job uses local `getblocktemplate` for version, previous block, time, bits, and transaction merkle branches. It is enough for sharechain work accounting and multi-node rehearsal, but it is not yet the final PoHW block-submission coinbase with payout outputs.
 When using `--replace`, keep the job file in a private node directory that is not group/world writable.
 
+For a long-running adapter, add `--refresh-job-from-rpc --rpc-cookie-file ~/.bitcoin/.cookie`. It polls `getblocktemplate`, atomically swaps changed jobs, and sends a clean `mining.notify` to subscribed miners without restarting their connection. The default refresh interval is five seconds and can be changed with `--job-refresh-interval-seconds`.
+
 When a locally verified payout schedule and POHW commitment are available, build the payout-aware Stratum job instead:
 
 ```sh
@@ -409,9 +411,11 @@ cargo run -p p2pool-node -- build-stratum-block-candidate \
   --require-block-target
 ```
 
-The artifact contains the exact coinbase tx, header, block hash, target check, and `block_hex` when the job has no non-coinbase transaction branches. If the job has merkle branches, the artifact stays useful for audit but marks `block_hex` incomplete because Stratum jobs do not carry raw non-coinbase transaction data.
+The artifact contains the exact coinbase tx, header, block hash, target check, and complete `block_hex` when the job carries the raw non-coinbase transactions. Jobs built by this repository from Bitcoin RPC include that transaction data. Manually supplied legacy jobs with merkle branches but no transaction data remain audit-only and produce an incomplete artifact.
 
 When `run-mining-adapter` has `--block-candidate-dir`, every accepted submit that meets the advertised block target is also written as `block-<hash>.json` in that directory. Existing matching files are kept; different content at the same path is refused. The Pi wrapper enables this by default under `$POHW_DATADIR/block-candidates`, configurable with `POHW_STRATUM_BLOCK_CANDIDATE_DIR`.
+
+Add `--auto-submit-blocks` only when the job coinbase and RPC target are ready for real block submission. A complete target-meeting candidate is sent to `submitblock` immediately; the result is logged, while an RPC rejection or transient error does not erase the accepted share or its candidate artifact. The Pi setting is the explicit opt-in `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`.
 
 Submit a complete target-meeting candidate to a local fork/testnet Bitcoin RPC:
 
@@ -442,7 +446,7 @@ cargo run -p p2pool-node -- run-mining-adapter \
   --node-secret-key-file .pohw-p2pool/keys/alice/gossip-node.key
 ```
 
-Use the password as the miner's Stratum password and firewall `3333/tcp` to the miner or rental provider IP when possible. Version rolling is intentionally rejected in this first adapter. The example job file is dry-run material; for live rehearsal set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` for a generic RPC job, or `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus `POHW_STRATUM_PAYOUT_SCHEDULE_FILE` and `POHW_STRATUM_POHW_COMMITMENT_FILE` for a payout-aware job.
+Use the password as the miner's Stratum password and firewall `3333/tcp` to the miner or rental provider IP when possible. Version rolling is intentionally rejected in this first adapter. The example job file is dry-run material; for live rehearsal set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` for a generic RPC job, or `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus `POHW_STRATUM_PAYOUT_SCHEDULE_FILE` and `POHW_STRATUM_POHW_COMMITMENT_FILE` for a payout-aware job. Both wrapper modes now keep refreshing the job after startup.
 
 Exercise the signed/encrypted DKG transport envelope demo:
 
@@ -476,11 +480,12 @@ python3 pohw_idena_rpc/idena_reward_indexer.py \
 python3 pohw_idena_rpc/idena_reward_indexer.py \
   --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 \
   export-replay \
+  --latest-epoch \
   --require-exact \
   > /mnt/ssd/pohw-p2pool/rewards/reward-events.json
 ```
 
-`sync-official-indexer` runs `scripts/pohw-export-idena-indexer-rewards.sql` against the official `idena-indexer` Postgres schema, imports only exact StatsCollector-derived validation/mining reward events, and keeps invitation/contract/oracle rewards excluded from eligible replay. The snapshot timer can run the sync automatically when `IDENA_INDEXER_DATABASE_URL_FILE` or `IDENA_INDEXER_DATABASE_URL` is configured.
+`sync-official-indexer` runs `scripts/pohw-export-idena-indexer-rewards.sql` against the official `idena-indexer` Postgres schema and imports exact StatsCollector-derived rewards from completed epochs. `export-replay --latest-epoch` selects one canonical epoch instead of accumulating all imported history. Set `IDENA_REWARD_EPOCH` to pin a specific epoch for reproducible backfills; otherwise the snapshot timer selects the latest canonical epoch. The snapshot timer can run the sync automatically when `IDENA_INDEXER_DATABASE_URL_FILE` or `IDENA_INDEXER_DATABASE_URL` is configured.
 
 If local Postgres `idena-indexer` data is not available yet, import completed-epoch rewards from the official public Idena API:
 
@@ -488,17 +493,17 @@ If local Postgres `idena-indexer` data is not available yet, import completed-ep
 python3 pohw_idena_rpc/idena_reward_indexer.py \
   --db /mnt/ssd/pohw-p2pool/rewards/reward_ledger.sqlite3 \
   sync-official-api \
-  --completed-epochs 1
+  --completed-epochs 10
 ```
 
-`sync-official-api` defaults to the previous completed epoch. It imports exact validation/staking/session reward categories from `/Epoch/{epoch}/IdentityRewards`, imports aggregate epoch mining summaries from `/Address/{address}/MiningRewardSummaries`, and records invitation/invitee rewards as ignored replay events. Set `IDENA_OFFICIAL_API_SYNC=true` in the snapshot environment to let `pohw-idena-snapshot.service` run this fallback automatically when no Postgres URL is configured.
+`sync-official-api` defaults to ten completed epochs so invitation liabilities can be reconstructed across their full clawback window. It imports exact validation/staking/session reward categories from `/Epoch/{epoch}/IdentityRewards`, aggregate epoch mining summaries from `/Address/{address}/MiningRewardSummaries`, and invitation/invitee credits plus later kill reversals into the liability ledger. Consensus scoring remains one epoch because the snapshot path exports only `--latest-epoch` (or the explicitly pinned `IDENA_REWARD_EPOCH`). Set `IDENA_OFFICIAL_API_SYNC=true` in the snapshot environment to let `pohw-idena-snapshot.service` run this fallback automatically when no Postgres URL is configured.
 
 Build the snapshot registry ABI:
 
 ```sh
-pnpm --dir contracts/idena-snapshot-registry install --frozen-lockfile
-pnpm --dir contracts/idena-snapshot-registry build
-pnpm --dir contracts/idena-snapshot-registry test
+corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
+corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry build
+corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
 ```
 
 Propose a payout schedule:
@@ -645,28 +650,24 @@ Install gossip mesh, dashboard API, and optional mining adapter:
 
 ```sh
 cargo build --release -p p2pool-node
-pnpm --dir ui/pohw-dashboard install
-pnpm --dir ui/pohw-dashboard build
-sudo install -d -m 700 -o ubuntu -g ubuntu /etc/pohw /mnt/ssd/pohw-p2pool
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard install
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+sudo install -d -m 755 -o root -g root /etc/pohw
+sudo install -m 600 -o root -g root deploy/pohw-experiment.env.example /etc/pohw/p2pool.env
+sudoedit /etc/pohw/p2pool.env
+sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/dashboard-ui-cache
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/health
 sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/ssd/pohw-p2pool/auto-bootstrap
-sudo install -d -m 700 -o root -g root /mnt/ssd/pohw-p2pool/network-watchdog
-sudo install -d -m 700 -o root -g root /mnt/ssd/pohw-p2pool/idena-priority
 openssl rand -hex 32 | sudo tee /etc/pohw/dashboard-api.token >/dev/null
 openssl rand -hex 24 | sudo tee /etc/pohw/stratum.password >/dev/null
-sudo chmod 600 /etc/pohw/dashboard-api.token
-sudo chmod 600 /etc/pohw/stratum.password
-sudo chown ubuntu:ubuntu /etc/pohw/dashboard-api.token /etc/pohw/stratum.password
+sudo chmod 640 /etc/pohw/dashboard-api.token /etc/pohw/stratum.password
+sudo chown root:ubuntu /etc/pohw/dashboard-api.token /etc/pohw/stratum.password
 sudo install -m 600 -o ubuntu -g ubuntu deploy/mining-adapter-job.example.json /mnt/ssd/pohw-p2pool/mining-job.example.json
 sudo cp deploy/systemd/pohw-health-status.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-health-status.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-auto-bootstrap.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-auto-bootstrap.timer /etc/systemd/system/
-sudo cp deploy/systemd/pohw-network-watchdog.service /etc/systemd/system/
-sudo cp deploy/systemd/pohw-network-watchdog.timer /etc/systemd/system/
-sudo cp deploy/systemd/pohw-idena-priority-guard.service /etc/systemd/system/
-sudo cp deploy/systemd/pohw-idena-priority-guard.timer /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
@@ -675,19 +676,29 @@ sudo cp deploy/systemd/pohw-mining-adapter.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.path /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
-sudo install -d -m 755 /etc/systemd/system.conf.d
-sudo cp deploy/systemd/system.conf.d/10-pohw-watchdog.conf /etc/systemd/system.conf.d/
+sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-network-watchdog.timer pohw-idena-priority-guard.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
+sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
 ```
 
-Or install only the self-recovery layer idempotently:
+Or reinstall only the self-recovery layer idempotently. It always enables the network watchdog, but installs the two resource guards without changing their enablement:
 
 ```sh
 sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
-Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and POHW commitment file paths for the payout-aware job. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
+Opt into either resource guard explicitly when its policy matches the current workload:
+
+```sh
+sudo POHW_INSTALL_ENABLE_IDENA_PRIORITY_GUARD=true \
+  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo POHW_INSTALL_ENABLE_BITCOIN_PRESSURE_GUARD=true \
+  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+```
+
+The installer copies all root-run helpers to root-owned `/usr/local/libexec/pohw`, keeps their state under root-owned `/var/lib/pohw`, and enforces root ownership with mode `0600` on `/etc/pohw/p2pool.env`. Root services never execute scripts from the writable Git checkout.
+
+Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and POHW commitment file paths for the payout-aware job. These modes refresh changed RPC jobs continuously; real `submitblock` calls remain disabled unless `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
 
 Use `/etc/pohw/p2pool.env` for Pi-specific paths, peer hints, allowed dashboard origins, Stratum settings, and local RPC cookie paths. The systemd helpers bind gossip, dashboard, and Stratum to loopback unless you explicitly expose them. For trusted WLAN access, bind to the Pi WLAN IP instead of all interfaces:
 
@@ -714,18 +725,30 @@ POHW_AUTO_BOOTSTRAP_DIR=/mnt/ssd/pohw-p2pool/auto-bootstrap
 POHW_AUTO_BOOTSTRAP_OUTPUT_ROOT=/mnt/ssd/pohw-p2pool/output
 POHW_AUTO_BOOTSTRAP_APPEND=true
 POHW_AUTO_BOOTSTRAP_LOCK_STALE_SECONDS=3600
-POHW_NETWORK_WATCHDOG_STATE_DIR=/mnt/ssd/pohw-p2pool/network-watchdog
+POHW_NETWORK_WATCHDOG_STATE_DIR=/var/lib/pohw/network-watchdog
 POHW_NETWORK_WATCHDOG_TARGETS=
 POHW_NETWORK_WATCHDOG_RESTART_THRESHOLD=3
 POHW_NETWORK_WATCHDOG_REBOOT_THRESHOLD=8
 POHW_NETWORK_WATCHDOG_LOCK_STALE_SECONDS=300
 POHW_NETWORK_WATCHDOG_DRY_RUN=false
-POHW_IDENA_PRIORITY_STATE_DIR=/mnt/ssd/pohw-p2pool/idena-priority
+POHW_IDENA_PRIORITY_STATE_DIR=/var/lib/pohw/idena-priority
 POHW_IDENA_PRIORITY_LEAD_SECONDS=3600
 POHW_IDENA_PRIORITY_COOLDOWN_SECONDS=1800
 POHW_IDENA_PRIORITY_RESTORE_BITCOIN=true
 POHW_IDENA_PRIORITY_FORCE=false
 POHW_IDENA_PRIORITY_DRY_RUN=false
+POHW_BITCOIN_PRESSURE_STATE_DIR=/var/lib/pohw/bitcoin-pressure
+POHW_BITCOIN_PRESSURE_HIGH_IOWAIT_PERCENT=40
+POHW_BITCOIN_PRESSURE_HIGH_UTIL_PERCENT=85
+POHW_BITCOIN_PRESSURE_LOW_IOWAIT_PERCENT=20
+POHW_BITCOIN_PRESSURE_LOW_UTIL_PERCENT=60
+POHW_BITCOIN_PRESSURE_HIGH_STREAK=2
+POHW_BITCOIN_PRESSURE_LOW_STREAK=3
+POHW_BITCOIN_PRESSURE_COOLDOWN_SECONDS=1800
+POHW_BITCOIN_PRESSURE_RESTORE_BITCOIN=true
+POHW_BITCOIN_PRESSURE_STOP_WHEN_MINING_READY=false
+POHW_BITCOIN_PRESSURE_FORCE=false
+POHW_BITCOIN_PRESSURE_DRY_RUN=false
 POHW_TAILSCALE_CONFIGURE_UFW=true
 POHW_TAILSCALE_UFW_INTERFACE=tailscale0
 POHW_STRATUM_BIND_ADDR=<pi-wlan-ip>:3333
@@ -801,13 +824,20 @@ The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 
-`pohw-network-watchdog.timer` is the host self-recovery layer for cases where the Pi stays powered but disappears from the LAN. By default it pings the current default gateway once per minute, restarts the active network manager after 3 failed checks, and requests a reboot after 8 failed checks. Set `POHW_NETWORK_WATCHDOG_TARGETS` to comma-separated stable targets if the default gateway is not enough for your network. The timer writes secret-free state to `/mnt/ssd/pohw-p2pool/network-watchdog/status.json`.
+`pohw-network-watchdog.timer` is the host self-recovery layer for cases where the Pi stays powered but disappears from the LAN. By default it pings the current default gateway once per minute, restarts the active network manager after 3 failed checks, and requests a reboot after 8 failed checks. A missing default route now follows those same thresholds instead of stalling in a diagnostic-only state. Set `POHW_NETWORK_WATCHDOG_TARGETS` to comma-separated stable targets if the default gateway is not enough for your network. The timer writes secret-free state to `/var/lib/pohw/network-watchdog/status.json`.
 
-`pohw-idena-priority-guard.timer` protects validation/flip sessions from Bitcoin background validation load. It checks local `dna_epoch` once per minute, stops `bitcoind-mainnet.service` when the current Idena period looks like a flip, short, long, or validation period, or when `nextValidation` is inside `POHW_IDENA_PRIORITY_LEAD_SECONDS`, and restarts Bitcoin after `POHW_IDENA_PRIORITY_COOLDOWN_SECONDS` only if the guard stopped it itself. The default lead is 1 hour and the default cooldown is 30 minutes. For an emergency manual pause, set `POHW_IDENA_PRIORITY_FORCE=true` in `/etc/pohw/p2pool.env` and restart the timer service; set it back to `false` after validation.
+`pohw-idena-priority-guard.timer` protects validation/flip sessions from Bitcoin background validation load. It checks local `dna_epoch` once per minute, stops `bitcoind-mainnet.service` when the current Idena period looks like a flip, short, long, or validation period, or when `nextValidation` is inside `POHW_IDENA_PRIORITY_LEAD_SECONDS`, and restarts Bitcoin after `POHW_IDENA_PRIORITY_COOLDOWN_SECONDS` only if the guard stopped it itself. It does not depend on or start `idena.service`, so an operator pause remains a pause. The default lead is 1 hour and the default cooldown is 30 minutes. For an emergency manual pause, set `POHW_IDENA_PRIORITY_FORCE=true` in `/etc/pohw/p2pool.env` and restart the timer service; set it back to `false` after validation.
 
 ```sh
 sudo systemctl start pohw-idena-priority-guard.service
-sudo cat /mnt/ssd/pohw-p2pool/idena-priority/status.json
+sudo cat /var/lib/pohw/idena-priority/status.json
+```
+
+`pohw-bitcoin-pressure-guard.timer` is an optional last-resort protection against harmful Bitcoin background-validation I/O pressure. High disk utilization alone no longer trips it: pressure requires both high iowait and utilization, or critical utilization combined with high read/write latency, for `POHW_BITCOIN_PRESSURE_HIGH_STREAK` checks. It restarts Bitcoin after `POHW_BITCOIN_PRESSURE_COOLDOWN_SECONDS` once iowait, utilization, and latency remain below their low thresholds for `POHW_BITCOIN_PRESSURE_LOW_STREAK` checks. By default it will not stop Bitcoin after the health monitor reports `miningReady=true`, and the installer does not enable this timer without explicit opt-in.
+
+```sh
+sudo systemctl start pohw-bitcoin-pressure-guard.service
+sudo cat /var/lib/pohw/bitcoin-pressure/status.json
 ```
 
 The hardware watchdog config in `deploy/systemd/system.conf.d/10-pohw-watchdog.conf` lets systemd feed the Raspberry Pi watchdog device. After the next reboot, the host should reboot itself if PID 1 or the kernel stops scheduling long enough that the watchdog is no longer fed. Check support with:
@@ -888,13 +918,17 @@ Important boundaries:
 ## Checks
 
 ```sh
-cargo fmt --all
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-pnpm --dir ui/pohw-dashboard build
-bash -n scripts/pohw-snapshot-if-synced.sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m unittest discover -s pohw_idena_rpc/tests -p 'test_*.py' -v
+corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+bash -n scripts/*.sh
+gitleaks git . --redact
 ```
 
 ## License
 
-MIT. See `Cargo.toml` workspace metadata.
+MIT. See [`LICENSE`](LICENSE).

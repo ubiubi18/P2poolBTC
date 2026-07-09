@@ -1,7 +1,7 @@
 [Unit]
 Description=PoHW secret-safe host health status
 Wants=network-online.target
-After=network-online.target bitcoind-mainnet.service idena.service
+After=network-online.target idena.service
 RequiresMountsFor=/mnt/ssd
 
 [Service]

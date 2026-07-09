@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic PoHW Bitcoin Core I/O pressure guard
+
+[Timer]
+OnBootSec=6min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=pohw-bitcoin-pressure-guard.service
+
+[Install]
+WantedBy=timers.target

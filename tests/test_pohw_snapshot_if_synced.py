@@ -253,12 +253,14 @@ class SnapshotIfSyncedScriptTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [
-                json_line
+                json.loads(json_line)
                 for json_line in calls_file.read_text(encoding="utf-8").splitlines()
                 if json_line
             ]
             self.assertTrue(any("sync-official-api" in call for call in calls))
             self.assertTrue(any("export-replay" in call for call in calls))
+            export_call = next(call for call in calls if "export-replay" in call)
+            self.assertIn("--latest-epoch", export_call)
             self.assertIn("Wrote", result.stdout)
 
 

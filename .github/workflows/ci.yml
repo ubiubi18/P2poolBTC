@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  python-and-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Test host tooling
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test reward indexer
+        run: python -m unittest discover -s pohw_idena_rpc/tests -p 'test_*.py' -v
+      - name: Check Python syntax
+        run: python -m compileall -q scripts pohw_idena_rpc tests
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh
+
+  javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install dashboard dependencies
+        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard install --frozen-lockfile
+      - name: Build dashboard
+        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+      - name: Install contract dependencies
+        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
+      - name: Test contract
+        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

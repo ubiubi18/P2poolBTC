@@ -1,5 +1,5 @@
 use crate::{
-    bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinRpcClient},
+    bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinRpcClient, SubmitBlockOutcome},
     default_parent_share_hash, local_node, publish_sharechain_message, random_nonce_hex,
     read_keypair_from_file, sign_hash_hex, validate_protected_secret_file,
     PublishSharechainMessageInput,
@@ -24,13 +24,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{timeout, Duration};
+use tokio::sync::{broadcast, RwLock};
+use tokio::time::{interval, sleep, Duration, Instant, MissedTickBehavior};
 
 const DEFAULT_STRATUM_DIFFICULTY: f64 = 1.0;
 const DEFAULT_EXTRANONCE2_SIZE: usize = 4;
 const DEFAULT_MAX_LINE_BYTES: usize = 16 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 900;
+const DEFAULT_JOB_REFRESH_INTERVAL_SECONDS: u64 = 5;
 const MAX_IDLE_TIMEOUT_SECONDS: u64 = 86_400;
+const MAX_JOB_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 const MIN_NON_LOOPBACK_PASSWORD_BYTES: usize = 16;
 const MAX_STRATUM_PASSWORD_BYTES: usize = 512;
 const MAX_STRATUM_PASSWORD_FILE_BYTES: u64 = MAX_STRATUM_PASSWORD_BYTES as u64 + 2;
@@ -45,7 +48,7 @@ const PACKAGED_EXAMPLE_JOB_ID: &str = "experiment-0-example";
 const STRATUM_EXTRANONCE1_BYTES: usize = 4;
 const MAX_COINBASE_OUTPUTS: usize = 1_000;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct MiningAdapterConfig {
     pub datadir: PathBuf,
     pub bind_addr: SocketAddr,
@@ -66,9 +69,15 @@ pub(crate) struct MiningAdapterConfig {
     pub max_line_bytes: usize,
     pub idle_timeout_seconds: u64,
     pub append: bool,
+    pub bitcoin_rpc_client: Option<BitcoinRpcClient>,
+    pub refresh_job_from_rpc: bool,
+    pub job_refresh_interval_seconds: u64,
+    pub auto_submit_blocks: bool,
+    pub payout_schedule: Option<PayoutSchedule>,
+    pub pohw_commitment: Option<PohwCommitment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StratumJob {
     pub job_id: String,
     pub version: String,
@@ -117,10 +126,10 @@ pub(crate) struct StratumBlockCandidate {
     pub block_hex_status: String,
 }
 
-#[derive(Debug, Clone)]
 struct AdapterState {
     config: MiningAdapterConfig,
-    job: StratumJob,
+    job: RwLock<StratumJob>,
+    job_updates: broadcast::Sender<StratumJob>,
     mining_pubkey_hex: String,
     stratum_password: Option<String>,
     share_target: String,
@@ -148,11 +157,18 @@ struct AcceptedShareSummary {
     block_target: String,
     meets_block_target: bool,
     block_candidate_file: Option<PathBuf>,
+    block_submit: Option<BlockSubmitSummary>,
     target: String,
     template_hash: String,
     share_hash: String,
     template_publish: Value,
     share_publish: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BlockSubmitSummary {
+    outcome: Option<SubmitBlockOutcome>,
+    error: Option<String>,
 }
 
 fn default_clean_jobs() -> bool {
@@ -174,6 +190,26 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
     if config.idle_timeout_seconds == 0 || config.idle_timeout_seconds > MAX_IDLE_TIMEOUT_SECONDS {
         bail!("--stratum-idle-timeout-seconds must be between 1 and {MAX_IDLE_TIMEOUT_SECONDS}");
     }
+    if config.job_refresh_interval_seconds == 0
+        || config.job_refresh_interval_seconds > MAX_JOB_REFRESH_INTERVAL_SECONDS
+    {
+        bail!(
+            "--job-refresh-interval-seconds must be between 1 and {MAX_JOB_REFRESH_INTERVAL_SECONDS}"
+        );
+    }
+    if (config.refresh_job_from_rpc || config.auto_submit_blocks)
+        && config.bitcoin_rpc_client.is_none()
+    {
+        bail!(
+            "Bitcoin RPC configuration is required for job refresh or automatic block submission"
+        );
+    }
+    if config.payout_schedule.is_some() != config.pohw_commitment.is_some() {
+        bail!("payout schedule and PoHW commitment must be supplied together");
+    }
+    if config.payout_schedule.is_some() && !config.refresh_job_from_rpc {
+        bail!("payout schedule and PoHW commitment require --refresh-job-from-rpc");
+    }
     let share_target =
         resolve_share_target(config.share_target.as_deref(), config.stratum_difficulty)?;
     Share::expected_hashrate_score_delta_for_target(&share_target)
@@ -192,9 +228,12 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
     let mining_pubkey_hex = mining_keypair.x_only_public_key().0.to_string();
     ensure_registered_miner_matches_key(&config.datadir, &config.miner_id, &mining_pubkey_hex)?;
 
+    let initial_job_id = job.job_id.clone();
+    let (job_updates, _) = broadcast::channel(16);
     let state = Arc::new(AdapterState {
         config,
-        job,
+        job: RwLock::new(job),
+        job_updates,
         mining_pubkey_hex,
         stratum_password,
         share_target,
@@ -209,8 +248,15 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
         })?;
     eprintln!(
         "PoHW mining adapter listening on {} for miner_id={} job_id={}",
-        state.config.bind_addr, state.config.miner_id, state.job.job_id
+        state.config.bind_addr, state.config.miner_id, initial_job_id
     );
+
+    if state.config.refresh_job_from_rpc {
+        let refresh_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            refresh_job_loop(refresh_state).await;
+        });
+    }
 
     let connections =
         ConnectionLimiter::new(MAX_STRATUM_CONNECTIONS, MAX_STRATUM_CONNECTIONS_PER_IP);
@@ -227,6 +273,62 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
             }
         });
     }
+}
+
+async fn refresh_job_loop(state: Arc<AdapterState>) {
+    let mut ticker = interval(Duration::from_secs(
+        state.config.job_refresh_interval_seconds,
+    ));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        match refresh_job_once(&state).await {
+            Ok(Some(job_id)) => {
+                eprintln!("published refreshed Stratum job {job_id}");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("failed to refresh Stratum job from Bitcoin RPC: {err:#}");
+            }
+        }
+    }
+}
+
+async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
+    let client = state
+        .config
+        .bitcoin_rpc_client
+        .as_ref()
+        .context("Bitcoin RPC client is not configured")?;
+    let material = client.mining_job_template().await?;
+    let built = match (
+        state.config.payout_schedule.as_ref(),
+        state.config.pohw_commitment.as_ref(),
+    ) {
+        (Some(schedule), Some(commitment)) => build_pohw_stratum_job_from_template(
+            &material,
+            schedule,
+            commitment,
+            state.config.extranonce2_size,
+        )?,
+        (None, None) => build_stratum_job_from_template(&material, state.config.extranonce2_size)?,
+        _ => bail!("payout schedule and PoHW commitment must be supplied together"),
+    };
+    let job = built.job;
+    job.validate()?;
+    job.validate_example_policy(false)?;
+    let block_target = block_target_hex_from_job_nbits(&job.nbits)?;
+    ensure_share_target_not_stricter_than_block_target(&state.share_target, &block_target)?;
+
+    let mut current = state.job.write().await;
+    if *current == job {
+        return Ok(None);
+    }
+    let job_id = job.job_id.clone();
+    *current = job.clone();
+    drop(current);
+    let _ = state.job_updates.send(job);
+    Ok(Some(job_id))
 }
 
 pub(crate) async fn build_stratum_job_from_rpc(
@@ -309,13 +411,22 @@ fn build_stratum_job_from_parts(
         }
     }
     let merkle_branches = coinbase_merkle_branches(&material.transaction_hashes)?;
+    let job_fingerprint_payload = serde_json::to_vec(&(
+        material.version,
+        &material.previous_block_hash,
+        material.curtime,
+        &material.bits,
+        material.height,
+        material.coinbase_value_sats,
+        &coinbase1,
+        &coinbase2,
+        &merkle_branches,
+        &material.transactions,
+    ))
+    .context("failed to encode Stratum job fingerprint")?;
+    let job_fingerprint = sha256d::Hash::hash(&job_fingerprint_payload).to_string();
     let job = StratumJob {
-        job_id: format!(
-            "gbt-{}-{}-{}",
-            material.height,
-            material.curtime,
-            &material.previous_block_hash[..8]
-        ),
+        job_id: format!("gbt-{}-{}", material.height, &job_fingerprint[..16]),
         version: hex::encode(material.version.to_le_bytes()),
         prevhash: display_hash_to_header_order_hex(&material.previous_block_hash)?,
         coinbase1,
@@ -672,23 +783,41 @@ async fn handle_stratum_connection(
 ) -> Result<()> {
     let extranonce1 = random_nonce_hex()[..8].to_string();
     let mut authorized = false;
+    let mut subscribed = false;
     let mut submitted = BTreeSet::new();
+    let mut job_updates = state.job_updates.subscribe();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
+    let idle_duration = Duration::from_secs(state.config.idle_timeout_seconds);
+    let idle_timer = sleep(idle_duration);
+    tokio::pin!(idle_timer);
 
     loop {
-        let read_result = timeout(
-            Duration::from_secs(state.config.idle_timeout_seconds),
-            read_bounded_line(&mut reader, state.config.max_line_bytes),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "Stratum idle timeout after {} seconds",
-                state.config.idle_timeout_seconds
-            )
-        })?;
-        let Some(line) = read_result? else {
+        let read_result = tokio::select! {
+            _ = &mut idle_timer => {
+                bail!(
+                    "Stratum idle timeout after {} seconds",
+                    state.config.idle_timeout_seconds
+                );
+            }
+            update = job_updates.recv(), if subscribed => {
+                let job = match update {
+                    Ok(job) => job,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        state.job.read().await.clone()
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                };
+                submitted.clear();
+                send_notification(&mut write_half, "mining.notify", job.notify_params()).await?;
+                continue;
+            }
+            read_result = read_bounded_line(&mut reader, state.config.max_line_bytes) => {
+                read_result?
+            }
+        };
+        idle_timer.as_mut().reset(Instant::now() + idle_duration);
+        let Some(line) = read_result else {
             return Ok(());
         };
         if line.trim().is_empty() {
@@ -717,6 +846,8 @@ async fn handle_stratum_connection(
                 send_response(&mut write_half, id, json!({}), None).await?;
             }
             "mining.subscribe" => {
+                subscribed = true;
+                job_updates = state.job_updates.subscribe();
                 let result = json!([
                     [
                         ["mining.set_difficulty", "pohw-diff"],
@@ -732,8 +863,8 @@ async fn handle_stratum_connection(
                     vec![json!(state.config.stratum_difficulty)],
                 )
                 .await?;
-                send_notification(&mut write_half, "mining.notify", state.job.notify_params())
-                    .await?;
+                let job = state.job.read().await.clone();
+                send_notification(&mut write_half, "mining.notify", job.notify_params()).await?;
             }
             "mining.authorize" => {
                 match authorize_password_matches(&request, state.stratum_password.as_deref()) {
@@ -783,7 +914,7 @@ async fn handle_stratum_connection(
                     "{}:{}:{}:{}",
                     submit.job_id, submit.extranonce2, submit.ntime, submit.nonce
                 );
-                if !submitted.insert(duplicate_key) {
+                if !submitted.insert(duplicate_key.clone()) {
                     send_response(
                         &mut write_half,
                         id,
@@ -793,7 +924,8 @@ async fn handle_stratum_connection(
                     .await?;
                     continue;
                 }
-                match accept_submit(&state, &submit, &extranonce1).await {
+                let job = state.job.read().await.clone();
+                match accept_submit(&state, &job, &submit, &extranonce1).await {
                     Ok(summary) => {
                         eprintln!(
                             "accepted Stratum share from {peer_addr}: worker={} hash={} share={} extranonce1={} extranonce2={} ntime={} nonce={} meets_block_target={}",
@@ -812,9 +944,27 @@ async fn handle_stratum_connection(
                                 path.display()
                             );
                         }
+                        if let Some(submission) = &summary.block_submit {
+                            if let Some(outcome) = &submission.outcome {
+                                eprintln!(
+                                    "submitted block candidate {} to Bitcoin RPC: status={} reject_reason={}",
+                                    summary.work_hash,
+                                    outcome.status,
+                                    outcome.reject_reason.as_deref().unwrap_or("none")
+                                );
+                            } else if let Some(error) = &submission.error {
+                                eprintln!(
+                                    "failed to submit block candidate {} to Bitcoin RPC: {}",
+                                    summary.work_hash, error
+                                );
+                            }
+                        }
                         send_response(&mut write_half, id, Value::Bool(true), None).await?;
                     }
                     Err(err) => {
+                        if err.downcast_ref::<local_node::LocalAppendError>().is_some() {
+                            submitted.remove(&duplicate_key);
+                        }
                         send_response(
                             &mut write_half,
                             id,
@@ -998,13 +1148,14 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 async fn accept_submit(
     state: &AdapterState,
+    job: &StratumJob,
     submit: &SubmitWork,
     extranonce1: &str,
 ) -> Result<AcceptedShareSummary> {
-    if submit.job_id != state.job.job_id {
+    if submit.job_id != job.job_id {
         bail!("unknown Stratum job id {}", submit.job_id);
     }
-    let bitcoin_header_hex = build_header_hex_from_submit(&state.job, submit, extranonce1)?;
+    let bitcoin_header_hex = build_header_hex_from_submit(job, submit, extranonce1)?;
     let work_hash = sha256d::Hash::hash(&decode_hex_exact_bytes(
         "bitcoin_header",
         &bitcoin_header_hex,
@@ -1013,7 +1164,7 @@ async fn accept_submit(
     .to_string();
     ensure_hash_meets_target(&work_hash, &state.share_target)?;
     let block_candidate = build_stratum_block_candidate(
-        &state.job,
+        job,
         extranonce1,
         &submit.extranonce2,
         &submit.ntime,
@@ -1025,6 +1176,7 @@ async fn accept_submit(
         state.config.block_candidate_dir.as_deref(),
         &block_candidate,
     )?;
+    let block_submit = maybe_submit_block_candidate(state, &block_candidate).await;
 
     let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex(
         state.config.miner_id.clone(),
@@ -1088,11 +1240,41 @@ async fn accept_submit(
         block_target: block_candidate.block_target,
         meets_block_target: block_candidate.meets_block_target,
         block_candidate_file,
+        block_submit,
         target: state.share_target.clone(),
         template_hash,
         share_hash,
         template_publish,
         share_publish,
+    })
+}
+
+async fn maybe_submit_block_candidate(
+    state: &AdapterState,
+    candidate: &StratumBlockCandidate,
+) -> Option<BlockSubmitSummary> {
+    if !state.config.auto_submit_blocks || !candidate.meets_block_target {
+        return None;
+    }
+    let result = async {
+        let client = state
+            .config
+            .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC client is not configured")?;
+        let block_hex = block_hex_for_stratum_candidate_submission(candidate)?;
+        client.submit_block(block_hex).await
+    }
+    .await;
+    Some(match result {
+        Ok(outcome) => BlockSubmitSummary {
+            outcome: Some(outcome),
+            error: None,
+        },
+        Err(err) => BlockSubmitSummary {
+            outcome: None,
+            error: Some(format!("{err:#}")),
+        },
     })
 }
 
@@ -1878,6 +2060,10 @@ pub(crate) fn default_idle_timeout_seconds() -> u64 {
     DEFAULT_IDLE_TIMEOUT_SECONDS
 }
 
+pub(crate) fn default_job_refresh_interval_seconds() -> u64 {
+    DEFAULT_JOB_REFRESH_INTERVAL_SECONDS
+}
+
 struct ConnectionLimiter {
     max_connections: usize,
     max_connections_per_ip: usize,
@@ -2101,7 +2287,8 @@ mod tests {
         let built = build_stratum_job_from_template(&material, 4).unwrap();
         let job = built.job;
 
-        assert_eq!(job.job_id, "gbt-840000-16909060-00010203");
+        assert!(job.job_id.starts_with("gbt-840000-"));
+        assert_eq!(job.job_id.len(), "gbt-840000-".len() + 16);
         assert_eq!(job.version, "00000020");
         assert_eq!(
             job.prevhash,
@@ -2113,6 +2300,27 @@ mod tests {
         assert_eq!(job.transaction_data, Vec::<String>::new());
         assert_ne!(job.job_id, PACKAGED_EXAMPLE_JOB_ID);
         job.validate().unwrap();
+    }
+
+    #[test]
+    fn rpc_job_id_changes_when_template_transactions_change() {
+        let first = build_stratum_job_from_template(&mining_job_material(), 4)
+            .unwrap()
+            .job;
+        let mut changed = mining_job_material();
+        let transaction = non_coinbase_transaction(7);
+        changed.transaction_hashes.push(transaction.txid.clone());
+        changed.transactions.push(transaction);
+        let second = build_stratum_job_from_template(&changed, 4).unwrap().job;
+
+        assert_ne!(first.job_id, second.job_id);
+        assert_eq!(
+            first.job_id,
+            build_stratum_job_from_template(&mining_job_material(), 4)
+                .unwrap()
+                .job
+                .job_id
+        );
     }
 
     #[test]

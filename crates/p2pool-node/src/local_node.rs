@@ -11,11 +11,11 @@ use pohw_core::snapshot::Snapshot;
 use pohw_core::vault::vault_script_pubkey_hex;
 use pohw_core::{canonical_json, hash_hex, sha256_tagged};
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -32,12 +32,15 @@ const APPEND_LOCK: &str = "sharechain.append.lock";
 const GOSSIP_PEERS_LOCK: &str = "gossip-peers.lock";
 const CORRUPT_LOG_DIR: &str = "corrupt-log-lines";
 const STALE_APPEND_LOCK_SECONDS: u64 = 300;
+const APPEND_LOCK_ATTEMPTS: usize = 400;
 const MAX_GOSSIP_PEERS: usize = 512;
 const MAX_SNAPSHOT_FILES: usize = 512;
 const MAX_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SHARECHAIN_INPUT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 static GOSSIP_ENVELOPE_CACHE: OnceLock<StdMutex<BTreeMap<PathBuf, GossipEnvelopeCacheEntry>>> =
+    OnceLock::new();
+static SHARECHAIN_REPLAY_CACHE: OnceLock<StdMutex<BTreeMap<PathBuf, ReplayCacheEntry>>> =
     OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,20 @@ struct GossipEnvelopeCacheEntry {
 pub struct SharechainLogStamp {
     pub len: u64,
     pub modified_unix_nanos: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReplayCacheEntry {
+    log_stamp: Option<SharechainLogStamp>,
+    accepted_template_stamp: Option<SharechainLogStamp>,
+    message_count: usize,
+    state: SharechainReplayState,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LocalAppendError {
+    #[error("{label} lock at {path} is busy after bounded retry")]
+    LockBusy { label: String, path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +384,23 @@ pub fn accept_bitcoin_work_template(
     file.sync_all()
         .context("failed to sync accepted Bitcoin work template log")?;
     sync_dir(datadir)?;
+    if let Some(cache) = SHARECHAIN_REPLAY_CACHE.get() {
+        let mut cache = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?;
+        let cache_key = replay_cache_key(datadir);
+        if let Some(entry) = cache.get_mut(&cache_key) {
+            if entry
+                .state
+                .accept_bitcoin_work_template_prefix(&template.header_prefix_hex)
+                .is_ok()
+            {
+                entry.accepted_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
+            } else {
+                cache.remove(&cache_key);
+            }
+        }
+    }
     Ok(AcceptBitcoinWorkTemplateResult {
         template_hash,
         outcome: ApplyOutcome::Applied,
@@ -397,9 +431,35 @@ pub fn append_gossip_envelope(
     max_future_skew_seconds: i64,
     max_age_seconds: i64,
 ) -> Result<AppendGossipEnvelopeResult> {
+    append_gossip_envelope_with_freshness(
+        datadir,
+        envelope,
+        max_future_skew_seconds,
+        Some(max_age_seconds),
+    )
+}
+
+pub fn append_historical_gossip_envelope(
+    datadir: &Path,
+    envelope: GossipEnvelope,
+    max_future_skew_seconds: i64,
+) -> Result<AppendGossipEnvelopeResult> {
+    append_gossip_envelope_with_freshness(datadir, envelope, max_future_skew_seconds, None)
+}
+
+fn append_gossip_envelope_with_freshness(
+    datadir: &Path,
+    envelope: GossipEnvelope,
+    max_future_skew_seconds: i64,
+    max_age_seconds: Option<i64>,
+) -> Result<AppendGossipEnvelopeResult> {
     ensure_datadir(datadir)?;
     let now = current_unix_timestamp()?;
-    envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    if let Some(max_age_seconds) = max_age_seconds {
+        envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    } else {
+        envelope.verify_durable_at(now, max_future_skew_seconds)?;
+    }
     let envelope_hash = envelope.envelope_hash();
     let peer_pubkey_xonly_hex = envelope.peer_pubkey_xonly_hex.clone();
     let message_hash = envelope.message.message_hash();
@@ -414,7 +474,8 @@ pub fn append_gossip_envelope(
     let mut message_result = append_message_locked(datadir, message)?;
     if !stored_gossip_envelope_exists_locked(datadir, &message_hash)? {
         append_stored_gossip_envelope_locked(datadir, stored)?;
-        message_result.status = local_node_status_with_repair(datadir, TruncatedTailRepair::Force)?;
+        message_result.status.gossip_envelope_count =
+            read_gossip_envelopes_with_repair(datadir, TruncatedTailRepair::Force)?.len();
     }
     Ok(AppendGossipEnvelopeResult {
         envelope_hash,
@@ -433,9 +494,20 @@ fn append_message_locked(
     datadir: &Path,
     message: SharechainMessage,
 ) -> Result<AppendMessageResult> {
-    let mut state = replay_state_for_append(datadir)?;
+    let cache_key = replay_cache_key(datadir);
+    let cache = SHARECHAIN_REPLAY_CACHE.get_or_init(|| StdMutex::new(BTreeMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?;
+    let mut entry = match cache.remove(&cache_key) {
+        Some(mut entry) => {
+            refresh_replay_cache_entry(datadir, &mut entry)?;
+            entry
+        }
+        None => build_replay_cache_entry(datadir)?,
+    };
     let message_hash = message.message_hash();
-    let outcome = state.apply_message(&message)?;
+    let outcome = entry.state.apply_message(&message)?;
     if outcome == ApplyOutcome::Applied {
         let mut file = open_append_datadir_file(&log_path(datadir), "sharechain log")?;
         serde_json::to_writer(&mut file, &message)
@@ -445,11 +517,35 @@ fn append_message_locked(
         file.flush().context("failed to flush sharechain log")?;
         file.sync_all().context("failed to sync sharechain log")?;
         sync_dir(datadir)?;
+        entry.message_count = entry.message_count.saturating_add(1);
     }
+    entry.log_stamp = sharechain_log_stamp(datadir)?;
+    entry.accepted_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
+    let index = build_sharechain_index(
+        datadir,
+        entry.log_stamp.clone(),
+        entry.accepted_template_stamp.clone(),
+        entry.message_count,
+        &entry.state,
+    )?;
+    write_sharechain_index(datadir, &index)?;
+    let status = LocalNodeStatus {
+        datadir: datadir.to_path_buf(),
+        sharechain_log: log_path(datadir),
+        gossip_envelope_log: gossip_envelope_log_path(datadir),
+        log_line_count: entry.message_count,
+        gossip_envelope_count: read_gossip_envelopes_with_repair(
+            datadir,
+            TruncatedTailRepair::Force,
+        )?
+        .len(),
+        replay: entry.state.summary(),
+    };
+    cache.insert(cache_key, entry);
     Ok(AppendMessageResult {
         message_hash,
         outcome,
-        status: local_node_status_with_repair(datadir, TruncatedTailRepair::Force)?,
+        status,
     })
 }
 
@@ -911,8 +1007,119 @@ fn replay_state_for_confirmed_payout_commitment_with_repair(
     );
 }
 
-fn replay_state_for_append(datadir: &Path) -> Result<SharechainReplayState> {
-    replay_state_for_repair(datadir, TruncatedTailRepair::Force)
+fn replay_cache_key(datadir: &Path) -> PathBuf {
+    fs::canonicalize(datadir).unwrap_or_else(|_| datadir.to_path_buf())
+}
+
+fn build_replay_cache_entry(datadir: &Path) -> Result<ReplayCacheEntry> {
+    ensure_datadir(datadir)?;
+    let mut state =
+        replay_state_with_accepted_bitcoin_work_templates(datadir, TruncatedTailRepair::Force)?;
+    let messages = read_messages_with_repair(datadir, TruncatedTailRepair::Force)?;
+    for message in &messages {
+        state.apply_message(message)?;
+    }
+    Ok(ReplayCacheEntry {
+        log_stamp: sharechain_log_stamp(datadir)?,
+        accepted_template_stamp: accepted_bitcoin_work_templates_log_stamp(datadir)?,
+        message_count: messages.len(),
+        state,
+    })
+}
+
+fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> Result<()> {
+    let current_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
+    let cached_template_len = entry
+        .accepted_template_stamp
+        .as_ref()
+        .map_or(0, |stamp| stamp.len);
+    let current_template_len = current_template_stamp.as_ref().map_or(0, |stamp| stamp.len);
+    if current_template_len < cached_template_len
+        || (current_template_len == cached_template_len
+            && current_template_stamp != entry.accepted_template_stamp)
+    {
+        *entry = build_replay_cache_entry(datadir)?;
+        return Ok(());
+    }
+    if current_template_len > cached_template_len {
+        for template in read_ndjson_tail::<BitcoinWorkTemplate>(
+            &accepted_bitcoin_work_templates_log_path(datadir),
+            "accepted Bitcoin work template log",
+            cached_template_len,
+        )? {
+            entry
+                .state
+                .accept_bitcoin_work_template_prefix(&template.header_prefix_hex)?;
+        }
+        entry.accepted_template_stamp = current_template_stamp;
+    }
+
+    let current_log_stamp = sharechain_log_stamp(datadir)?;
+    let cached_log_len = entry.log_stamp.as_ref().map_or(0, |stamp| stamp.len);
+    let current_log_len = current_log_stamp.as_ref().map_or(0, |stamp| stamp.len);
+    if current_log_len < cached_log_len
+        || (current_log_len == cached_log_len && current_log_stamp != entry.log_stamp)
+    {
+        *entry = build_replay_cache_entry(datadir)?;
+        return Ok(());
+    }
+    if current_log_len > cached_log_len {
+        let messages = read_ndjson_tail::<SharechainMessage>(
+            &log_path(datadir),
+            "sharechain log",
+            cached_log_len,
+        )?;
+        for message in &messages {
+            entry.state.apply_message(message)?;
+        }
+        entry.message_count = entry.message_count.saturating_add(messages.len());
+        entry.log_stamp = current_log_stamp;
+    }
+    Ok(())
+}
+
+fn read_ndjson_tail<T: DeserializeOwned>(path: &Path, label: &str, offset: u64) -> Result<Vec<T>> {
+    let Some(metadata) = validate_datadir_file(path, label)? else {
+        if offset == 0 {
+            return Ok(Vec::new());
+        }
+        anyhow::bail!("{label} disappeared before byte offset {offset}");
+    };
+    if metadata.len() < offset {
+        anyhow::bail!(
+            "{label} shrank from cached byte offset {offset} to {}",
+            metadata.len()
+        );
+    }
+    let mut file = File::open(path).with_context(|| format!("failed to open {label}"))?;
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("failed to seek {label} to byte offset {offset}"))?;
+    let mut reader = BufReader::new(file);
+    let mut values = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .with_context(|| format!("failed to read {label} tail"))?;
+        if read == 0 {
+            break;
+        }
+        if read > MAX_SHARECHAIN_INPUT_FILE_BYTES as usize {
+            anyhow::bail!("{label} tail line exceeds maximum size");
+        }
+        if !line.ends_with('\n') {
+            anyhow::bail!("{label} has an incomplete appended line");
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        values.push(
+            serde_json::from_str(&line)
+                .with_context(|| format!("failed to parse appended {label} line"))?,
+        );
+    }
+    Ok(values)
 }
 
 fn replay_state_with_accepted_bitcoin_work_templates(
@@ -2197,7 +2404,12 @@ fn normalize_miner_id_for_lookup(field: &str, value: &str) -> Result<String> {
 }
 
 fn acquire_append_lock(datadir: &Path) -> Result<AppendLock> {
-    acquire_lock(datadir, lock_path(datadir), "sharechain append", 1)
+    acquire_lock(
+        datadir,
+        lock_path(datadir),
+        "sharechain append",
+        APPEND_LOCK_ATTEMPTS,
+    )
 }
 
 fn acquire_peer_book_lock(datadir: &Path) -> Result<AppendLock> {
@@ -2222,24 +2434,24 @@ fn acquire_lock(datadir: &Path, path: PathBuf, label: &str, attempts: usize) -> 
         }
         match options.open(&path) {
             Ok(mut file) => {
-                file.write_all(
-                    format!("{} {}", std::process::id(), current_unix_timestamp()?).as_bytes(),
-                )
-                .with_context(|| format!("failed to write {label} lock"))?;
+                let owner_token = format!("{} {}", std::process::id(), current_unix_timestamp()?);
+                file.write_all(owner_token.as_bytes())
+                    .with_context(|| format!("failed to write {label} lock"))?;
                 file.sync_all()
                     .with_context(|| format!("failed to sync {label} lock"))?;
                 sync_dir(datadir)?;
-                return Ok(AppendLock { path });
+                return Ok(AppendLock { path, owner_token });
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 if attempt + 1 < attempts {
                     thread::sleep(Duration::from_millis(25));
                     continue;
                 }
-                anyhow::bail!(
-                    "{label} lock already exists at {}; another operation may be running",
-                    path.display()
-                );
+                return Err(LocalAppendError::LockBusy {
+                    label: label.to_string(),
+                    path,
+                }
+                .into());
             }
             Err(err) => {
                 return Err(err).with_context(|| format!("failed to create {}", path.display()))
@@ -2251,11 +2463,14 @@ fn acquire_lock(datadir: &Path, path: PathBuf, label: &str, attempts: usize) -> 
 
 struct AppendLock {
     path: PathBuf,
+    owner_token: String,
 }
 
 impl Drop for AppendLock {
     fn drop(&mut self) {
-        if fs::remove_file(&self.path).is_ok() {
+        if fs::read_to_string(&self.path).is_ok_and(|value| value.trim() == self.owner_token)
+            && fs::remove_file(&self.path).is_ok()
+        {
             if let Some(parent) = self.path.parent() {
                 let _ = sync_dir(parent);
             }
@@ -2274,6 +2489,9 @@ fn remove_stale_lock(path: &Path, label: &str) -> Result<()> {
                 if now.saturating_sub(created_at_unix)
                     >= i64::try_from(STALE_APPEND_LOCK_SECONDS).unwrap_or(i64::MAX)
                 {
+                    if lock_owner_is_alive(&lock_text) {
+                        return Ok(());
+                    }
                     fs::remove_file(path).with_context(|| {
                         format!("failed to remove stale {label} lock {}", path.display())
                     })?;
@@ -2287,10 +2505,32 @@ fn remove_stale_lock(path: &Path, label: &str) -> Result<()> {
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok());
     if age.is_some_and(|age| age >= Duration::from_secs(STALE_APPEND_LOCK_SECONDS)) {
+        if fs::read_to_string(path).is_ok_and(|lock_text| lock_owner_is_alive(&lock_text)) {
+            return Ok(());
+        }
         fs::remove_file(path)
             .with_context(|| format!("failed to remove stale {label} lock {}", path.display()))?;
     }
     Ok(())
+}
+
+fn lock_owner_is_alive(lock_text: &str) -> bool {
+    let Some(pid) = lock_text
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 fn lock_file_metadata(path: &Path, label: &str) -> Result<Option<fs::Metadata>> {
@@ -3265,6 +3505,23 @@ mod tests {
     }
 
     #[test]
+    fn historical_append_accepts_old_signed_dependency_only() {
+        let datadir = temp_dir("historical-gossip-envelope");
+        let keypair = keypair(7);
+        let mut envelope = test_gossip_envelope();
+        envelope.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
+        envelope.sign(&keypair).unwrap();
+
+        let live_error = append_gossip_envelope(&datadir, envelope.clone(), 300, 86_400)
+            .expect_err("live submission must enforce max age");
+        assert!(live_error.to_string().contains("older than max age"));
+
+        let historical = append_historical_gossip_envelope(&datadir, envelope, 300).unwrap();
+        assert_eq!(historical.message_result.outcome, ApplyOutcome::Applied);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
     fn gossip_envelope_cache_refreshes_when_log_changes() {
         let datadir = temp_dir("gossip-cache-refreshes");
         assert!(gossip_inventory(&datadir).unwrap().is_empty());
@@ -3334,6 +3591,51 @@ mod tests {
         assert_eq!(refreshed.message_count, 1);
         assert_eq!(refreshed.replay.applied_message_count, 1);
         assert!(refreshed.replay.last_message_hash.is_some());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn append_cache_replays_only_externally_appended_tail() {
+        let datadir = temp_dir("sharechain-cache-tail");
+        append_message(&datadir, test_message()).unwrap();
+
+        let mut external = test_message();
+        let SharechainMessage::PohwCommitment(external_commitment) = &mut external else {
+            unreachable!()
+        };
+        external_commitment.vault_epoch_id = 2;
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(log_path(&datadir))
+            .unwrap();
+        serde_json::to_writer(&mut file, &external).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+
+        let mut local = test_message();
+        let SharechainMessage::PohwCommitment(local_commitment) = &mut local else {
+            unreachable!()
+        };
+        local_commitment.vault_epoch_id = 3;
+        let result = append_message(&datadir, local).unwrap();
+
+        assert_eq!(result.status.log_line_count, 3);
+        assert_eq!(result.status.replay.applied_message_count, 3);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn append_waits_for_short_lived_lock_contention() {
+        let datadir = temp_dir("sharechain-lock-contention");
+        let lock = acquire_append_lock(&datadir).unwrap();
+        let worker_datadir = datadir.clone();
+        let worker = thread::spawn(move || append_message(&worker_datadir, test_message()));
+        thread::sleep(Duration::from_millis(100));
+        drop(lock);
+
+        let result = worker.join().unwrap().unwrap();
+
+        assert_eq!(result.outcome, ApplyOutcome::Applied);
         fs::remove_dir_all(datadir).unwrap();
     }
 

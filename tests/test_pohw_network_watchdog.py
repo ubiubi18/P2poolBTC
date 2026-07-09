@@ -50,6 +50,12 @@ exit 0
         fake.chmod(0o700)
         return fake
 
+    def write_fake_ip_without_default_route(self, root: Path) -> Path:
+        fake = root / "fake-ip.sh"
+        fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o700)
+        return fake
+
     def run_watchdog(
         self,
         root: Path,
@@ -129,6 +135,53 @@ exit 0
         self.assertIn("Network watchdog still failing after restart attempt: 3/4.", third.stdout)
         self.assertEqual(status["status"], "reboot_requested")
         self.assertEqual(status["failureCount"], 4)
+        self.assertIn("try-restart NetworkManager.service", log)
+        self.assertEqual(log[-1], "reboot")
+
+    def test_missing_route_targets_uses_same_restart_and_reboot_thresholds(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-network-watchdog-no-route-") as temp:
+            root = Path(temp)
+            self.write_fake_ping(root)
+            self.write_fake_systemctl(root)
+            fake_ip = self.write_fake_ip_without_default_route(root)
+            no_route_env = {
+                "POHW_NETWORK_WATCHDOG_TARGETS": "",
+                "POHW_NETWORK_WATCHDOG_IP_BIN": str(fake_ip),
+            }
+
+            first = self.run_watchdog(root, extra_env=no_route_env)
+            second = self.run_watchdog(root, extra_env=no_route_env)
+            third = self.run_watchdog(root, extra_env=no_route_env)
+            fourth = self.run_watchdog(root, extra_env=no_route_env)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(third.returncode, 0, third.stderr)
+            self.assertEqual(fourth.returncode, 0, fourth.stderr)
+            self.assertTrue(
+                (root / "state" / "status.json").exists(),
+                "\n".join(
+                    [
+                        first.stdout,
+                        first.stderr,
+                        second.stdout,
+                        second.stderr,
+                        third.stdout,
+                        third.stderr,
+                        fourth.stdout,
+                        fourth.stderr,
+                    ]
+                ),
+            )
+
+            status = self.read_status(root)
+            log = (root / "systemctl.log").read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("No network watchdog targets found", first.stdout)
+        self.assertIn("Restarting active network service: NetworkManager.service", second.stdout)
+        self.assertEqual(status["status"], "reboot_requested")
+        self.assertEqual(status["failureCount"], 4)
+        self.assertEqual(status["targets"], [])
         self.assertIn("try-restart NetworkManager.service", log)
         self.assertEqual(log[-1], "reboot")
 

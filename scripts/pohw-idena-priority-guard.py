@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+RUNTIME_ROOT = SCRIPT_DIR if (SCRIPT_DIR / "pohw_idena_rpc").is_dir() else SCRIPT_DIR.parent
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
 
 from pohw_idena_rpc.idena_rpc_client_minimal import (  # noqa: E402
     IdenaRPCClientMinimal,
@@ -75,7 +76,7 @@ class SystemdServiceManager:
         if self.dry_run:
             print(f"Dry-run: would stop {service}")
             return
-        subprocess.run([self.systemctl_bin, "stop", service], check=True)
+        subprocess.run([self.systemctl_bin, "--no-block", "stop", service], check=True)
 
     def start(self, service: str) -> None:
         if self.dry_run:
@@ -134,8 +135,7 @@ def parse_keywords(raw: str | None) -> tuple[str, ...]:
 
 def load_config(env: dict[str, str] | None = None) -> GuardConfig:
     env = env or os.environ
-    datadir = Path(env.get("POHW_DATADIR", "/mnt/ssd/pohw-p2pool"))
-    state_dir = Path(env.get("POHW_IDENA_PRIORITY_STATE_DIR", str(datadir / "idena-priority")))
+    state_dir = Path(env.get("POHW_IDENA_PRIORITY_STATE_DIR", "/var/lib/pohw/idena-priority"))
     return GuardConfig(
         state_dir=state_dir,
         status_file=Path(env.get("POHW_IDENA_PRIORITY_STATUS_FILE", str(state_dir / "status.json"))),

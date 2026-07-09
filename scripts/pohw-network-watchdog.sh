@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATADIR="${POHW_DATADIR:-/mnt/ssd/pohw-p2pool}"
-STATE_DIR="${POHW_NETWORK_WATCHDOG_STATE_DIR:-$DATADIR/network-watchdog}"
+STATE_DIR="${POHW_NETWORK_WATCHDOG_STATE_DIR:-/var/lib/pohw/network-watchdog}"
 TARGETS="${POHW_NETWORK_WATCHDOG_TARGETS:-}"
 PING_TIMEOUT_SECONDS="${POHW_NETWORK_WATCHDOG_PING_TIMEOUT_SECONDS:-2}"
 RESTART_THRESHOLD="${POHW_NETWORK_WATCHDOG_RESTART_THRESHOLD:-3}"
@@ -233,6 +232,40 @@ request_reboot() {
   fi
 }
 
+handle_failed_check() {
+  local waiting_status="$1"
+  local failure_detail="$2"
+  shift 2
+  local failure_count
+
+  failure_count="$(read_failure_count)"
+  failure_count=$((failure_count + 1))
+  printf '%s\n' "$failure_count" > "$FAILURE_COUNT_FILE"
+  chmod 600 "$FAILURE_COUNT_FILE"
+
+  if (( failure_count >= REBOOT_THRESHOLD )); then
+    write_status "reboot_requested" "$failure_count" "$failure_detail Reboot threshold reached." "$@"
+    request_reboot "$failure_count"
+    return
+  fi
+
+  if (( failure_count >= RESTART_THRESHOLD )); then
+    if [[ ! -e "$RESTART_MARKER_FILE" ]]; then
+      write_status "network_restart_requested" "$failure_count" "$failure_detail Restarting active network services once for this failure streak." "$@"
+      restart_network_services
+      date -u +%Y%m%dT%H%M%SZ > "$RESTART_MARKER_FILE"
+      chmod 600 "$RESTART_MARKER_FILE"
+      return
+    fi
+    write_status "waiting_after_network_restart" "$failure_count" "$failure_detail Network services were already restarted for this failure streak." "$@"
+    echo "Network watchdog still failing after restart attempt: $failure_count/$REBOOT_THRESHOLD."
+    return
+  fi
+
+  write_status "$waiting_status" "$failure_count" "$failure_detail Below recovery threshold." "$@"
+  echo "Network watchdog failed $failure_count/$REBOOT_THRESHOLD checks."
+}
+
 if ! is_unsigned_int "$PING_TIMEOUT_SECONDS" || ! is_unsigned_int "$RESTART_THRESHOLD" || ! is_unsigned_int "$REBOOT_THRESHOLD"; then
   echo "Watchdog thresholds and timeout must be unsigned integers." >&2
   exit 1
@@ -252,12 +285,8 @@ while IFS= read -r target; do
   fi
 done < <(resolve_targets)
 if (( ${#targets[@]} == 0 )); then
-  failure_count="$(read_failure_count)"
-  failure_count=$((failure_count + 1))
-  printf '%s\n' "$failure_count" > "$FAILURE_COUNT_FILE"
-  chmod 600 "$FAILURE_COUNT_FILE"
-  write_status "no_targets" "$failure_count" "No gateway or configured watchdog target was found."
   echo "No network watchdog targets found."
+  handle_failed_check "no_targets" "No gateway or configured watchdog target was found."
   exit 0
 fi
 
@@ -272,29 +301,4 @@ for target in "${targets[@]}"; do
   fi
 done
 
-failure_count="$(read_failure_count)"
-failure_count=$((failure_count + 1))
-printf '%s\n' "$failure_count" > "$FAILURE_COUNT_FILE"
-chmod 600 "$FAILURE_COUNT_FILE"
-
-if (( failure_count >= REBOOT_THRESHOLD )); then
-  write_status "reboot_requested" "$failure_count" "All watchdog targets failed; reboot threshold reached." "${targets[@]}"
-  request_reboot "$failure_count"
-  exit 0
-fi
-
-if (( failure_count >= RESTART_THRESHOLD )); then
-  if [[ ! -e "$RESTART_MARKER_FILE" ]]; then
-    write_status "network_restart_requested" "$failure_count" "All watchdog targets failed; restarting active network services once for this failure streak." "${targets[@]}"
-    restart_network_services
-    date -u +%Y%m%dT%H%M%SZ > "$RESTART_MARKER_FILE"
-    chmod 600 "$RESTART_MARKER_FILE"
-    exit 0
-  fi
-  write_status "waiting_after_network_restart" "$failure_count" "All watchdog targets still failing after network restart attempt." "${targets[@]}"
-  echo "Network watchdog still failing after restart attempt: $failure_count/$REBOOT_THRESHOLD."
-  exit 0
-fi
-
-write_status "waiting" "$failure_count" "All watchdog targets failed; below recovery threshold." "${targets[@]}"
-echo "Network watchdog failed $failure_count/$REBOOT_THRESHOLD checks."
+handle_failed_check "waiting" "All watchdog targets failed." "${targets[@]}"

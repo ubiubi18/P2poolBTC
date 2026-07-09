@@ -129,15 +129,24 @@ impl GossipEnvelope {
         max_future_skew_seconds: i64,
         max_age_seconds: i64,
     ) -> Result<(), GossipError> {
-        self.verify_signature()?;
-        if self.created_at_unix > now_unix.saturating_add(max_future_skew_seconds) {
-            return Err(GossipError::FutureTimestamp {
+        self.verify_durable_at(now_unix, max_future_skew_seconds)?;
+        if max_age_seconds > 0 && self.created_at_unix < now_unix.saturating_sub(max_age_seconds) {
+            return Err(GossipError::StaleTimestamp {
                 created_at_unix: self.created_at_unix,
                 now_unix,
             });
         }
-        if max_age_seconds > 0 && self.created_at_unix < now_unix.saturating_sub(max_age_seconds) {
-            return Err(GossipError::StaleTimestamp {
+        Ok(())
+    }
+
+    pub fn verify_durable_at(
+        &self,
+        now_unix: i64,
+        max_future_skew_seconds: i64,
+    ) -> Result<(), GossipError> {
+        self.verify_signature()?;
+        if self.created_at_unix > now_unix.saturating_add(max_future_skew_seconds) {
+            return Err(GossipError::FutureTimestamp {
                 created_at_unix: self.created_at_unix,
                 now_unix,
             });
@@ -216,6 +225,31 @@ mod tests {
         envelope
             .verify_at(1_782_800_001, 60, 3_600)
             .expect("fresh signed envelope must verify");
+    }
+
+    #[test]
+    fn durable_verification_accepts_old_signed_envelope_but_rejects_future_timestamp() {
+        let keypair = keypair(41);
+        let mut envelope = GossipEnvelope::unsigned(
+            keypair.x_only_public_key().0.to_string(),
+            1_700_000_000,
+            "23".repeat(32),
+            message(),
+        )
+        .unwrap();
+        envelope.sign(&keypair).unwrap();
+
+        assert!(matches!(
+            envelope.verify_at(1_800_000_000, 60, 3_600),
+            Err(GossipError::StaleTimestamp { .. })
+        ));
+        envelope
+            .verify_durable_at(1_800_000_000, 60)
+            .expect("historical bootstrap verifies durable signature and future bound");
+        assert!(matches!(
+            envelope.verify_durable_at(1_600_000_000, 60),
+            Err(GossipError::FutureTimestamp { .. })
+        ));
     }
 
     #[test]

@@ -581,6 +581,26 @@ enum Command {
         max_stratum_line_bytes: usize,
         #[arg(long, default_value_t = mining_adapter::default_idle_timeout_seconds())]
         stratum_idle_timeout_seconds: u64,
+        #[arg(long)]
+        refresh_job_from_rpc: bool,
+        #[arg(long, default_value_t = mining_adapter::default_job_refresh_interval_seconds())]
+        job_refresh_interval_seconds: u64,
+        #[arg(long)]
+        auto_submit_blocks: bool,
+        #[arg(long)]
+        payout_schedule_file: Option<PathBuf>,
+        #[arg(long)]
+        pohw_commitment_file: Option<PathBuf>,
+        #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
+        rpc_url: String,
+        #[arg(long)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "BITCOIN_RPC_USER")]
+        rpc_user: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_PASSWORD")]
+        rpc_password: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
+        rpc_cookie_file: Option<PathBuf>,
         #[arg(long = "no-append", action = clap::ArgAction::SetFalse, default_value_t = true)]
         append: bool,
     },
@@ -2099,8 +2119,40 @@ async fn main() -> Result<()> {
             extranonce2_size,
             max_stratum_line_bytes,
             stratum_idle_timeout_seconds,
+            refresh_job_from_rpc,
+            job_refresh_interval_seconds,
+            auto_submit_blocks,
+            payout_schedule_file,
+            pohw_commitment_file,
+            rpc_url,
+            allow_remote_rpc,
+            rpc_user,
+            rpc_password,
+            rpc_cookie_file,
             append,
         } => {
+            let bitcoin_rpc_client = if refresh_job_from_rpc || auto_submit_blocks {
+                Some(bitcoin_rpc_client(
+                    rpc_url,
+                    rpc_user,
+                    rpc_password,
+                    rpc_cookie_file,
+                    allow_remote_rpc,
+                )?)
+            } else {
+                None
+            };
+            let (payout_schedule, pohw_commitment) =
+                match (payout_schedule_file, pohw_commitment_file) {
+                    (Some(schedule_path), Some(commitment_path)) => (
+                        Some(read_payout_schedule_file(&schedule_path)?),
+                        Some(read_pohw_commitment_file(&commitment_path)?),
+                    ),
+                    (None, None) => (None, None),
+                    _ => bail!(
+                    "--payout-schedule-file and --pohw-commitment-file must be supplied together"
+                ),
+                };
             mining_adapter::run_mining_adapter(mining_adapter::MiningAdapterConfig {
                 datadir,
                 bind_addr,
@@ -2121,6 +2173,12 @@ async fn main() -> Result<()> {
                 max_line_bytes: max_stratum_line_bytes,
                 idle_timeout_seconds: stratum_idle_timeout_seconds,
                 append,
+                bitcoin_rpc_client,
+                refresh_job_from_rpc,
+                job_refresh_interval_seconds,
+                auto_submit_blocks,
+                payout_schedule,
+                pohw_commitment,
             })
             .await?;
         }

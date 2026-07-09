@@ -109,6 +109,11 @@ class StubLiveRewardIndexer(reward_indexer.RewardIndexer):
 
 
 class RewardIndexerTests(unittest.TestCase):
+    def test_official_api_default_covers_invitation_liability_window(self):
+        args = reward_indexer.build_arg_parser().parse_args(["sync-official-api"])
+
+        self.assertEqual(args.completed_epochs, reward_indexer.LIABILITY_WINDOW_EPOCHS)
+
     def test_decimal_roundtrip(self):
         atoms = decimal_to_atoms("1.234567890123456789")
         self.assertEqual(atoms, 1234567890123456789)
@@ -593,6 +598,192 @@ class RewardIndexerTests(unittest.TestCase):
         self.assertEqual(exported[0]["kind"], "FinalCommittee")
         self.assertEqual(exported[0]["amount_atoms"], 42)
 
+    def test_exact_reward_sources_are_canonical_per_epoch(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            api_epoch_210 = {
+                "address": "0x" + "a" * 40,
+                "epoch": 210,
+                "height": 90,
+                "hash": "0x" + "1" * 64,
+                "kind": "Validation",
+                "amount_atoms": "5",
+            }
+            overlapping_epoch_211 = {
+                "address": "0x" + "b" * 40,
+                "epoch": 211,
+                "height": 100,
+                "hash": "0x" + "2" * 64,
+                "kind": "Validation",
+                "amount_atoms": "7",
+            }
+            self.assertEqual(
+                ledger.import_statscollector_replay_events(
+                    [api_epoch_210, overlapping_epoch_211],
+                    source="idena_public_api:epoch:210-211",
+                    source_priority=reward_indexer.EXACT_SOURCE_PRIORITY_OFFICIAL_API,
+                ),
+                2,
+            )
+            self.assertEqual(
+                ledger.import_statscollector_replay_events(
+                    [overlapping_epoch_211],
+                    source=reward_indexer.STATS_COLLECTOR_SOURCE,
+                    source_priority=reward_indexer.EXACT_SOURCE_PRIORITY_OFFICIAL_INDEXER,
+                ),
+                1,
+            )
+            self.assertEqual(
+                ledger.import_statscollector_replay_events(
+                    [{**overlapping_epoch_211, "amount_atoms": "99"}],
+                    source="idena_public_api:epoch:211",
+                    source_priority=reward_indexer.EXACT_SOURCE_PRIORITY_OFFICIAL_API,
+                ),
+                0,
+            )
+            exported = ledger.export_replay_events(require_exact=True)
+            rows = ledger.conn.execute(
+                "SELECT epoch, source FROM exact_reward_sources ORDER BY epoch"
+            ).fetchall()
+            exact_rows = ledger.conn.execute(
+                "SELECT COUNT(*) FROM reward_events WHERE confidence = 'exact'"
+            ).fetchone()[0]
+            ledger.close()
+
+        self.assertEqual([event["amount_atoms"] for event in exported], [5, 7])
+        self.assertEqual(
+            [(int(row["epoch"]), row["source"]) for row in rows],
+            [
+                (210, "idena_public_api:epoch:210-211"),
+                (211, reward_indexer.STATS_COLLECTOR_SOURCE),
+            ],
+        )
+        self.assertEqual(exact_rows, 2)
+
+    def test_export_replay_latest_epoch_selects_one_window(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            ledger.import_statscollector_replay_events(
+                [
+                    {
+                        "address": "0x" + "a" * 40,
+                        "epoch": 210,
+                        "height": 90,
+                        "hash": "0x" + "1" * 64,
+                        "kind": "Validation",
+                        "amount_atoms": "5",
+                    },
+                    {
+                        "address": "0x" + "b" * 40,
+                        "epoch": 211,
+                        "height": 100,
+                        "hash": "0x" + "2" * 64,
+                        "kind": "Proposer",
+                        "amount_atoms": "7",
+                    },
+                ]
+            )
+
+            exported = ledger.export_replay_events(latest_epoch=True, require_exact=True)
+            with self.assertRaisesRegex(ValueError, "cannot combine epoch with latest_epoch"):
+                ledger.export_replay_events(epoch=211, latest_epoch=True)
+            ledger.close()
+
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["idena_address"], "0x" + "b" * 40)
+        self.assertEqual(exported[0]["amount_atoms"], 7)
+
+    def test_exact_invitee_liability_replays_credit_burn_and_maturity(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            invitee = "0x" + "a" * 40
+            inviter = "0x" + "b" * 40
+            invite_tx_hash = "0x" + "c" * 64
+            events = [
+                {
+                    "address": invitee,
+                    "counterparty_address": inviter,
+                    "epoch": 100,
+                    "height": 1000,
+                    "hash": "0x" + "1" * 64,
+                    "kind": "Invitee",
+                    "amount_atoms": "10",
+                    "stake_atoms": "10",
+                    "locked_stake_atoms": "10",
+                    "tx_hash": invite_tx_hash,
+                    "liability_tx_hash": invite_tx_hash,
+                    "reward_age": 1,
+                    "liability_maturity_epoch": 109,
+                },
+                {
+                    "address": invitee,
+                    "counterparty_address": inviter,
+                    "epoch": 101,
+                    "height": 1100,
+                    "hash": "0x" + "2" * 64,
+                    "kind": "Invitee",
+                    "amount_atoms": "5",
+                    "stake_atoms": "5",
+                    "locked_stake_atoms": "5",
+                    "tx_hash": invite_tx_hash,
+                    "liability_tx_hash": invite_tx_hash,
+                    "reward_age": 2,
+                    "liability_maturity_epoch": 109,
+                },
+                {
+                    "address": invitee,
+                    "counterparty_address": inviter,
+                    "epoch": 105,
+                    "height": 1500,
+                    "hash": "0x" + "3" * 64,
+                    "kind": "Invitee",
+                    "direction": "debit",
+                    "amount_atoms": "12",
+                    "stake_atoms": "12",
+                    "locked_stake_atoms": "12",
+                    "tx_hash": "0x" + "d" * 64,
+                    "liability_tx_hash": invite_tx_hash,
+                    "reward_age": 2,
+                    "liability_maturity_epoch": 109,
+                },
+            ]
+            self.assertEqual(ledger.import_statscollector_replay_events(events), 3)
+
+            before_maturity = ledger.query_address(invitee, None)
+            liability = before_maturity["invitationLiabilities"][0]
+            invitee_total = next(
+                total
+                for total in before_maturity["totals"]
+                if total["kind"] == "stats_invitee_reward"
+            )
+            self.assertEqual(invitee_total["amountAtoms"], "3")
+            self.assertEqual(invitee_total["lockedStakeDeltaAtoms"], "3")
+            self.assertEqual(liability["originalLockedAtoms"], "15")
+            self.assertEqual(liability["currentLockedAtoms"], "3")
+            self.assertEqual(liability["burnedAtoms"], "12")
+            self.assertEqual(liability["status"], "partially_burned")
+            self.assertEqual(liability["maturityEpoch"], 109)
+            self.assertEqual(liability["confidence"], "exact")
+
+            ledger.import_statscollector_replay_events(
+                [
+                    {
+                        "address": "0x" + "e" * 40,
+                        "epoch": 109,
+                        "height": 1900,
+                        "hash": "0x" + "4" * 64,
+                        "kind": "Validation",
+                        "amount_atoms": "1",
+                    }
+                ]
+            )
+            after_maturity = ledger.query_address(invitee, None)["invitationLiabilities"][0]
+            ledger.close()
+
+        self.assertEqual(after_maturity["currentLockedAtoms"], "0")
+        self.assertEqual(after_maturity["burnedAtoms"], "12")
+        self.assertEqual(after_maturity["status"], "partially_burned_then_matured")
+
     def test_import_statscollector_replay_normalizes_postgres_bytea_hashes(self):
         with TemporaryDirectory() as tmp:
             db = Path(tmp) / "rewards.sqlite3"
@@ -888,6 +1079,171 @@ class RewardIndexerTests(unittest.TestCase):
                 "stats_invitation_reward",
                 "stats_validation_reward",
             ],
+        )
+
+    def test_sync_official_api_reconstructs_invitee_liability_burn(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            invitee = "0x" + "a" * 40
+            inviter = "0x" + "b" * 40
+            invite_hash = "0x" + "c" * 64
+            kill_hash = "0x" + "d" * 64
+            reward_block_hash = "0x" + "1" * 64
+            kill_block_hash = "0x" + "2" * 64
+
+            def response(payload):
+                return FakeRpcResponse(body=json.dumps(payload).encode("utf-8"))
+
+            def fake_urlopen(req, timeout=0):
+                path = reward_indexer.urllib.parse.urlparse(req.full_url).path
+                if path == "/api/Epoch/Last":
+                    return response({"result": {"epoch": 101}})
+                if path == "/api/Epoch/100/Blocks":
+                    return response(
+                        {
+                            "result": [
+                                {
+                                    "height": 1000,
+                                    "hash": reward_block_hash,
+                                    "timestamp": "2026-01-01T00:00:00Z",
+                                }
+                            ]
+                        }
+                    )
+                if path == "/api/Epoch/100/IdentityRewards":
+                    return response(
+                        {
+                            "result": [
+                                {
+                                    "address": invitee,
+                                    "age": 1,
+                                    "rewards": [
+                                        {"balance": "3", "stake": "10", "type": "Invitee"}
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                if path == f"/api/Epoch/100/Identity/{invitee}/RewardedInvitee":
+                    return response(
+                        {
+                            "result": {
+                                "hash": invite_hash,
+                                "inviter": inviter,
+                            }
+                        }
+                    )
+                if path == f"/api/Address/{invitee}/Txs":
+                    return response(
+                        {
+                            "result": [
+                                {
+                                    "hash": kill_hash,
+                                    "type": "KillTx",
+                                    "from": invitee,
+                                }
+                            ]
+                        }
+                    )
+                if path == f"/api/Transaction/{kill_hash}":
+                    return response(
+                        {
+                            "result": {
+                                "epoch": 105,
+                                "blockHeight": 1500,
+                                "blockHash": kill_block_hash,
+                                "timestamp": "2026-02-01T00:00:00Z",
+                            }
+                        }
+                    )
+                raise AssertionError(f"unexpected official API URL: {req.full_url}")
+
+            with patch.object(reward_indexer.urllib.request, "urlopen", side_effect=fake_urlopen):
+                result = sync_official_api_rewards(
+                    ledger=ledger,
+                    api_base_url="https://api.example.test/api",
+                    completed_epochs=1,
+                    include_mining_summaries=False,
+                    retries=0,
+                )
+            query = ledger.query_address(invitee, 100)
+            liability = query["invitationLiabilities"][0]
+            ledger.close()
+
+        self.assertEqual(result["exportedEvents"], 2)
+        invitee_total = next(
+            total for total in query["totals"] if total["kind"] == "stats_invitee_reward"
+        )
+        self.assertEqual(invitee_total["amountAtoms"], str(decimal_to_atoms("3")))
+        self.assertEqual(liability["originalLockedAtoms"], str(decimal_to_atoms("10")))
+        self.assertEqual(liability["currentLockedAtoms"], "0")
+        self.assertEqual(liability["burnedAtoms"], str(decimal_to_atoms("10")))
+        self.assertEqual(liability["status"], "burned")
+        self.assertEqual(liability["maturityEpoch"], 109)
+
+    def test_multi_epoch_api_sync_fetches_each_address_mining_history_once(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            address = "0x" + "a" * 40
+
+            def source_block(*, epoch, **_kwargs):
+                return {
+                    "height": epoch * 10,
+                    "hash": "0x" + f"{epoch:064x}",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                }
+
+            def validation_rewards(*, epoch, source_block, **_kwargs):
+                return (
+                    [
+                        {
+                            "idena_address": address,
+                            "epoch": epoch,
+                            "source_height": source_block["height"],
+                            "source_hash": source_block["hash"],
+                            "timestamp": source_block["timestamp"],
+                            "kind": "Validation",
+                            "amount": "1",
+                        }
+                    ],
+                    [address],
+                )
+
+            with (
+                patch.object(
+                    reward_indexer,
+                    "get_official_api_epoch_source_block",
+                    side_effect=source_block,
+                ),
+                patch.object(
+                    reward_indexer,
+                    "collect_official_api_validation_rewards",
+                    side_effect=validation_rewards,
+                ),
+                patch.object(
+                    reward_indexer,
+                    "collect_official_api_epoch_identity_addresses",
+                    return_value=[address],
+                ),
+                patch.object(
+                    reward_indexer,
+                    "collect_official_api_mining_rewards_for_address",
+                    return_value=[],
+                ) as mining_history,
+            ):
+                result = sync_official_api_rewards(
+                    ledger=ledger,
+                    api_base_url="https://api.example.test/api",
+                    epochs=[100, 101],
+                    retries=0,
+                )
+            ledger.close()
+
+        self.assertEqual([item["epoch"] for item in result["epochs"]], [100, 101])
+        mining_history.assert_called_once()
+        self.assertEqual(
+            sorted(mining_history.call_args.kwargs["source_blocks_by_epoch"]),
+            [100, 101],
         )
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")

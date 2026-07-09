@@ -1502,29 +1502,28 @@ async fn append_gossip_envelope_after_template_admission(
     max_age_seconds: i64,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
-    envelope.verify_at(
-        current_unix_timestamp()?,
-        max_future_skew_seconds,
-        max_age_seconds,
-    )?;
+    let now = current_unix_timestamp()?;
+    envelope.verify_durable_at(now, max_future_skew_seconds)?;
+    let historical =
+        max_age_seconds > 0 && envelope.created_at_unix < now.saturating_sub(max_age_seconds);
     if let SharechainMessage::BitcoinWorkTemplate(template) = &envelope.message {
         let Some(admission) = work_template_admission else {
-            return local_node::append_gossip_envelope(
+            return local_node::append_historical_gossip_envelope(
                 datadir,
                 envelope,
                 max_future_skew_seconds,
-                max_age_seconds,
             );
         };
-        admit_bitcoin_work_template(datadir, template, admission).await?;
+        admit_bitcoin_work_template(datadir, template, admission, historical).await?;
     }
-    local_node::append_gossip_envelope(datadir, envelope, max_future_skew_seconds, max_age_seconds)
+    local_node::append_historical_gossip_envelope(datadir, envelope, max_future_skew_seconds)
 }
 
 async fn admit_bitcoin_work_template(
     datadir: &Path,
     template: &pohw_core::sharechain::BitcoinWorkTemplate,
     admission: &WorkTemplateAdmissionConfig,
+    historical: bool,
 ) -> Result<()> {
     let template = template.clone().normalized();
     let miner_id = template.miner_id.to_ascii_lowercase();
@@ -1534,11 +1533,19 @@ async fn admit_bitcoin_work_template(
         .get(&miner_id)
         .ok_or_else(|| anyhow::anyhow!("template miner is not registered in local replay"))?;
     template.verify_mining_signature(&registration.mining_pubkey_hex)?;
-    admission
-        .bitcoin_rpc_client
-        .validate_bitcoin_work_template(&template, admission.validation_policy.clone())
-        .await
-        .context("Bitcoin RPC rejected work template")?;
+    if historical {
+        admission
+            .bitcoin_rpc_client
+            .validate_historical_bitcoin_work_template(&template)
+            .await
+            .context("Bitcoin RPC rejected historical work template")?;
+    } else {
+        admission
+            .bitcoin_rpc_client
+            .validate_bitcoin_work_template(&template, admission.validation_policy.clone())
+            .await
+            .context("Bitcoin RPC rejected work template")?;
+    }
     local_node::accept_bitcoin_work_template(datadir, template)?;
     Ok(())
 }
@@ -1993,6 +2000,13 @@ async fn handle_gossip_envelope(
             }
         }
         Err(err) => {
+            if err.downcast_ref::<local_node::LocalAppendError>().is_some() {
+                return rejected(
+                    Some(peer_id),
+                    format!("local append is temporarily busy: {err}"),
+                    None,
+                );
+            }
             let decision = {
                 let mut policy = policy.lock().await;
                 let _ = policy.record_invalid_ip_envelope(remote_ip, now);
@@ -2673,6 +2687,23 @@ mod tests {
         .unwrap();
         envelope.sign(keypair).unwrap();
         envelope
+    }
+
+    #[tokio::test]
+    async fn historical_sync_append_accepts_stale_signed_non_template_envelope() {
+        let datadir = temp_dir("historical-sync-envelope");
+        let keypair = keypair(8);
+        let mut old = envelope(&keypair);
+        old.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
+        old.sign(&keypair).unwrap();
+
+        let appended =
+            append_gossip_envelope_after_template_admission(&datadir, old, 300, 86_400, None)
+                .await
+                .unwrap();
+
+        assert_eq!(appended.message_result.outcome, ApplyOutcome::Applied);
+        fs::remove_dir_all(datadir).unwrap();
     }
 
     fn signed_registration() -> (MinerRegistration, Keypair) {

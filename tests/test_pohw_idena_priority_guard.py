@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,11 @@ class FakeService:
 
 
 class IdenaPriorityGuardTest(unittest.TestCase):
+    def test_default_state_is_outside_the_operator_writable_datadir(self) -> None:
+        cfg = guard.load_config({})
+
+        self.assertEqual(cfg.state_dir, Path("/var/lib/pohw/idena-priority"))
+
     def config(self, root: Path, *, lead: int = 3600, cooldown: int = 1800) -> guard.GuardConfig:
         state = root / "idena-priority"
         return guard.GuardConfig(
@@ -159,6 +165,19 @@ class IdenaPriorityGuardTest(unittest.TestCase):
         self.assertEqual(status["status"], "cleared_marker")
         self.assertNotIn("start bitcoind-mainnet.service", service.calls)
         self.assertFalse(service.active)
+
+    def test_systemd_stop_uses_no_block(self) -> None:
+        calls: list[tuple[list[str], bool]] = []
+
+        def fake_run(args: list[str], *, check: bool = False) -> object:
+            calls.append((args, check))
+            return object()
+
+        manager = guard.SystemdServiceManager("systemctl")
+        with mock.patch.object(guard.subprocess, "run", fake_run):
+            manager.stop("bitcoind-mainnet.service")
+
+        self.assertEqual(calls, [(["systemctl", "--no-block", "stop", "bitcoind-mainnet.service"], True)])
 
 
 if __name__ == "__main__":

@@ -78,8 +78,12 @@ DEFAULT_OFFICIAL_API_PAGE_LIMIT = 100
 DEFAULT_OFFICIAL_API_RETRIES = 4
 TRACKED_STATES = {"Candidate", "Newbie", "Verified", "Human", "Suspended", "Zombie"}
 LIABILITY_WINDOW_EPOCHS = 10
+DEFAULT_OFFICIAL_API_COMPLETED_EPOCHS = LIABILITY_WINDOW_EPOCHS
 STATS_COLLECTOR_SOURCE = "idena_stats_collector"
 OFFICIAL_API_SOURCE = "idena_public_api"
+EXACT_SOURCE_PRIORITY_MANUAL = 100
+EXACT_SOURCE_PRIORITY_OFFICIAL_API = 200
+EXACT_SOURCE_PRIORITY_OFFICIAL_INDEXER = 300
 REPLAY_KINDS = {
     "Validation",
     "Proposer",
@@ -317,6 +321,12 @@ class RewardLedger:
               ON reward_events(epoch, kind, height);
             CREATE INDEX IF NOT EXISTS idx_reward_events_replay_export
               ON reward_events(kind, confidence, epoch, height);
+            CREATE TABLE IF NOT EXISTS exact_reward_sources (
+              epoch INTEGER PRIMARY KEY,
+              source TEXT NOT NULL,
+              priority INTEGER NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS invitation_liabilities (
               id TEXT PRIMARY KEY,
               invitee_address TEXT NOT NULL,
@@ -326,9 +336,13 @@ class RewardLedger:
               invite_epoch_height INTEGER,
               original_locked_atoms TEXT NOT NULL,
               current_locked_atoms TEXT NOT NULL,
+              maturity_epoch INTEGER,
+              burned_atoms TEXT NOT NULL DEFAULT '0',
               status TEXT NOT NULL,
               last_seen_epoch INTEGER NOT NULL,
               last_height INTEGER NOT NULL,
+              confidence TEXT NOT NULL DEFAULT 'inferred',
+              source TEXT NOT NULL DEFAULT '',
               raw_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -353,7 +367,220 @@ class RewardLedger:
             );
             """
         )
+        self.ensure_table_column(
+            "invitation_liabilities", "maturity_epoch", "maturity_epoch INTEGER"
+        )
+        self.ensure_table_column(
+            "invitation_liabilities",
+            "burned_atoms",
+            "burned_atoms TEXT NOT NULL DEFAULT '0'",
+        )
+        self.ensure_table_column(
+            "invitation_liabilities",
+            "confidence",
+            "confidence TEXT NOT NULL DEFAULT 'inferred'",
+        )
+        self.ensure_table_column(
+            "invitation_liabilities", "source", "source TEXT NOT NULL DEFAULT ''"
+        )
+        self.reconcile_exact_reward_sources()
         self.conn.commit()
+
+    def ensure_table_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
+
+    def reconcile_exact_reward_sources(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT epoch, source
+            FROM reward_events
+            WHERE confidence = 'exact'
+            GROUP BY epoch, source
+            ORDER BY epoch, source
+            """
+        ).fetchall()
+        candidates_by_epoch: Dict[int, List[str]] = {}
+        for row in rows:
+            candidates_by_epoch.setdefault(int(row["epoch"]), []).append(str(row["source"]))
+
+        existing_rows = self.conn.execute(
+            "SELECT epoch, source, priority FROM exact_reward_sources"
+        ).fetchall()
+        existing = {
+            int(row["epoch"]): (str(row["source"]), int(row["priority"]))
+            for row in existing_rows
+        }
+        self.conn.execute(
+            "DELETE FROM exact_reward_sources WHERE epoch NOT IN "
+            "(SELECT DISTINCT epoch FROM reward_events WHERE confidence = 'exact')"
+        )
+        for epoch, sources in candidates_by_epoch.items():
+            previous = existing.get(epoch)
+            ranked = []
+            for source in sources:
+                priority = (
+                    previous[1]
+                    if previous is not None and previous[0] == source
+                    else inferred_exact_source_priority(source)
+                )
+                ranked.append((priority, source))
+            priority, source = max(ranked)
+            self.conn.execute(
+                """
+                INSERT INTO exact_reward_sources(epoch, source, priority, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(epoch) DO UPDATE SET
+                  source = excluded.source,
+                  priority = excluded.priority,
+                  updated_at = excluded.updated_at
+                """,
+                (epoch, source, priority, utc_now()),
+            )
+
+    def rebuild_exact_invitation_liabilities(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT reward_events.*
+            FROM reward_events
+            JOIN exact_reward_sources canonical_source
+              ON canonical_source.epoch = reward_events.epoch
+             AND canonical_source.source = reward_events.source
+            WHERE reward_events.confidence = 'exact'
+              AND reward_events.kind = 'stats_invitee_reward'
+            ORDER BY reward_events.height, reward_events.id
+            """
+        ).fetchall()
+        max_epoch_row = self.conn.execute(
+            """
+            SELECT MAX(reward_events.epoch)
+            FROM reward_events
+            JOIN exact_reward_sources canonical_source
+              ON canonical_source.epoch = reward_events.epoch
+             AND canonical_source.source = reward_events.source
+            WHERE reward_events.confidence = 'exact'
+            """
+        ).fetchone()
+        max_epoch = int(max_epoch_row[0]) if max_epoch_row and max_epoch_row[0] is not None else 0
+        liabilities: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            liability_tx_hash = str(
+                raw.get("liability_tx_hash") or raw.get("invite_tx_hash") or ""
+            ).lower()
+            if not HASH_RE.fullmatch(liability_tx_hash):
+                continue
+            invitee_address = normalize_address(row["address"])
+            liability_id = stable_event_id(
+                ["liability", invitee_address, liability_tx_hash]
+            )
+            epoch = int(row["epoch"])
+            event_epoch = parse_int_field(
+                raw.get("liability_event_epoch", epoch),
+                "liability_event_epoch",
+                minimum=0,
+            )
+            max_epoch = max(max_epoch, event_epoch)
+            reward_age_raw = raw.get("reward_age")
+            reward_age = (
+                parse_int_field(reward_age_raw, "reward_age", minimum=0)
+                if reward_age_raw not in (None, "")
+                else 0
+            )
+            maturity_raw = raw.get("liability_maturity_epoch")
+            maturity_epoch = (
+                parse_int_field(maturity_raw, "liability_maturity_epoch", minimum=epoch)
+                if maturity_raw not in (None, "")
+                else epoch + max(0, LIABILITY_WINDOW_EPOCHS - reward_age)
+            )
+            amount_atoms = abs(int(row["locked_stake_atoms_delta"] or 0))
+            if amount_atoms == 0:
+                amount_atoms = abs(int(row["stake_atoms_delta"] or 0))
+            if amount_atoms == 0:
+                amount_atoms = abs(int(row["amount_atoms"] or 0))
+            if amount_atoms == 0:
+                continue
+            state = liabilities.setdefault(
+                liability_id,
+                {
+                    "invitee_address": invitee_address,
+                    "inviter_address": normalize_address(row["counterparty_address"]),
+                    "tx_hash": liability_tx_hash,
+                    "first_seen_epoch": epoch,
+                    "invite_epoch_height": raw.get("invite_epoch_height"),
+                    "original_locked_atoms": 0,
+                    "current_locked_atoms": 0,
+                    "maturity_epoch": maturity_epoch,
+                    "burned_atoms": 0,
+                    "status": "open",
+                    "last_seen_epoch": event_epoch,
+                    "last_height": int(row["height"]),
+                    "events": [],
+                },
+            )
+            state["maturity_epoch"] = max(int(state["maturity_epoch"]), maturity_epoch)
+            state["last_seen_epoch"] = max(int(state["last_seen_epoch"]), event_epoch)
+            state["last_height"] = max(int(state["last_height"]), int(row["height"]))
+            if not state["inviter_address"]:
+                state["inviter_address"] = normalize_address(row["counterparty_address"])
+            direction = str(row["direction"]).lower()
+            if direction == "credit":
+                state["original_locked_atoms"] += amount_atoms
+                state["current_locked_atoms"] += amount_atoms
+                state["status"] = "open"
+            elif direction == "debit":
+                burned = min(int(state["current_locked_atoms"]), amount_atoms)
+                state["current_locked_atoms"] -= burned
+                state["burned_atoms"] += burned
+                state["status"] = (
+                    "burned" if state["current_locked_atoms"] == 0 else "partially_burned"
+                )
+            state["events"].append(
+                {
+                    "eventId": row["id"],
+                    "rewardEpoch": epoch,
+                    "eventEpoch": event_epoch,
+                    "height": int(row["height"]),
+                    "direction": direction,
+                    "amountAtoms": str(amount_atoms),
+                }
+            )
+
+        self.conn.execute("DELETE FROM invitation_liabilities WHERE confidence = 'exact'")
+        for state in liabilities.values():
+            if (
+                int(state["current_locked_atoms"]) > 0
+                and int(state["maturity_epoch"]) <= max_epoch
+            ):
+                state["current_locked_atoms"] = 0
+                state["status"] = (
+                    "matured"
+                    if int(state["burned_atoms"]) == 0
+                    else "partially_burned_then_matured"
+                )
+            self.upsert_liability(
+                invitee_address=state["invitee_address"],
+                inviter_address=state["inviter_address"],
+                tx_hash=state["tx_hash"],
+                epoch=int(state["last_seen_epoch"]),
+                invite_epoch_height=state["invite_epoch_height"],
+                locked_atoms=int(state["current_locked_atoms"]),
+                original_locked_atoms=int(state["original_locked_atoms"]),
+                maturity_epoch=int(state["maturity_epoch"]),
+                burned_atoms=int(state["burned_atoms"]),
+                status=state["status"],
+                height=int(state["last_height"]),
+                confidence="exact",
+                source="canonical_exact_rewards",
+                raw={"events": state["events"]},
+            )
 
     def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -466,11 +693,24 @@ class RewardLedger:
         default_epoch: Optional[int] = None,
         source: str = STATS_COLLECTOR_SOURCE,
         replace_source: bool = False,
+        source_priority: int = EXACT_SOURCE_PRIORITY_MANUAL,
     ) -> int:
         source = validate_source_label(source)
+        source_priority = parse_int_field(source_priority, "source_priority", minimum=1)
         events = extract_exact_event_list(raw_events)
         if replace_source and not events:
             raise ValueError("refusing to replace exact reward source with an empty event export")
+        converted_events = [
+            statscollector_replay_event_to_ledger_event(
+                raw_event,
+                default_epoch=default_epoch,
+                source=source,
+            )
+            for raw_event in events
+        ]
+        events_by_epoch: Dict[int, List[Dict[str, Any]]] = {}
+        for event in converted_events:
+            events_by_epoch.setdefault(int(event["epoch"]), []).append(event)
         imported = 0
         self.conn.execute("SAVEPOINT statscollector_replay_import")
         try:
@@ -479,14 +719,36 @@ class RewardLedger:
                     "DELETE FROM reward_events WHERE source = ? AND confidence = 'exact'",
                     (source,),
                 )
-            for raw_event in events:
-                event = statscollector_replay_event_to_ledger_event(
-                    raw_event,
-                    default_epoch=default_epoch,
-                    source=source,
+            for epoch, epoch_events in sorted(events_by_epoch.items()):
+                active = self.conn.execute(
+                    "SELECT source, priority FROM exact_reward_sources WHERE epoch = ?",
+                    (epoch,),
+                ).fetchone()
+                incoming_rank = (source_priority, source)
+                active_rank = (
+                    (int(active["priority"]), str(active["source"])) if active is not None else None
                 )
-                if self.insert_event(event):
-                    imported += 1
+                if active_rank is not None and incoming_rank < active_rank:
+                    continue
+                self.conn.execute(
+                    "DELETE FROM reward_events "
+                    "WHERE epoch = ? AND confidence = 'exact' AND source <> ?",
+                    (epoch, source),
+                )
+                self.conn.execute(
+                    """
+                    INSERT INTO exact_reward_sources(epoch, source, priority, updated_at)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(epoch) DO UPDATE SET
+                      source = excluded.source,
+                      priority = excluded.priority,
+                      updated_at = excluded.updated_at
+                    """,
+                    (epoch, source, source_priority, utc_now()),
+                )
+                for event in epoch_events:
+                    if self.insert_event(event):
+                        imported += 1
             if events:
                 self.set_meta("exact_reward_source", source, commit=False)
                 self.set_meta("exact_reward_events", len(events), commit=False)
@@ -500,6 +762,8 @@ class RewardLedger:
                 ).fetchone()[0]
                 if max_height:
                     self.set_meta("last_exact_reward_height", max_height, commit=False)
+            self.reconcile_exact_reward_sources()
+            self.rebuild_exact_invitation_liabilities()
             self.conn.execute("RELEASE SAVEPOINT statscollector_replay_import")
         except Exception:
             try:
@@ -523,30 +787,45 @@ class RewardLedger:
         status: str,
         height: int,
         raw: Dict[str, Any],
+        original_locked_atoms: Optional[int] = None,
+        maturity_epoch: Optional[int] = None,
+        burned_atoms: int = 0,
+        confidence: str = "inferred",
+        source: str = "",
     ) -> None:
         liability_id = stable_event_id(["liability", invitee_address, tx_hash or invitee_address])
         existing = self.conn.execute(
             "SELECT original_locked_atoms FROM invitation_liabilities WHERE id = ?",
             (liability_id,),
         ).fetchone()
-        original_locked_atoms = (
-            int(existing["original_locked_atoms"]) if existing else max(0, locked_atoms)
-        )
+        if original_locked_atoms is None:
+            original_locked_atoms = (
+                int(existing["original_locked_atoms"]) if existing else max(0, locked_atoms)
+            )
+        else:
+            original_locked_atoms = max(0, original_locked_atoms)
         self.conn.execute(
             """
             INSERT INTO invitation_liabilities(
               id, invitee_address, inviter_address, tx_hash, first_seen_epoch,
               invite_epoch_height, original_locked_atoms, current_locked_atoms,
-              status, last_seen_epoch, last_height, raw_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              maturity_epoch, burned_atoms, status, last_seen_epoch, last_height,
+              confidence, source, raw_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               inviter_address = excluded.inviter_address,
               current_locked_atoms = excluded.current_locked_atoms,
+              maturity_epoch = excluded.maturity_epoch,
+              burned_atoms = excluded.burned_atoms,
               status = excluded.status,
               last_seen_epoch = excluded.last_seen_epoch,
               last_height = excluded.last_height,
+              confidence = excluded.confidence,
+              source = excluded.source,
               raw_json = excluded.raw_json,
               updated_at = excluded.updated_at
+            WHERE invitation_liabilities.confidence <> 'exact'
+               OR excluded.confidence = 'exact'
             """,
             (
                 liability_id,
@@ -557,9 +836,13 @@ class RewardLedger:
                 invite_epoch_height,
                 str(original_locked_atoms),
                 str(max(0, locked_atoms)),
+                maturity_epoch,
+                str(max(0, burned_atoms)),
                 status,
                 epoch,
                 height,
+                confidence,
+                source,
                 json.dumps(raw, sort_keys=True),
                 utc_now(),
             ),
@@ -727,14 +1010,36 @@ class RewardLedger:
         self,
         *,
         epoch: Optional[int] = None,
+        latest_epoch: bool = False,
         max_height: Optional[int] = None,
         allow_inferred: bool = False,
         require_exact: bool = False,
     ) -> List[Dict[str, Any]]:
         if require_exact and allow_inferred:
             raise ValueError("reward replay export cannot combine require_exact with allow_inferred")
+        if epoch is not None and latest_epoch:
+            raise ValueError("reward replay export cannot combine epoch with latest_epoch")
+        canonical_exact_sql = self.canonical_exact_source_filter_sql()
         where = ["direction = 'credit'", "amount_atoms NOT LIKE '-%'", "amount_atoms <> '0'"]
         params: List[Any] = []
+        eligible_kinds = sorted(ELIGIBLE_REPLAY_KIND_BY_LEDGER_KIND)
+        placeholders = ",".join("?" for _ in eligible_kinds)
+        if latest_epoch:
+            latest_row = self.conn.execute(
+                f"""
+                SELECT MAX(epoch)
+                FROM reward_events
+                WHERE direction = 'credit'
+                  AND amount_atoms NOT LIKE '-%'
+                  AND amount_atoms <> '0'
+                  AND kind IN ({placeholders})
+                  {canonical_exact_sql}
+                """,
+                eligible_kinds,
+            ).fetchone()
+            if latest_row is None or latest_row[0] is None:
+                raise ValueError("reward replay export has no eligible epoch to select")
+            epoch = int(latest_row[0])
         if epoch is not None:
             where.append("epoch = ?")
             params.append(epoch)
@@ -742,8 +1047,6 @@ class RewardLedger:
             where.append("height <= ?")
             params.append(max_height)
         where_sql = " AND ".join(where)
-        eligible_kinds = sorted(ELIGIBLE_REPLAY_KIND_BY_LEDGER_KIND)
-        placeholders = ",".join("?" for _ in eligible_kinds)
         exact_count_row = self.conn.execute(
             f"""
             SELECT COUNT(*)
@@ -751,6 +1054,7 @@ class RewardLedger:
             WHERE {where_sql}
               AND kind IN ({placeholders})
               AND confidence = 'exact'
+              {canonical_exact_sql}
             """,
             [*params, *eligible_kinds],
         ).fetchone()
@@ -769,6 +1073,7 @@ class RewardLedger:
                     WHERE {where_sql}
                       AND kind IN ({placeholders})
                       AND confidence <> 'exact'
+                      {canonical_exact_sql}
                     LIMIT 1
                     """,
                     [*params, *eligible_kinds],
@@ -789,6 +1094,7 @@ class RewardLedger:
             FROM reward_events
             WHERE {where_sql}
               AND kind IN ({",".join("?" for _ in eligible_kinds)})
+              {canonical_exact_sql}
             ORDER BY epoch, height, address, id
             """,
             [*params, *eligible_kinds],
@@ -807,6 +1113,64 @@ class RewardLedger:
                 }
             )
         return events
+
+    def canonical_exact_source_filter_sql(self) -> str:
+        table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exact_reward_sources'"
+        ).fetchone()
+        if table is None:
+            ambiguous = self.conn.execute(
+                """
+                SELECT epoch
+                FROM reward_events
+                WHERE confidence = 'exact'
+                GROUP BY epoch
+                HAVING COUNT(DISTINCT source) > 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if ambiguous is not None:
+                raise ValueError(
+                    "reward ledger has multiple exact sources for epoch "
+                    f"{int(ambiguous['epoch'])}; open it once in writable mode to migrate canonical sources"
+                )
+            return ""
+        ambiguous = self.conn.execute(
+            """
+            SELECT reward_events.epoch
+            FROM reward_events
+            WHERE reward_events.confidence = 'exact'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM exact_reward_sources canonical_source
+                WHERE canonical_source.epoch = reward_events.epoch
+              )
+            GROUP BY reward_events.epoch
+            HAVING COUNT(DISTINCT reward_events.source) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if ambiguous is not None:
+            raise ValueError(
+                "reward ledger has multiple unregistered exact sources for epoch "
+                f"{int(ambiguous['epoch'])}; run an exact import to select a canonical source"
+            )
+        return """
+          AND (
+            reward_events.confidence <> 'exact'
+            OR EXISTS (
+              SELECT 1
+              FROM exact_reward_sources canonical_source
+              WHERE canonical_source.epoch = reward_events.epoch
+                AND canonical_source.source = reward_events.source
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM exact_reward_sources canonical_epoch
+              WHERE canonical_epoch.epoch = reward_events.epoch
+            )
+          )
+        """
 
 
 def extract_exact_event_list(raw: Any) -> List[Dict[str, Any]]:
@@ -873,6 +1237,15 @@ def validate_source_label(source: str) -> str:
     if not source or len(source) > 128 or any(ord(ch) < 32 for ch in source):
         raise ValueError("source must be 1-128 printable characters")
     return source
+
+
+def inferred_exact_source_priority(source: str) -> int:
+    source = validate_source_label(source)
+    if source == STATS_COLLECTOR_SOURCE or source.startswith(f"{STATS_COLLECTOR_SOURCE}:"):
+        return EXACT_SOURCE_PRIORITY_OFFICIAL_INDEXER
+    if source == OFFICIAL_API_SOURCE or source.startswith(f"{OFFICIAL_API_SOURCE}:"):
+        return EXACT_SOURCE_PRIORITY_OFFICIAL_API
+    return EXACT_SOURCE_PRIORITY_MANUAL
 
 
 def validate_executable_label(value: str, label: str) -> str:
@@ -1126,6 +1499,7 @@ def sync_official_indexer_rewards(
         raw_events,
         source=source,
         replace_source=True,
+        source_priority=EXACT_SOURCE_PRIORITY_OFFICIAL_INDEXER,
     )
     row = ledger.conn.execute(
         """
@@ -1369,6 +1743,95 @@ def decimal_fields_have_positive_amount(item: Dict[str, Any]) -> bool:
     return decimal_to_atoms(item.get("balance", 0)) + decimal_to_atoms(item.get("stake", 0)) > 0
 
 
+def get_official_api_rewarded_invitee(
+    *,
+    base_url: str,
+    epoch: int,
+    address: str,
+    timeout_seconds: int,
+    retries: int,
+) -> Optional[Dict[str, Any]]:
+    response = official_api_get_json(
+        base_url=base_url,
+        path=f"Epoch/{epoch}/Identity/{address}/RewardedInvitee",
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+    )
+    result = official_api_result(
+        response,
+        f"official Idena API Epoch/{epoch}/Identity/{address}/RewardedInvitee",
+    )
+    if result in (None, {}):
+        return None
+    if not isinstance(result, dict):
+        raise RuntimeError("official Idena API rewarded invitee result must be an object")
+    invite_tx_hash = normalize_hash(result.get("hash"), "rewarded invitee hash")
+    inviter = normalize_address(result.get("inviter"))
+    if not IDENA_ADDRESS_RE.fullmatch(inviter):
+        raise ValueError(f"invalid inviter address in rewarded invitee data: {inviter!r}")
+    return {"liability_tx_hash": invite_tx_hash, "inviter_address": inviter}
+
+
+def find_official_api_liability_burn(
+    *,
+    base_url: str,
+    address: str,
+    reward_height: int,
+    maturity_epoch: int,
+    page_limit: int,
+    timeout_seconds: int,
+    retries: int,
+    request_delay_seconds: float,
+) -> Optional[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    pages = iter_official_api_pages(
+        base_url=base_url,
+        path=f"Address/{address}/Txs",
+        page_limit=page_limit,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+        request_delay_seconds=request_delay_seconds,
+        max_pages=1000,
+    )
+    for page in pages:
+        for summary in page:
+            tx_type = str(summary.get("type") or "")
+            tx_from = normalize_address(summary.get("from"))
+            tx_to = normalize_address(summary.get("to"))
+            kills_address = (tx_type == "KillTx" and tx_from == address) or (
+                tx_type in {"KillInviteeTx", "KillDelegatorTx"} and tx_to == address
+            )
+            if not kills_address:
+                continue
+            tx_hash = normalize_hash(summary.get("hash"), "liability burn transaction hash")
+            response = official_api_get_json(
+                base_url=base_url,
+                path=f"Transaction/{tx_hash}",
+                timeout_seconds=timeout_seconds,
+                retries=retries,
+            )
+            detail = official_api_result(
+                response,
+                f"official Idena API Transaction/{tx_hash}",
+            )
+            if not isinstance(detail, dict):
+                raise RuntimeError("official Idena API transaction result must be an object")
+            height = parse_int_field(detail.get("blockHeight"), "burn block height", minimum=1)
+            epoch = parse_int_field(detail.get("epoch"), "burn epoch", minimum=0)
+            if height <= reward_height or epoch >= maturity_epoch:
+                continue
+            candidates.append(
+                {
+                    "height": height,
+                    "epoch": epoch,
+                    "hash": normalize_hash(detail.get("blockHash"), "burn block hash"),
+                    "tx_hash": tx_hash,
+                    "timestamp": detail.get("timestamp") or utc_now(),
+                }
+            )
+    return min(candidates, key=lambda item: item["height"]) if candidates else None
+
+
 def collect_official_api_validation_rewards(
     *,
     base_url: str,
@@ -1382,6 +1845,8 @@ def collect_official_api_validation_rewards(
     events: List[Dict[str, Any]] = []
     addresses: List[str] = []
     seen_addresses = set()
+    rewarded_invitee_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    burn_cache: Dict[Tuple[str, int, int], Optional[Dict[str, Any]]] = {}
     pages = iter_official_api_pages(
         base_url=base_url,
         path=f"Epoch/{epoch}/IdentityRewards",
@@ -1399,6 +1864,11 @@ def collect_official_api_validation_rewards(
                 seen_addresses.add(address)
                 addresses.append(address)
             raw_rewards = identity_rewards.get("rewards") or []
+            reward_age = parse_int_field(
+                identity_rewards.get("age", 0),
+                "official API reward age",
+                minimum=0,
+            )
             if not isinstance(raw_rewards, list):
                 raise RuntimeError("official Idena API identity rewards field must be an array")
             for reward in raw_rewards:
@@ -1416,8 +1886,57 @@ def collect_official_api_validation_rewards(
                     "balance": reward.get("balance", "0"),
                     "stake": reward.get("stake", "0"),
                     "source_table": "official_api_epoch_identity_rewards",
+                    "reward_age": reward_age,
+                    "liability_maturity_epoch": epoch
+                    + max(0, LIABILITY_WINDOW_EPOCHS - reward_age),
+                    "liability_event_epoch": epoch,
                 }
                 events.append(event)
+                if official_reward_type_to_kind(reward.get("type")) != "Invitee":
+                    continue
+                if address not in rewarded_invitee_cache:
+                    rewarded_invitee_cache[address] = get_official_api_rewarded_invitee(
+                        base_url=base_url,
+                        epoch=epoch,
+                        address=address,
+                        timeout_seconds=timeout_seconds,
+                        retries=retries,
+                    )
+                liability = rewarded_invitee_cache[address]
+                if liability is None:
+                    continue
+                event["liability_tx_hash"] = liability["liability_tx_hash"]
+                event["tx_hash"] = liability["liability_tx_hash"]
+                event["counterparty_address"] = liability["inviter_address"]
+                maturity_epoch = int(event["liability_maturity_epoch"])
+                burn_key = (address, int(source_block["height"]), maturity_epoch)
+                if burn_key not in burn_cache:
+                    burn_cache[burn_key] = find_official_api_liability_burn(
+                        base_url=base_url,
+                        address=address,
+                        reward_height=int(source_block["height"]),
+                        maturity_epoch=maturity_epoch,
+                        page_limit=page_limit,
+                        timeout_seconds=timeout_seconds,
+                        retries=retries,
+                        request_delay_seconds=request_delay_seconds,
+                    )
+                burn = burn_cache[burn_key]
+                if burn is not None:
+                    events.append(
+                        {
+                            **event,
+                            "direction": "debit",
+                            "balance": "0",
+                            "amount": event.get("stake", "0"),
+                            "source_height": burn["height"],
+                            "source_hash": burn["hash"],
+                            "timestamp": burn["timestamp"],
+                            "tx_hash": burn["tx_hash"],
+                            "liability_event_epoch": burn["epoch"],
+                            "source_table": "official_api_liability_burn",
+                        }
+                    )
     return events, addresses
 
 
@@ -1455,14 +1974,16 @@ def collect_official_api_mining_rewards_for_address(
     *,
     base_url: str,
     address: str,
-    epoch: int,
-    source_block: Dict[str, Any],
+    source_blocks_by_epoch: Dict[int, Dict[str, Any]],
     page_limit: int,
     timeout_seconds: int,
     retries: int,
     request_delay_seconds: float,
 ) -> List[Dict[str, Any]]:
     address = normalize_address(address)
+    if not source_blocks_by_epoch:
+        return []
+    minimum_epoch = min(source_blocks_by_epoch)
     pages = iter_official_api_pages(
         base_url=base_url,
         path=f"Address/{address}/MiningRewardSummaries",
@@ -1474,13 +1995,14 @@ def collect_official_api_mining_rewards_for_address(
     )
     events: List[Dict[str, Any]] = []
     for page in pages:
-        older_than_target = False
+        older_than_window = False
         for summary in page:
             item_epoch = parse_int_field(summary.get("epoch"), "mining summary epoch", minimum=1)
-            if item_epoch < epoch:
-                older_than_target = True
+            if item_epoch < minimum_epoch:
+                older_than_window = True
                 continue
-            if item_epoch != epoch:
+            source_block = source_blocks_by_epoch.get(item_epoch)
+            if source_block is None:
                 continue
             amount = summary.get("amount", "0")
             if decimal_to_atoms(amount) <= 0:
@@ -1488,7 +2010,7 @@ def collect_official_api_mining_rewards_for_address(
             events.append(
                 {
                     "idena_address": address,
-                    "epoch": epoch,
+                    "epoch": item_epoch,
                     "source_height": source_block["height"],
                     "source_hash": source_block["hash"],
                     "timestamp": source_block["timestamp"],
@@ -1498,7 +2020,7 @@ def collect_official_api_mining_rewards_for_address(
                     "penalty": summary.get("penalty", "0"),
                 }
             )
-        if older_than_target:
+        if older_than_window:
             break
     return events
 
@@ -1508,7 +2030,7 @@ def sync_official_api_rewards(
     ledger: RewardLedger,
     api_base_url: str = DEFAULT_OFFICIAL_API_BASE_URL,
     epochs: Optional[Sequence[int]] = None,
-    completed_epochs: int = 1,
+    completed_epochs: int = DEFAULT_OFFICIAL_API_COMPLETED_EPOCHS,
     include_mining_summaries: bool = True,
     page_limit: int = DEFAULT_OFFICIAL_API_PAGE_LIMIT,
     mining_page_limit: int = 20,
@@ -1537,6 +2059,9 @@ def sync_official_api_rewards(
     epoch_results: List[Dict[str, Any]] = []
     total_exported = 0
     total_imported = 0
+    epoch_data: Dict[int, Dict[str, Any]] = {}
+    source_blocks_by_epoch: Dict[int, Dict[str, Any]] = {}
+    mining_addresses = set()
     for epoch in selected_epochs:
         source_block = get_official_api_epoch_source_block(
             base_url=api_base_url,
@@ -1553,8 +2078,12 @@ def sync_official_api_rewards(
             retries=retries,
             request_delay_seconds=request_delay_seconds,
         )
-        events = list(validation_events)
-        mining_events: List[Dict[str, Any]] = []
+        source_blocks_by_epoch[epoch] = source_block
+        epoch_data[epoch] = {
+            "source_block": source_block,
+            "validation_events": validation_events,
+            "mining_events": [],
+        }
         if include_mining_summaries:
             identity_addresses = collect_official_api_epoch_identity_addresses(
                 base_url=api_base_url,
@@ -1564,23 +2093,30 @@ def sync_official_api_rewards(
                 retries=retries,
                 request_delay_seconds=request_delay_seconds,
             )
-            addresses = sorted(set(reward_addresses) | set(identity_addresses))
-            for address in addresses:
-                mining_events.extend(
-                    collect_official_api_mining_rewards_for_address(
-                        base_url=api_base_url,
-                        address=address,
-                        epoch=epoch,
-                        source_block=source_block,
-                        page_limit=mining_page_limit,
-                        timeout_seconds=timeout_seconds,
-                        retries=retries,
-                        request_delay_seconds=request_delay_seconds,
-                    )
-                )
-                if request_delay_seconds > 0:
-                    time.sleep(request_delay_seconds)
-            events.extend(mining_events)
+            mining_addresses.update(reward_addresses)
+            mining_addresses.update(identity_addresses)
+
+    if include_mining_summaries:
+        for address in sorted(mining_addresses):
+            mining_events = collect_official_api_mining_rewards_for_address(
+                base_url=api_base_url,
+                address=address,
+                source_blocks_by_epoch=source_blocks_by_epoch,
+                page_limit=mining_page_limit,
+                timeout_seconds=timeout_seconds,
+                retries=retries,
+                request_delay_seconds=request_delay_seconds,
+            )
+            for event in mining_events:
+                epoch_data[int(event["epoch"])]["mining_events"].append(event)
+            if request_delay_seconds > 0:
+                time.sleep(request_delay_seconds)
+
+    for epoch in selected_epochs:
+        source_block = epoch_data[epoch]["source_block"]
+        validation_events = epoch_data[epoch]["validation_events"]
+        mining_events = epoch_data[epoch]["mining_events"]
+        events = [*validation_events, *mining_events]
         if not events:
             raise RuntimeError(f"official Idena API exported no reward events for epoch {epoch}")
         epoch_source = f"{source}:epoch:{epoch}"
@@ -1588,6 +2124,7 @@ def sync_official_api_rewards(
             events,
             source=epoch_source,
             replace_source=True,
+            source_priority=EXACT_SOURCE_PRIORITY_OFFICIAL_API,
         )
         total_exported += len(events)
         total_imported += imported
@@ -1756,6 +2293,7 @@ def statscollector_replay_event_to_ledger_event(
     default_epoch: Optional[int],
     source: str,
 ) -> Dict[str, Any]:
+    item = dict(item)
     address = normalize_address(first_present(item, ("idena_address", "address", "identity_address")))
     if not IDENA_ADDRESS_RE.fullmatch(address):
         raise ValueError(f"invalid Idena address for exact reward import: {address!r}")
@@ -1781,6 +2319,19 @@ def statscollector_replay_event_to_ledger_event(
     replay_kind = derive_exact_replay_kind(item)
     ledger_kind = EXACT_LEDGER_KIND_BY_REPLAY_KIND[replay_kind]
     amount_atoms, balance_atoms, stake_atoms = parse_exact_atoms(item)
+    direction = str(item.get("direction") or "credit").strip().lower()
+    if direction not in {"credit", "debit"}:
+        raise ValueError("exact reward event direction must be credit or debit")
+    sign = 1 if direction == "credit" else -1
+    locked_atoms_raw = first_present(
+        item,
+        ("locked_stake_atoms", "locked_atoms", "lockedStakeAtoms"),
+    )
+    locked_atoms = (
+        parse_int_field(locked_atoms_raw, "locked_stake_atoms", minimum=0)
+        if locked_atoms_raw is not None
+        else stake_atoms if replay_kind == "Invitee" else 0
+    )
     timestamp_raw = first_present(item, ("timestamp", "block_timestamp", "blockTimestamp"))
     timestamp = parse_block_timestamp(timestamp_raw) if timestamp_raw is not None else utc_now()
     tx_hash = normalize_hash(
@@ -1788,23 +2339,31 @@ def statscollector_replay_event_to_ledger_event(
         "tx_hash",
         required=False,
     )
+    liability_tx_hash = normalize_hash(
+        first_present(item, ("liability_tx_hash", "invite_tx_hash", "inviteTxHash")),
+        "liability_tx_hash",
+        required=False,
+    )
+    if liability_tx_hash:
+        item["liability_tx_hash"] = liability_tx_hash
     counterparty = normalize_address(first_present(item, ("counterparty_address", "counterpartyAddress")))
     if counterparty and not IDENA_ADDRESS_RE.fullmatch(counterparty):
         raise ValueError(f"invalid counterparty address for exact reward import: {counterparty!r}")
-    event_id = stable_event_id(
-        [
-            source,
-            epoch,
-            height,
-            block_hash,
-            address,
-            ledger_kind,
-            amount_atoms,
-            balance_atoms,
-            stake_atoms,
-            tx_hash,
-        ]
-    )
+    event_id_parts = [
+        source,
+        epoch,
+        height,
+        block_hash,
+        address,
+        ledger_kind,
+        sign * amount_atoms,
+        sign * balance_atoms,
+        sign * stake_atoms,
+        tx_hash,
+    ]
+    if direction != "credit" or liability_tx_hash or locked_atoms:
+        event_id_parts.extend([direction, sign * locked_atoms, liability_tx_hash])
+    event_id = stable_event_id(event_id_parts)
     return {
         "id": event_id,
         "address": address,
@@ -1813,18 +2372,18 @@ def statscollector_replay_event_to_ledger_event(
         "block_hash": block_hash,
         "timestamp": timestamp,
         "kind": ledger_kind,
-        "direction": "credit",
-        "amount_atoms": amount_atoms,
-        "balance_atoms_delta": balance_atoms,
-        "stake_atoms_delta": stake_atoms,
+        "direction": direction,
+        "amount_atoms": sign * amount_atoms,
+        "balance_atoms_delta": sign * balance_atoms,
+        "stake_atoms_delta": sign * stake_atoms,
         "replenished_stake_atoms_delta": 0,
-        "locked_stake_atoms_delta": 0,
+        "locked_stake_atoms_delta": sign * locked_atoms,
         "source": source,
         "confidence": "exact",
         "liability_status": "",
         "counterparty_address": counterparty,
         "tx_hash": tx_hash,
-        "notes": "exact reward event imported from official idena-indexer StatsCollector output",
+        "notes": f"exact reward {direction} imported from official idena-indexer data",
         "raw_json": json.dumps(item, sort_keys=True),
         "created_at": utc_now(),
     }
@@ -1898,6 +2457,7 @@ def format_event_row(row: sqlite3.Row) -> Dict[str, Any]:
 def format_liability_row(row: sqlite3.Row) -> Dict[str, Any]:
     original_atoms = int(row["original_locked_atoms"] or 0)
     current_atoms = int(row["current_locked_atoms"] or 0)
+    burned_atoms = int(row["burned_atoms"] or 0)
     return {
         "inviteeAddress": row["invitee_address"],
         "inviterAddress": row["inviter_address"],
@@ -1908,7 +2468,12 @@ def format_liability_row(row: sqlite3.Row) -> Dict[str, Any]:
         "originalLocked": atoms_to_decimal_string(original_atoms),
         "currentLockedAtoms": str(current_atoms),
         "currentLocked": atoms_to_decimal_string(current_atoms),
+        "maturityEpoch": row["maturity_epoch"],
+        "burnedAtoms": str(burned_atoms),
+        "burned": atoms_to_decimal_string(burned_atoms),
         "status": row["status"],
+        "confidence": row["confidence"],
+        "source": row["source"],
         "lastSeenEpoch": int(row["last_seen_epoch"]),
         "lastHeight": int(row["last_height"]),
         "updatedAt": row["updated_at"],
@@ -2772,7 +3337,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sub.add_parser("status")
 
     export = sub.add_parser("export-replay")
-    export.add_argument("--epoch", type=int)
+    export_window = export.add_mutually_exclusive_group()
+    export_window.add_argument("--epoch", type=int)
+    export_window.add_argument(
+        "--latest-epoch",
+        action="store_true",
+        help="Export only the latest epoch with canonical eligible reward data",
+    )
     export.add_argument("--max-height", type=int)
     export.add_argument("--allow-inferred", action="store_true")
     export.add_argument(
@@ -2815,9 +3386,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--epoch",
         type=int,
         action="append",
-        help="Completed epoch to import; repeat for multiple epochs. Defaults to previous completed epoch.",
+        help="Completed epoch to import; repeat for multiple epochs. Defaults to the ten-epoch invitation liability window.",
     )
-    api_sync.add_argument("--completed-epochs", type=int, default=1)
+    api_sync.add_argument(
+        "--completed-epochs",
+        type=int,
+        default=DEFAULT_OFFICIAL_API_COMPLETED_EPOCHS,
+    )
     api_sync.add_argument("--page-limit", type=int, default=DEFAULT_OFFICIAL_API_PAGE_LIMIT)
     api_sync.add_argument("--mining-page-limit", type=int, default=20)
     api_sync.add_argument("--timeout-seconds", type=int, default=DEFAULT_OFFICIAL_API_TIMEOUT_SECONDS)
@@ -2878,6 +3453,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             try:
                 events = ledger.export_replay_events(
                     epoch=args.epoch,
+                    latest_epoch=args.latest_epoch,
                     max_height=args.max_height,
                     allow_inferred=args.allow_inferred,
                     require_exact=args.require_exact,

@@ -146,6 +146,8 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertNotIn("--rpc-password", args)
         self.assertNotIn("super-secret-rpc-password", args)
         self.assertIn("run-mining-adapter", args)
+        self.assertIn("--refresh-job-from-rpc", args)
+        self.assertIn("--job-refresh-interval-seconds", args)
 
     def test_mining_adapter_health_gate_blocks_rpc_job_refresh(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-health-") as temp:
@@ -226,6 +228,44 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn("--pohw-commitment-file", args)
         self.assertIn(str(pohw_commitment), args)
         self.assertIn("run-mining-adapter", args)
+        self.assertIn("--refresh-job-from-rpc", args)
+
+    def test_mining_adapter_auto_submit_is_explicit_and_uses_rpc_without_rebuilding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-auto-submit-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            cookie = root / "bitcoin.cookie"
+            cookie.write_text("__cookie__:secret\n", encoding="utf-8")
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_BITCOIN_RPC_COOKIE_FILE": str(cookie),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+            Path(env["POHW_STRATUM_JOB_FILE"]).write_text(
+                '{ "job_id": "live-job" }\n', encoding="utf-8"
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-mining-adapter", args)
+        self.assertIn("--auto-submit-blocks", args)
+        self.assertIn("--rpc-cookie-file", args)
+        self.assertNotIn("build-stratum-job-rpc", args)
+        self.assertNotIn("build-pohw-stratum-job-rpc", args)
 
     def test_mining_adapter_rejects_conflicting_job_refresh_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-conflicting-jobs-") as temp:

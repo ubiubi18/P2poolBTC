@@ -107,7 +107,7 @@ pub struct BitcoinMiningJobTemplate {
     pub default_witness_commitment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BitcoinMiningJobTransaction {
     pub txid: String,
     pub data_hex: String,
@@ -161,6 +161,10 @@ struct GetBlockHeaderResponse {
     hash: String,
     height: u64,
     time: i64,
+    #[serde(default)]
+    mediantime: Option<i64>,
+    #[serde(default)]
+    bits: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -291,6 +295,43 @@ impl BitcoinRpcClient {
             .call("getblocktemplate", json!([{ "rules": ["segwit"] }]))
             .await?;
         validate_bitcoin_work_template_against_getblocktemplate(template, &block_template, &policy)
+    }
+
+    pub async fn validate_historical_bitcoin_work_template(
+        &self,
+        template: &BitcoinWorkTemplate,
+    ) -> Result<BitcoinWorkTemplateValidation> {
+        let parsed = ParsedHeaderPrefix::parse(&template.header_prefix_hex)?;
+        let previous: GetBlockHeaderResponse = self
+            .call("getblockheader", json!([&parsed.previous_block_hash, true]))
+            .await
+            .context("failed to read historical template previous block")?;
+        let active_previous_hash: String = self
+            .call("getblockhash", json!([previous.height]))
+            .await
+            .context("failed to locate historical template previous block on active chain")?;
+        let active_previous_hash =
+            normalize_hash_hex("active previous block", &active_previous_hash)?;
+        let height = previous
+            .height
+            .checked_add(1)
+            .context("historical template height overflow")?;
+        let next_hash: String = self
+            .call("getblockhash", json!([height]))
+            .await
+            .context("historical template has no active-chain successor")?;
+        let next_hash = normalize_hash_hex("historical successor block", &next_hash)?;
+        let next: GetBlockHeaderResponse = self
+            .call("getblockheader", json!([&next_hash, true]))
+            .await
+            .context("failed to read historical template successor block")?;
+        validate_historical_bitcoin_work_template_against_active_chain(
+            template,
+            &active_previous_hash,
+            &previous,
+            &next_hash,
+            &next,
+        )
     }
 
     pub async fn mining_job_template(&self) -> Result<BitcoinMiningJobTemplate> {
@@ -946,6 +987,73 @@ fn validate_bitcoin_work_template_against_getblocktemplate(
     })
 }
 
+fn validate_historical_bitcoin_work_template_against_active_chain(
+    template: &BitcoinWorkTemplate,
+    active_previous_hash: &str,
+    previous: &GetBlockHeaderResponse,
+    active_next_hash: &str,
+    next: &GetBlockHeaderResponse,
+) -> Result<BitcoinWorkTemplateValidation> {
+    template.verify_template_hash()?;
+    let parsed = ParsedHeaderPrefix::parse(&template.header_prefix_hex)?;
+    let active_previous_hash = normalize_hash_hex("active previous block", active_previous_hash)?;
+    let returned_previous_hash = normalize_hash_hex("previous block header", &previous.hash)?;
+    if parsed.previous_block_hash != returned_previous_hash
+        || parsed.previous_block_hash != active_previous_hash
+    {
+        bail!(
+            "historical template previous block {} is not the active block at height {}",
+            parsed.previous_block_hash,
+            previous.height
+        );
+    }
+    let height = previous
+        .height
+        .checked_add(1)
+        .context("historical template height overflow")?;
+    let active_next_hash = normalize_hash_hex("historical successor block", active_next_hash)?;
+    if next.height != height
+        || normalize_hash_hex("historical successor header", &next.hash)? != active_next_hash
+    {
+        bail!("Bitcoin RPC returned inconsistent historical successor header");
+    }
+    let next_bits = normalize_bits_hex(
+        next.bits
+            .as_deref()
+            .context("historical successor header is missing bits")?,
+    )?;
+    if parsed.bits != next_bits {
+        bail!(
+            "historical template bits {} do not match active successor bits {}",
+            parsed.bits,
+            next_bits
+        );
+    }
+    let median_time = previous.mediantime.unwrap_or(previous.time);
+    if i64::from(parsed.time) <= median_time
+        || i64::from(parsed.time) > next.time.saturating_add(7_200)
+    {
+        bail!(
+            "historical template time {} is outside active-chain bounds {}..{}",
+            parsed.time,
+            median_time,
+            next.time.saturating_add(7_200)
+        );
+    }
+    let target = target_hex_from_bits(&next_bits)?;
+    Ok(BitcoinWorkTemplateValidation {
+        template_hash: template.template_hash.to_ascii_lowercase(),
+        previous_block_hash: parsed.previous_block_hash,
+        height,
+        header_version: parsed.version,
+        header_time: parsed.time,
+        bits: next_bits,
+        target,
+        header_merkle_root_hex: parsed.merkle_root_hex,
+        merkle_root_status: "historical-active-chain-bits".to_string(),
+    })
+}
+
 fn mining_job_template_from_getblocktemplate(
     block_template: &GetBlockTemplateResponse,
 ) -> Result<BitcoinMiningJobTemplate> {
@@ -1449,6 +1557,58 @@ mod tests {
         assert_eq!(
             validation.merkle_root_status,
             "matched_expected_header_merkle_root"
+        );
+    }
+
+    #[test]
+    fn historical_template_validation_binds_active_chain_and_difficulty() {
+        let previous_hash = "10".repeat(32);
+        let next_hash = "20".repeat(32);
+        let merkle = "30".repeat(32);
+        let bits = "207fffff";
+        let template = BitcoinWorkTemplate::new_unsigned(
+            "miner-a",
+            header_prefix_hex(0x2000_0000, &previous_hash, &merkle, 1_700_000_000, bits),
+            1,
+        )
+        .unwrap();
+        let previous = GetBlockHeaderResponse {
+            hash: previous_hash.clone(),
+            height: 122,
+            time: 1_699_999_800,
+            mediantime: Some(1_699_999_700),
+            bits: Some(bits.to_string()),
+        };
+        let next = GetBlockHeaderResponse {
+            hash: next_hash.clone(),
+            height: 123,
+            time: 1_700_000_100,
+            mediantime: Some(1_699_999_800),
+            bits: Some(bits.to_string()),
+        };
+
+        let validation = validate_historical_bitcoin_work_template_against_active_chain(
+            &template,
+            &previous_hash,
+            &previous,
+            &next_hash,
+            &next,
+        )
+        .unwrap();
+
+        assert_eq!(validation.height, 123);
+        assert_eq!(validation.bits, bits);
+        let mut wrong_bits = next;
+        wrong_bits.bits = Some("1d00ffff".to_string());
+        assert!(
+            validate_historical_bitcoin_work_template_against_active_chain(
+                &template,
+                &previous_hash,
+                &previous,
+                &next_hash,
+                &wrong_bits,
+            )
+            .is_err()
         );
     }
 

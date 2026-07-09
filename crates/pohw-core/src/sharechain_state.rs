@@ -8,7 +8,7 @@ use crate::withdrawal::{
 };
 use crate::{canonical_json, hash_hex, sha256_tagged, Sats, Score};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const ZERO_SHARE_PARENT_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -26,6 +26,8 @@ pub struct SharechainReplayState {
     bitcoin_work_templates: BTreeMap<String, BitcoinWorkTemplate>,
     registrations: BTreeMap<String, MinerRegistration>,
     shares: BTreeMap<String, ShareNode>,
+    #[serde(default)]
+    children_by_parent: BTreeMap<String, BTreeSet<String>>,
     active_share_hashes: BTreeSet<String>,
     active_share_score_total: Score,
     best_share_tip: Option<String>,
@@ -629,19 +631,171 @@ impl SharechainReplayState {
             return Ok(());
         }
 
+        let parent_share_hash = share.parent_share_hash.to_ascii_lowercase();
         self.shares.insert(
-            share_hash,
+            share_hash.clone(),
             ShareNode {
-                parent_share_hash: share.parent_share_hash.to_ascii_lowercase(),
+                parent_share_hash: parent_share_hash.clone(),
                 share,
                 cumulative_score: None,
                 height: 0,
             },
         );
-        self.recompute_fork_choice()
+        self.children_by_parent
+            .entry(parent_share_hash)
+            .or_default()
+            .insert(share_hash.clone());
+        self.resolve_share_and_descendants(&share_hash)
     }
 
-    fn recompute_fork_choice(&mut self) -> Result<(), SharechainReplayError> {
+    fn resolve_share_and_descendants(
+        &mut self,
+        share_hash: &str,
+    ) -> Result<(), SharechainReplayError> {
+        let mut queue = VecDeque::from([share_hash.to_string()]);
+        while let Some(candidate_hash) = queue.pop_front() {
+            let Some(candidate) = self.shares.get(&candidate_hash) else {
+                continue;
+            };
+            let branch_score = if candidate.parent_share_hash == ZERO_SHARE_PARENT_HASH {
+                Some((candidate.share.hashrate_score_delta, 1))
+            } else {
+                match self.shares.get(&candidate.parent_share_hash) {
+                    Some(parent) => match parent.cumulative_score {
+                        Some(parent_score) => Some((
+                            parent_score
+                                .checked_add(candidate.share.hashrate_score_delta)
+                                .ok_or_else(|| {
+                                    SharechainReplayError::ShareBranchScoreOverflow(
+                                        candidate_hash.clone(),
+                                    )
+                                })?,
+                            parent.height.checked_add(1).ok_or_else(|| {
+                                SharechainReplayError::ShareBranchScoreOverflow(
+                                    candidate_hash.clone(),
+                                )
+                            })?,
+                        )),
+                        None => None,
+                    },
+                    None => None,
+                }
+            };
+            let Some((cumulative_score, height)) = branch_score else {
+                continue;
+            };
+            if height == 0 {
+                return Err(SharechainReplayError::ShareBranchScoreOverflow(
+                    candidate_hash,
+                ));
+            }
+            if let Some(candidate) = self.shares.get_mut(&candidate_hash) {
+                candidate.cumulative_score = Some(cumulative_score);
+                candidate.height = height;
+            }
+            self.consider_resolved_share(&candidate_hash)?;
+            if let Some(children) = self.children_by_parent.get(&candidate_hash) {
+                queue.extend(children.iter().cloned());
+            }
+        }
+        Ok(())
+    }
+
+    fn consider_resolved_share(&mut self, share_hash: &str) -> Result<(), SharechainReplayError> {
+        let node = self
+            .shares
+            .get(share_hash)
+            .expect("resolved share remains in replay state");
+        let score = node
+            .cumulative_score
+            .expect("resolved share has cumulative score");
+        let current_tip = self.best_share_tip.as_deref();
+        let is_better = match current_tip.and_then(|tip| self.shares.get(tip)) {
+            Some(current) => {
+                let current_score = current
+                    .cumulative_score
+                    .expect("best share tip has cumulative score");
+                score > current_score
+                    || (score == current_score && share_hash < current_tip.unwrap())
+            }
+            None => true,
+        };
+        if !is_better {
+            return Ok(());
+        }
+
+        if current_tip.is_some_and(|tip| node.parent_share_hash == tip)
+            && self.active_share_hashes.contains(&node.parent_share_hash)
+        {
+            let miner_id = node.share.miner_id.to_ascii_lowercase();
+            let entry = self.hashrate_scores.entry(miner_id.clone()).or_default();
+            *entry = entry
+                .checked_add(node.share.hashrate_score_delta)
+                .ok_or(SharechainReplayError::HashrateScoreOverflow(miner_id))?;
+            self.active_share_score_total = self
+                .active_share_score_total
+                .checked_add(node.share.hashrate_score_delta)
+                .ok_or_else(|| {
+                    SharechainReplayError::ShareBranchScoreOverflow(share_hash.to_string())
+                })?;
+            self.active_share_hashes.insert(share_hash.to_string());
+            self.best_share_tip = Some(share_hash.to_string());
+            return Ok(());
+        }
+
+        self.rebuild_active_branch(share_hash)
+    }
+
+    fn rebuild_active_branch(&mut self, best_share_tip: &str) -> Result<(), SharechainReplayError> {
+        let mut active_branch = Vec::new();
+        let mut cursor = Some(best_share_tip.to_string());
+        let mut seen = BTreeSet::new();
+        while let Some(share_hash) = cursor {
+            if !seen.insert(share_hash.clone()) {
+                break;
+            }
+            let Some(node) = self.shares.get(&share_hash) else {
+                break;
+            };
+            active_branch.push(share_hash);
+            if node.parent_share_hash == ZERO_SHARE_PARENT_HASH {
+                break;
+            }
+            cursor = Some(node.parent_share_hash.clone());
+        }
+
+        self.active_share_hashes = active_branch.iter().cloned().collect();
+        self.hashrate_scores.clear();
+        self.active_share_score_total = 0;
+        for share_hash in active_branch {
+            let node = self
+                .shares
+                .get(&share_hash)
+                .expect("active branch share remains in replay state");
+            let miner_id = node.share.miner_id.to_ascii_lowercase();
+            let entry = self.hashrate_scores.entry(miner_id.clone()).or_default();
+            *entry = entry
+                .checked_add(node.share.hashrate_score_delta)
+                .ok_or(SharechainReplayError::HashrateScoreOverflow(miner_id))?;
+            self.active_share_score_total = self
+                .active_share_score_total
+                .checked_add(node.share.hashrate_score_delta)
+                .ok_or_else(|| {
+                    SharechainReplayError::ShareBranchScoreOverflow(share_hash.clone())
+                })?;
+        }
+        self.best_share_tip = Some(best_share_tip.to_string());
+        Ok(())
+    }
+
+    pub fn rebuild_derived_share_state(&mut self) -> Result<(), SharechainReplayError> {
+        self.children_by_parent.clear();
+        for (share_hash, node) in &self.shares {
+            self.children_by_parent
+                .entry(node.parent_share_hash.clone())
+                .or_default()
+                .insert(share_hash.clone());
+        }
         let mut branch_scores: BTreeMap<String, Option<(Score, u64)>> = BTreeMap::new();
         for share_hash in self.shares.keys() {
             let mut visiting = BTreeSet::new();

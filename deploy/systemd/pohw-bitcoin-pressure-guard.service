@@ -1,14 +1,12 @@
 [Unit]
-Description=PoHW Idena validation priority guard
-After=network-online.target
-Wants=network-online.target
+Description=PoHW Bitcoin Core I/O pressure guard
 RequiresMountsFor=/mnt/ssd
 
 [Service]
 Type=oneshot
 WorkingDirectory=/
 EnvironmentFile=-/etc/pohw/p2pool.env
-ExecStart=/usr/bin/env POHW_IDENA_PRIORITY_STATE_DIR=/var/lib/pohw/idena-priority /usr/bin/python3 /usr/local/libexec/pohw/pohw-idena-priority-guard.py
+ExecStart=/usr/bin/env POHW_BITCOIN_PRESSURE_STATE_DIR=/var/lib/pohw/bitcoin-pressure /usr/bin/python3 /usr/local/libexec/pohw/pohw-bitcoin-pressure-guard.py
 TimeoutStartSec=30
 NoNewPrivileges=true
 PrivateTmp=true
@@ -27,7 +25,6 @@ RestrictRealtime=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_DAC_READ_SEARCH
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictAddressFamilies=AF_UNIX
 UMask=0077
-ReadOnlyPaths=/mnt/ssd/idena/idena-data
-ReadWritePaths=/var/lib/pohw/idena-priority
+ReadWritePaths=/var/lib/pohw/bitcoin-pressure

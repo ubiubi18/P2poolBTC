@@ -386,6 +386,15 @@ elif [[ -n "${IDENA_REWARD_LEDGER_DB:-}" ]]; then
     --db "$IDENA_REWARD_LEDGER_DB"
     export-replay
   )
+  if [[ -n "${IDENA_REWARD_EPOCH:-}" ]]; then
+    if [[ ! "$IDENA_REWARD_EPOCH" =~ ^[0-9]+$ ]]; then
+      echo "IDENA_REWARD_EPOCH must be an unsigned integer: $IDENA_REWARD_EPOCH" >&2
+      exit 1
+    fi
+    reward_export_args+=(--epoch "$IDENA_REWARD_EPOCH")
+  else
+    reward_export_args+=(--latest-epoch)
+  fi
   allow_inferred_reward_replay=false
   case "${POHW_ALLOW_INFERRED_REWARD_REPLAY:-}" in
     1|true|TRUE|yes|YES)

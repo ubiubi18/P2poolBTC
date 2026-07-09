@@ -12,6 +12,7 @@ STRATUM_DIFFICULTY="${POHW_STRATUM_DIFFICULTY:-1}"
 EXTRANONCE2_SIZE="${POHW_STRATUM_EXTRANONCE2_SIZE:-4}"
 MAX_LINE_BYTES="${POHW_STRATUM_MAX_LINE_BYTES:-16384}"
 IDLE_TIMEOUT_SECONDS="${POHW_STRATUM_IDLE_TIMEOUT_SECONDS:-900}"
+JOB_REFRESH_INTERVAL_SECONDS="${POHW_STRATUM_JOB_REFRESH_INTERVAL_SECONDS:-5}"
 
 if [[ -z "${POHW_MINER_ID:-}" ]]; then
   echo "POHW_MINER_ID is required before starting the mining adapter." >&2
@@ -35,6 +36,26 @@ fi
 if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" && "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
   echo "Use either POHW_STRATUM_BUILD_JOB_FROM_RPC or POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC, not both." >&2
   exit 1
+fi
+
+configure_rpc_environment() {
+  unset BITCOIN_RPC_USER BITCOIN_RPC_PASSWORD BITCOIN_RPC_COOKIE_FILE
+  if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
+    export BITCOIN_RPC_COOKIE_FILE="$POHW_BITCOIN_RPC_COOKIE_FILE"
+    return
+  fi
+  if [[ -n "${POHW_BITCOIN_RPC_USER:-}" || -n "${POHW_BITCOIN_RPC_PASSWORD:-}" ]]; then
+    if [[ -z "${POHW_BITCOIN_RPC_USER:-}" || -z "${POHW_BITCOIN_RPC_PASSWORD:-}" ]]; then
+      echo "POHW_BITCOIN_RPC_USER and POHW_BITCOIN_RPC_PASSWORD must be set together." >&2
+      exit 1
+    fi
+    export BITCOIN_RPC_USER="$POHW_BITCOIN_RPC_USER"
+    export BITCOIN_RPC_PASSWORD="$POHW_BITCOIN_RPC_PASSWORD"
+  fi
+}
+
+if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
+  configure_rpc_environment
 fi
 
 check_health_ready_for_rpc_job() {
@@ -81,12 +102,6 @@ if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     build_args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
   fi
-  if [[ -n "${POHW_BITCOIN_RPC_USER:-}" ]]; then
-    export BITCOIN_RPC_USER="$POHW_BITCOIN_RPC_USER"
-  fi
-  if [[ -n "${POHW_BITCOIN_RPC_PASSWORD:-}" ]]; then
-    export BITCOIN_RPC_PASSWORD="$POHW_BITCOIN_RPC_PASSWORD"
-  fi
   if [[ "${POHW_BITCOIN_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
     build_args+=(--allow-remote-rpc)
   fi
@@ -103,12 +118,6 @@ elif [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" ]]; then
   fi
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     build_args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
-  fi
-  if [[ -n "${POHW_BITCOIN_RPC_USER:-}" ]]; then
-    export BITCOIN_RPC_USER="$POHW_BITCOIN_RPC_USER"
-  fi
-  if [[ -n "${POHW_BITCOIN_RPC_PASSWORD:-}" ]]; then
-    export BITCOIN_RPC_PASSWORD="$POHW_BITCOIN_RPC_PASSWORD"
   fi
   if [[ "${POHW_BITCOIN_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
     build_args+=(--allow-remote-rpc)
@@ -162,6 +171,35 @@ fi
 
 if [[ "${POHW_STRATUM_APPEND:-true}" != "true" ]]; then
   args+=(--no-append)
+fi
+
+if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+  args+=(
+    --refresh-job-from-rpc
+    --job-refresh-interval-seconds "$JOB_REFRESH_INTERVAL_SECONDS"
+  )
+  if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+    args+=(
+      --payout-schedule-file "$POHW_STRATUM_PAYOUT_SCHEDULE_FILE"
+      --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
+    )
+  fi
+fi
+
+if [[ "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
+  args+=(--auto-submit-blocks)
+fi
+
+if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
+  if [[ -n "${POHW_BITCOIN_RPC_URL:-}" ]]; then
+    args+=(--rpc-url "$POHW_BITCOIN_RPC_URL")
+  fi
+  if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
+    args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
+  fi
+  if [[ "${POHW_BITCOIN_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
+    args+=(--allow-remote-rpc)
+  fi
 fi
 
 if [[ -n "${POHW_PEER_ADDRS:-}" ]]; then
