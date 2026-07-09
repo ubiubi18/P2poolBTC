@@ -64,6 +64,7 @@ COINSTIP_CACHE_RE = re.compile(
     r"(?P<cache_mib>[0-9.]+) MiB"
 )
 IDENA_IPFS_PORT_RE = re.compile(r"Finish changing IPFS port\s+new=(?P<port>\d+)")
+IDENA_START_RE = re.compile(r"Idena node is starting")
 IDENA_LOOP_RE = re.compile(
     r"Start loop\s+round=(?P<round>\d+).*?"
     r"total-peers=(?P<total_peers>\d+)\s+"
@@ -355,6 +356,10 @@ def probe_idena_p2p(datadir: Path, min_peers: int, max_log_bytes: int = 2 * 1024
 
     try:
         for line in read_file_tail(log_path, max_log_bytes).splitlines():
+            if IDENA_START_RE.search(line):
+                active_port = configured_port
+                latest_loop = None
+                continue
             port_match = IDENA_IPFS_PORT_RE.search(line)
             if port_match:
                 active_port = int(port_match.group("port"))

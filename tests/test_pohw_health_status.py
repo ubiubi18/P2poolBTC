@@ -150,6 +150,39 @@ sda            157.00  32136.00    54.00  25.59   86.87   204.69   16.00   2220.
         self.assertIn("idena_ipfs_port_drift", parsed["warnings"])
         self.assertIn("idena_low_peer_count", parsed["warnings"])
 
+    def test_probe_idena_p2p_ignores_port_drift_before_latest_restart(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-idena-p2p-restart-") as temp:
+            datadir = Path(temp)
+            (datadir / "logs").mkdir()
+            (datadir / "config.json").write_text(
+                json.dumps({"IpfsConf": {"IpfsPort": 40405}}),
+                encoding="utf-8",
+            )
+            (datadir / "logs" / "output.log").write_text(
+                "\n".join(
+                    [
+                        "INFO [07-09|11:45:02.529] Finish changing IPFS port new=40409",
+                        "INFO [07-09|12:16:09.347] Idena node is starting version=1.1.2",
+                        (
+                            "INFO [07-09|12:25:35.279] Start loop round=11013007 "
+                            "head=0xabc shardId=1 p2p-shardId=0 total-peers=5 "
+                            "own-shard-peers=5 online-nodes=66 network=128"
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            parsed = health.probe_idena_p2p(datadir, min_peers=3)
+
+        self.assertEqual(parsed["status"], "ok")
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["configuredIpfsPort"], 40405)
+        self.assertEqual(parsed["activeIpfsPort"], 40405)
+        self.assertEqual(parsed["latestLoop"]["total_peers"], 5)
+        self.assertNotIn("idena_ipfs_port_drift", parsed["warnings"])
+
     def test_summary_lines_include_idena_p2p_warnings(self) -> None:
         lines = health.summary_lines(
             {
