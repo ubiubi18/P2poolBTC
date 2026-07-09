@@ -707,6 +707,8 @@ POHW_DASHBOARD_UI_PORT=5176
 POHW_DASHBOARD_UI_API_URL=http://127.0.0.1:40407/dashboard.json
 POHW_DASHBOARD_UI_CACHE_DIR=/mnt/ssd/pohw-p2pool/dashboard-ui-cache
 POHW_DASHBOARD_IDENA_ADDRESS=0x...
+POHW_IDENA_DATADIR=/mnt/ssd/idena/idena-data
+POHW_HEALTH_IDENA_MIN_PEERS=3
 POHW_HEALTH_STATUS_FILE=/mnt/ssd/pohw-p2pool/health/status.json
 POHW_AUTO_BOOTSTRAP_DIR=/mnt/ssd/pohw-p2pool/auto-bootstrap
 POHW_AUTO_BOOTSTRAP_OUTPUT_ROOT=/mnt/ssd/pohw-p2pool/output
@@ -760,8 +762,19 @@ For holiday-safe access from changing networks, use Tailscale instead of router 
 # On the Pi, create a reusable or ephemeral auth key in the Tailscale admin UI,
 # paste it into a protected local file, then install/connect:
 sudo install -d -m 700 /etc/pohw
-sudo install -m 600 /dev/null /etc/pohw/tailscale.authkey
-sudo sh -c 'printf "%s\n" "tskey-auth-..." > /etc/pohw/tailscale.authkey'
+sudo install -m 600 -o root -g root /dev/null /etc/pohw/tailscale.authkey
+sudo python3 - <<'PY'
+import getpass
+import os
+from pathlib import Path
+
+path = Path("/etc/pohw/tailscale.authkey")
+key = getpass.getpass("Paste Tailscale auth key: ").strip()
+if not key.startswith("tskey-"):
+    raise SystemExit("Tailscale auth key should start with tskey-")
+path.write_text(key + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY
 sudo POHW_TAILSCALE_AUTHKEY_FILE=/etc/pohw/tailscale.authkey \
   /mnt/ssd/p2pool/scripts/pohw-install-tailscale-remote-access.sh
 ```
@@ -784,7 +797,7 @@ For a vacation-safe command-line status that avoids keys, cookies, addresses, an
 ssh <pi-ssh-host> '/usr/bin/python3 /mnt/ssd/p2pool/scripts/pohw-health-status.py --format summary'
 ```
 
-The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure.
+The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 

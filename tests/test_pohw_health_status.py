@@ -100,6 +100,91 @@ sda            157.00  32136.00    54.00  25.59   86.87   204.69   16.00   2220.
 
         self.assertEqual(code, 1)
 
+    def test_compute_readiness_preserves_inactive_service_state(self) -> None:
+        readiness = health.compute_readiness(
+            services={
+                "bitcoind-mainnet.service": {"active": False, "state": "timeout"},
+                "idena.service": {"active": True, "state": "active"},
+                "idena-reward-indexer.service": {"active": True, "state": "active"},
+            },
+            bitcoin_log={"nodeNetworkLimited": False},
+            bitcoin_rpc={"ok": True, "initialBlockDownload": False},
+            template={"ok": True},
+            idena_rpc={"ready": True},
+            idena_p2p={"warnings": []},
+        )
+
+        self.assertIn("bitcoind-mainnet.service:timeout", readiness["blockers"])
+
+    def test_probe_idena_p2p_warns_on_port_drift_and_low_peers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-idena-p2p-") as temp:
+            datadir = Path(temp)
+            (datadir / "logs").mkdir()
+            (datadir / "config.json").write_text(
+                json.dumps({"IpfsConf": {"IpfsPort": 40405}}),
+                encoding="utf-8",
+            )
+            (datadir / "logs" / "output.log").write_text(
+                "\n".join(
+                    [
+                        "INFO [07-09|11:44:56.914] Start changing IPFS port current=40405",
+                        "INFO [07-09|11:45:02.529] Finish changing IPFS port new=40409",
+                        (
+                            "INFO [07-09|12:00:13.047] Start loop round=11012930 "
+                            "head=0xabc shardId=1 p2p-shardId=0 total-peers=1  "
+                            "own-shard-peers=1  online-nodes=66 network=128"
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            parsed = health.probe_idena_p2p(datadir, min_peers=3)
+
+        self.assertEqual(parsed["status"], "warning")
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["configuredIpfsPort"], 40405)
+        self.assertEqual(parsed["activeIpfsPort"], 40409)
+        self.assertEqual(parsed["latestLoop"]["total_peers"], 1)
+        self.assertIn("idena_ipfs_port_drift", parsed["warnings"])
+        self.assertIn("idena_low_peer_count", parsed["warnings"])
+
+    def test_summary_lines_include_idena_p2p_warnings(self) -> None:
+        lines = health.summary_lines(
+            {
+                "status": "waiting",
+                "readiness": {
+                    "miningReady": False,
+                    "blockers": ["bitcoin_node_network_limited"],
+                    "warnings": ["idena_ipfs_port_drift"],
+                },
+                "bitcoin": {
+                    "debugLog": {
+                        "nodeNetworkLimited": True,
+                        "latestTip": {"height": 942943, "verificationProgress": 0.965849},
+                    },
+                    "rpc": {"status": "error"},
+                    "getblocktemplate": {"status": "skipped"},
+                },
+                "idena": {
+                    "rpc": {"status": "ok", "ready": True, "currentBlock": 11012930},
+                    "p2p": {
+                        "status": "warning",
+                        "configuredIpfsPort": 40405,
+                        "activeIpfsPort": 40409,
+                        "latestLoop": {"total_peers": 1},
+                    },
+                },
+            }
+        )
+
+        self.assertIn(
+            "Idena: status=ok ready=True height=11012930 p2p=warning port=40409(config=40405) peers=1",
+            lines,
+        )
+        self.assertIn("Warnings: idena_ipfs_port_drift", lines)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover - handled as unavailable at runtime
 
 
 DEFAULT_BITCOIN_DATADIR = Path("/mnt/ssd/bitcoin/bitcoin-core-mainnet")
+DEFAULT_IDENA_DATADIR = Path("/mnt/ssd/idena/idena-data")
 DEFAULT_IDENA_API_KEY_FILE = Path("/mnt/ssd/idena/idena-data/api.key")
 DEFAULT_HEALTH_OUTPUT = Path("/mnt/ssd/pohw-p2pool/health/status.json")
 DEFAULT_MOUNT = Path("/mnt/ssd")
@@ -61,6 +62,14 @@ UTXO_CACHE_RE = re.compile(r"\* Using (?P<cache_mib>[0-9.]+) MiB for in-memory U
 COINSTIP_CACHE_RE = re.compile(
     r"\[Chainstate \[(?P<chainstate>[^\]]+)\].* resized coinstip cache to "
     r"(?P<cache_mib>[0-9.]+) MiB"
+)
+IDENA_IPFS_PORT_RE = re.compile(r"Finish changing IPFS port\s+new=(?P<port>\d+)")
+IDENA_LOOP_RE = re.compile(
+    r"Start loop\s+round=(?P<round>\d+).*?"
+    r"total-peers=(?P<total_peers>\d+)\s+"
+    r"own-shard-peers=(?P<own_shard_peers>\d+).*?"
+    r"online-nodes=(?P<online_nodes>\d+)\s+"
+    r"network=(?P<network_size>\d+)"
 )
 
 
@@ -208,7 +217,7 @@ def parse_bitcoin_debug_log(path: Path, max_bytes: int = 2 * 1024 * 1024) -> dic
 def probe_services(services: tuple[str, ...]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for service in services:
-        probe = run_command(["systemctl", "is-active", service], timeout=2)
+        probe = run_command(["systemctl", "is-active", service], timeout=5)
         stdout = str(probe.get("stdout", "")).strip()
         result[service] = {
             "active": probe.get("ok") is True and stdout == "active",
@@ -317,6 +326,65 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
     }
 
 
+def read_file_tail(path: Path, max_bytes: int) -> str:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(size - max_bytes)
+            handle.readline()
+        return handle.read(max_bytes).decode("utf-8", errors="replace")
+
+
+def probe_idena_p2p(datadir: Path, min_peers: int, max_log_bytes: int = 2 * 1024 * 1024) -> dict[str, Any]:
+    status: dict[str, Any] = {"status": "ok", "ok": True, "warnings": []}
+    config_path = datadir / "config.json"
+    log_path = datadir / "logs" / "output.log"
+    configured_port: int | None = None
+    active_port: int | None = None
+    latest_loop: dict[str, int] | None = None
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        configured_raw = (config.get("IpfsConf") or {}).get("IpfsPort")
+        if configured_raw is not None:
+            configured_port = int(configured_raw)
+            active_port = configured_port
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        status["configStatus"] = "error"
+        status["configError"] = scrub_text(str(exc))
+
+    try:
+        for line in read_file_tail(log_path, max_log_bytes).splitlines():
+            port_match = IDENA_IPFS_PORT_RE.search(line)
+            if port_match:
+                active_port = int(port_match.group("port"))
+            loop_match = IDENA_LOOP_RE.search(line)
+            if loop_match:
+                latest_loop = {key: int(value) for key, value in loop_match.groupdict().items()}
+    except OSError as exc:
+        status["logStatus"] = "unavailable"
+        status["logError"] = scrub_text(str(exc))
+
+    if configured_port is not None:
+        status["configuredIpfsPort"] = configured_port
+    if active_port is not None:
+        status["activeIpfsPort"] = active_port
+    if latest_loop:
+        status["latestLoop"] = latest_loop
+
+    warnings: list[str] = []
+    if configured_port is not None and active_port is not None and active_port != configured_port:
+        warnings.append("idena_ipfs_port_drift")
+    if min_peers > 0 and latest_loop and latest_loop["total_peers"] < min_peers:
+        warnings.append("idena_low_peer_count")
+
+    status["warnings"] = warnings
+    status["ok"] = not warnings
+    if warnings:
+        status["status"] = "warning"
+    return status
+
+
 def probe_disk(mount_path: Path) -> dict[str, Any]:
     try:
         usage = shutil.disk_usage(mount_path)
@@ -403,11 +471,13 @@ def compute_readiness(
     bitcoin_rpc: dict[str, Any],
     template: dict[str, Any],
     idena_rpc: dict[str, Any],
+    idena_p2p: dict[str, Any],
 ) -> dict[str, Any]:
     blockers: list[str] = []
+    warnings: list[str] = []
     for service in ("bitcoind-mainnet.service", "idena.service", "idena-reward-indexer.service"):
         if service in services and not services[service].get("active"):
-            blockers.append(f"{service}:inactive")
+            blockers.append(f"{service}:{services[service].get('state', 'inactive')}")
     if not idena_rpc.get("ready"):
         blockers.append("idena_not_ready")
     if bitcoin_log.get("nodeNetworkLimited"):
@@ -418,7 +488,10 @@ def compute_readiness(
         blockers.append("bitcoin_initial_block_download")
     if not template.get("ok"):
         blockers.append(f"getblocktemplate_{template.get('status', 'unavailable')}")
-    return {"miningReady": not blockers, "blockers": blockers}
+    p2p_warnings = idena_p2p.get("warnings")
+    if isinstance(p2p_warnings, list):
+        warnings.extend(str(item) for item in p2p_warnings)
+    return {"miningReady": not blockers, "blockers": blockers, "warnings": warnings}
 
 
 def build_status(args: argparse.Namespace) -> dict[str, Any]:
@@ -436,9 +509,10 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         node_network_limited=bool(bitcoin_log.get("nodeNetworkLimited")),
     )
     idena_rpc = probe_idena_rpc(args.idena_rpc_url, Path(args.idena_api_key_file), args.idena_rpc_timeout)
+    idena_p2p = probe_idena_p2p(Path(args.idena_datadir), args.idena_min_peers)
     disk = probe_disk(mount_path)
     io_status = probe_iostat(mount_path, args.iostat_timeout, enabled=not args.skip_iostat)
-    readiness = compute_readiness(services, bitcoin_log, bitcoin_rpc, template, idena_rpc)
+    readiness = compute_readiness(services, bitcoin_log, bitcoin_rpc, template, idena_rpc, idena_p2p)
     return {
         "generatedAt": utc_now(),
         "status": "ready_for_mining" if readiness["miningReady"] else "waiting",
@@ -449,7 +523,7 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
             "rpc": bitcoin_rpc,
             "getblocktemplate": template,
         },
-        "idena": {"rpc": idena_rpc},
+        "idena": {"rpc": idena_rpc, "p2p": idena_p2p},
         "disk": disk,
         "io": io_status,
     }
@@ -472,11 +546,14 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
     blog = bitcoin.get("debugLog", {})
     brpc = bitcoin.get("rpc", {})
     template = bitcoin.get("getblocktemplate", {})
-    idena = status.get("idena", {}).get("rpc", {})
+    idena_status = status.get("idena", {})
+    idena = idena_status.get("rpc", {})
+    idena_p2p = idena_status.get("p2p", {})
     disk = status.get("disk", {})
     io_status = status.get("io", {})
     tip = blog.get("latestTip", {})
     blockers = readiness.get("blockers") or []
+    warnings = readiness.get("warnings") or []
     lines = [f"PoHW health: {status.get('status', 'unknown')}"]
     lines.append(
         "Bitcoin: "
@@ -486,12 +563,21 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
         f"rpc={brpc.get('status', 'unknown')} "
         f"getblocktemplate={template.get('status', 'unknown')}"
     )
-    lines.append(
+    idena_line = (
         "Idena: "
         f"status={idena.get('status', 'unknown')} "
         f"ready={idena.get('ready', False)} "
         f"height={idena.get('currentBlock', 'unknown')}"
     )
+    if idena_p2p:
+        latest_loop = idena_p2p.get("latestLoop") or {}
+        idena_line += (
+            f" p2p={idena_p2p.get('status', 'unknown')} "
+            f"port={idena_p2p.get('activeIpfsPort', 'unknown')}"
+            f"(config={idena_p2p.get('configuredIpfsPort', 'unknown')}) "
+            f"peers={latest_loop.get('total_peers', 'unknown')}"
+        )
+    lines.append(idena_line)
     if disk.get("status") == "ok":
         lines.append(
             f"Disk {disk.get('mount')}: free={human_bytes(disk.get('freeBytes'))} "
@@ -506,6 +592,8 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
         )
     if blockers:
         lines.append("Readiness blockers: " + ", ".join(str(item) for item in blockers))
+    if warnings:
+        lines.append("Warnings: " + ", ".join(str(item) for item in warnings))
     return lines
 
 
@@ -560,9 +648,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bitcoin-cli", default=os.getenv("POHW_BITCOIN_CLI", "bitcoin-cli"))
     parser.add_argument("--bitcoin-rpc-timeout", type=int, default=int(os.getenv("POHW_HEALTH_BITCOIN_RPC_TIMEOUT", "5")))
     parser.add_argument("--skip-getblocktemplate", action="store_true")
+    parser.add_argument("--idena-datadir", default=os.getenv("POHW_IDENA_DATADIR", str(DEFAULT_IDENA_DATADIR)))
     parser.add_argument("--idena-rpc-url", default=os.getenv("IDENA_RPC_URL", "http://127.0.0.1:9009"))
     parser.add_argument("--idena-api-key-file", default=os.getenv("IDENA_API_KEY_FILE", str(DEFAULT_IDENA_API_KEY_FILE)))
     parser.add_argument("--idena-rpc-timeout", type=int, default=int(os.getenv("POHW_HEALTH_IDENA_RPC_TIMEOUT", "5")))
+    parser.add_argument("--idena-min-peers", type=int, default=int(os.getenv("POHW_HEALTH_IDENA_MIN_PEERS", "3")))
     parser.add_argument("--mount-path", default=os.getenv("POHW_HEALTH_MOUNT_PATH", str(DEFAULT_MOUNT)))
     parser.add_argument("--skip-iostat", action="store_true")
     parser.add_argument("--iostat-timeout", type=int, default=int(os.getenv("POHW_HEALTH_IOSTAT_TIMEOUT", "5")))

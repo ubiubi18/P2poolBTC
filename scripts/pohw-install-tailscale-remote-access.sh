@@ -134,8 +134,24 @@ ensure_tailscale_installed() {
   run_cmd sh "$INSTALLER_PATH"
 }
 
-tailscale_logged_in() {
-  "$TAILSCALE_BIN" status --json >/dev/null 2>&1
+tailscale_authenticated() {
+  local status_json
+  if ! status_json="$("$TAILSCALE_BIN" status --json 2>/dev/null)"; then
+    return 1
+  fi
+  python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+state = data.get("BackendState")
+tailnet_ips = (data.get("Self") or {}).get("TailscaleIPs") or []
+sys.exit(0 if state == "Running" or tailnet_ips else 1)
+' <<<"$status_json"
 }
 
 tailscale_ip4() {
@@ -171,7 +187,7 @@ if [[ -n "$AUTHKEY_FILE" ]]; then
   up_args+=("--auth-key=file:$AUTHKEY_FILE")
 fi
 
-if tailscale_logged_in; then
+if tailscale_authenticated; then
   run_cmd "$TAILSCALE_BIN" "${up_args[@]}"
 else
   echo "Tailscale is not authenticated yet."
@@ -181,6 +197,11 @@ else
     exit 1
   fi
   run_cmd "$TAILSCALE_BIN" "${up_args[@]}"
+fi
+
+if ! is_truthy "$DRY_RUN" && ! tailscale_authenticated; then
+  echo "Tailscale did not reach an authenticated Running state after setup." >&2
+  exit 1
 fi
 
 if is_truthy "$ENABLE_SSH"; then

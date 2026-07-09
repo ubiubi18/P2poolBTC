@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,22 +11,34 @@ INSTALLER = REPO_ROOT / "scripts" / "pohw-install-tailscale-remote-access.sh"
 
 
 class TailscaleRemoteAccessTest(unittest.TestCase):
-    def write_fake_tailscale(self, root: Path, *, logged_in: bool = False) -> Path:
+    def write_fake_tailscale(self, root: Path, *, backend_state: str = "NeedsLogin") -> Path:
+        (root / "tailscale.state").write_text(backend_state, encoding="utf-8")
         fake = root / "tailscale"
         fake.write_text(
-            f"""#!/usr/bin/env bash
+            """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$POHW_FAKE_TAILSCALE_LOG"
-case "${{1:-}}" in
+state_file="$POHW_FAKE_TAILSCALE_STATE"
+state="$(cat "$state_file")"
+case "${1:-}" in
   status)
-    if [[ "{'true' if logged_in else 'false'}" == "true" ]]; then
-      printf '{{"BackendState":"Running"}}\\n'
-      exit 0
+    if [[ "$state" == "Running" ]]; then
+      printf '{"BackendState":"Running","Self":{"TailscaleIPs":["100.64.0.42"]}}\\n'
+    else
+      printf '{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":[]}}\\n'
     fi
-    exit 1
+    exit 0
+    ;;
+  up)
+    printf 'Running\\n' > "$state_file"
+    ;;
+  set)
+    exit 0
     ;;
   ip)
-    printf '100.64.0.42\\n'
+    if [[ "$state" == "Running" ]]; then
+      printf '100.64.0.42\\n'
+    fi
     ;;
 esac
 exit 0
@@ -61,7 +74,11 @@ exit 0
         fake.chmod(0o700)
         return fake
 
-    def run_installer(self, root: Path, authkey_file: Path) -> subprocess.CompletedProcess[str]:
+    def run_installer(
+        self,
+        root: Path,
+        authkey_file: Optional[Path],
+    ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env.update(
             {
@@ -70,14 +87,16 @@ exit 0
                 "POHW_TAILSCALE_UFW_BIN": str(root / "ufw"),
                 "POHW_TAILSCALE_SKIP_ROOT_CHECK": "true",
                 "POHW_TAILSCALE_INSTALL_IF_MISSING": "false",
-                "POHW_TAILSCALE_AUTHKEY_FILE": str(authkey_file),
                 "POHW_TAILSCALE_HOSTNAME": "pibtc",
                 "POHW_TAILSCALE_SSH_USER": "ubuntu",
+                "POHW_FAKE_TAILSCALE_STATE": str(root / "tailscale.state"),
                 "POHW_FAKE_TAILSCALE_LOG": str(root / "tailscale.log"),
                 "POHW_FAKE_SYSTEMCTL_LOG": str(root / "systemctl.log"),
                 "POHW_FAKE_UFW_LOG": str(root / "ufw.log"),
             }
         )
+        if authkey_file is not None:
+            env["POHW_TAILSCALE_AUTHKEY_FILE"] = str(authkey_file)
         return subprocess.run(
             ["bash", str(INSTALLER)],
             cwd=REPO_ROOT,
@@ -113,6 +132,22 @@ exit 0
         self.assertIn("set --ssh", tailscale_log)
         self.assertNotIn("tskey-auth-test-only", result.stdout)
         self.assertNotIn("tskey-auth-test-only", result.stderr)
+
+    def test_needs_login_json_status_without_authkey_fails_before_up(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-tailscale-needs-login-") as temp:
+            root = Path(temp)
+            self.write_fake_tailscale(root, backend_state="NeedsLogin")
+            self.write_fake_systemctl(root)
+            self.write_fake_ufw(root)
+
+            result = self.run_installer(root, authkey_file=None)
+            tailscale_log = (root / "tailscale.log").read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Tailscale is not authenticated yet.", result.stdout)
+        self.assertIn("POHW_TAILSCALE_AUTHKEY_FILE", result.stderr)
+        self.assertNotIn("up --hostname", tailscale_log)
+        self.assertNotIn("set --ssh", tailscale_log)
 
     @unittest.skipUnless(os.name == "posix", "POSIX permissions required")
     def test_rejects_permissive_authkey_file(self) -> None:
