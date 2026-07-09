@@ -48,12 +48,26 @@ exit 0
         fake.chmod(0o700)
         return fake
 
+    def write_fake_ufw(self, root: Path) -> Path:
+        fake = root / "ufw"
+        fake.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$POHW_FAKE_UFW_LOG"
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        return fake
+
     def run_installer(self, root: Path, authkey_file: Path) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env.update(
             {
                 "POHW_TAILSCALE_BIN": str(root / "tailscale"),
                 "POHW_TAILSCALE_SYSTEMCTL_BIN": str(root / "systemctl"),
+                "POHW_TAILSCALE_UFW_BIN": str(root / "ufw"),
                 "POHW_TAILSCALE_SKIP_ROOT_CHECK": "true",
                 "POHW_TAILSCALE_INSTALL_IF_MISSING": "false",
                 "POHW_TAILSCALE_AUTHKEY_FILE": str(authkey_file),
@@ -61,6 +75,7 @@ exit 0
                 "POHW_TAILSCALE_SSH_USER": "ubuntu",
                 "POHW_FAKE_TAILSCALE_LOG": str(root / "tailscale.log"),
                 "POHW_FAKE_SYSTEMCTL_LOG": str(root / "systemctl.log"),
+                "POHW_FAKE_UFW_LOG": str(root / "ufw.log"),
             }
         )
         return subprocess.run(
@@ -77,6 +92,7 @@ exit 0
             root = Path(temp)
             self.write_fake_tailscale(root)
             self.write_fake_systemctl(root)
+            self.write_fake_ufw(root)
             authkey = root / "tailscale.authkey"
             authkey.write_text("tskey-auth-test-only\n", encoding="utf-8")
             authkey.chmod(0o600)
@@ -84,9 +100,14 @@ exit 0
             result = self.run_installer(root, authkey)
             tailscale_log = (root / "tailscale.log").read_text(encoding="utf-8")
             systemctl_log = (root / "systemctl.log").read_text(encoding="utf-8")
+            ufw_log = (root / "ufw.log").read_text(encoding="utf-8")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("enable --now tailscaled", systemctl_log)
+        self.assertIn(
+            "allow in on tailscale0 to any port 22 proto tcp comment SSH over Tailscale",
+            ufw_log,
+        )
         self.assertIn("up --hostname=pibtc --accept-dns=true --accept-routes=false", tailscale_log)
         self.assertIn("--auth-key=file:", tailscale_log)
         self.assertIn("set --ssh", tailscale_log)
@@ -99,6 +120,7 @@ exit 0
             root = Path(temp)
             self.write_fake_tailscale(root)
             self.write_fake_systemctl(root)
+            self.write_fake_ufw(root)
             authkey = root / "tailscale.authkey"
             authkey.write_text("tskey-auth-test-only\n", encoding="utf-8")
             authkey.chmod(0o644)

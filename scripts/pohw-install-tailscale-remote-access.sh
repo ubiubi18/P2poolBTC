@@ -4,11 +4,14 @@ set -euo pipefail
 TAILSCALE_BIN="${POHW_TAILSCALE_BIN:-tailscale}"
 SYSTEMCTL_BIN="${POHW_TAILSCALE_SYSTEMCTL_BIN:-systemctl}"
 CURL_BIN="${POHW_TAILSCALE_CURL_BIN:-curl}"
+UFW_BIN="${POHW_TAILSCALE_UFW_BIN:-ufw}"
 INSTALLER_URL="${POHW_TAILSCALE_INSTALLER_URL:-https://tailscale.com/install.sh}"
 INSTALLER_PATH="${POHW_TAILSCALE_INSTALLER_PATH:-/tmp/pohw-tailscale-install.sh}"
 INSTALL_IF_MISSING="${POHW_TAILSCALE_INSTALL_IF_MISSING:-true}"
 HOSTNAME="${POHW_TAILSCALE_HOSTNAME:-pibtc}"
 ENABLE_SSH="${POHW_TAILSCALE_ENABLE_SSH:-true}"
+CONFIGURE_UFW="${POHW_TAILSCALE_CONFIGURE_UFW:-true}"
+UFW_INTERFACE="${POHW_TAILSCALE_UFW_INTERFACE:-tailscale0}"
 ACCEPT_DNS="${POHW_TAILSCALE_ACCEPT_DNS:-true}"
 ACCEPT_ROUTES="${POHW_TAILSCALE_ACCEPT_ROUTES:-false}"
 SSH_USER="${POHW_TAILSCALE_SSH_USER:-ubuntu}"
@@ -57,6 +60,14 @@ validate_ssh_user() {
   local value="$1"
   if [[ ! "$value" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
     echo "Invalid SSH user: $value" >&2
+    exit 1
+  fi
+}
+
+validate_interface() {
+  local value="$1"
+  if [[ ! "$value" =~ ^[a-zA-Z0-9_.:-]{1,32}$ ]]; then
+    echo "Invalid Tailscale firewall interface: $value" >&2
     exit 1
   fi
 }
@@ -131,9 +142,21 @@ tailscale_ip4() {
   "$TAILSCALE_BIN" ip -4 2>/dev/null | head -n 1
 }
 
+ensure_tailscale_ssh_ufw_rule() {
+  if ! is_truthy "$CONFIGURE_UFW"; then
+    return 0
+  fi
+  if ! command -v "$UFW_BIN" >/dev/null 2>&1; then
+    echo "ufw binary not found; skipping Tailscale SSH firewall rule." >&2
+    return 0
+  fi
+  run_cmd "$UFW_BIN" allow in on "$UFW_INTERFACE" to any port 22 proto tcp comment "SSH over Tailscale"
+}
+
 need_root
 validate_hostname "$HOSTNAME"
 validate_ssh_user "$SSH_USER"
+validate_interface "$UFW_INTERFACE"
 
 if [[ -n "$AUTHKEY_FILE" ]]; then
   validate_authkey_file "$AUTHKEY_FILE"
@@ -141,6 +164,7 @@ fi
 
 ensure_tailscale_installed
 run_cmd "$SYSTEMCTL_BIN" enable --now tailscaled
+ensure_tailscale_ssh_ufw_rule
 
 up_args=(up "--hostname=$HOSTNAME" "--accept-dns=$ACCEPT_DNS" "--accept-routes=$ACCEPT_ROUTES")
 if [[ -n "$AUTHKEY_FILE" ]]; then

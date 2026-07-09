@@ -724,6 +724,8 @@ POHW_IDENA_PRIORITY_COOLDOWN_SECONDS=1800
 POHW_IDENA_PRIORITY_RESTORE_BITCOIN=true
 POHW_IDENA_PRIORITY_FORCE=false
 POHW_IDENA_PRIORITY_DRY_RUN=false
+POHW_TAILSCALE_CONFIGURE_UFW=true
+POHW_TAILSCALE_UFW_INTERFACE=tailscale0
 POHW_STRATUM_BIND_ADDR=<pi-wlan-ip>:3333
 POHW_STRATUM_ALLOW_NON_LOOPBACK=true
 POHW_STRATUM_PASSWORD_FILE=/etc/pohw/stratum.password
@@ -763,6 +765,8 @@ sudo sh -c 'printf "%s\n" "tskey-auth-..." > /etc/pohw/tailscale.authkey'
 sudo POHW_TAILSCALE_AUTHKEY_FILE=/etc/pohw/tailscale.authkey \
   /mnt/ssd/p2pool/scripts/pohw-install-tailscale-remote-access.sh
 ```
+
+The installer also adds an SSH allow rule on `tailscale0` when UFW is present. Set `POHW_TAILSCALE_CONFIGURE_UFW=false` only if another firewall policy already permits Tailscale SSH.
 
 After both the Mac and Pi are in the same tailnet, SSH and the dashboard tunnel work from any IP range:
 
@@ -831,6 +835,7 @@ sudo ufw allow in on wlan0 from <trusted-mac-ip> to any port 40407 proto tcp com
 sudo ufw allow in on wlan0 from <miner-or-rental-ip> to any port 3333 proto tcp comment "PoHW Stratum trusted miner only"
 sudo ufw allow in on wlan0 to any port 8333 proto tcp comment "Bitcoin mainnet P2P"
 sudo ufw allow in on wlan0 to any port 40405 proto tcp comment "Idena P2P active port"
+sudo ufw allow in on tailscale0 to any port 22 proto tcp comment "SSH over Tailscale"
 ```
 
 ## Reward And Payout Rules
