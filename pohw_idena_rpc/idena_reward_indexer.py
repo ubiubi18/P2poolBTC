@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     from idena_rpc_client_minimal import (
@@ -63,6 +63,8 @@ DEFAULT_OFFICIAL_INDEXER_SQL_FILE = (
 )
 DEFAULT_OFFICIAL_API_BASE_URL = "https://api.idena.io/api"
 POLL_INTERVAL_SECONDS = 5
+LIVE_SETTLE_SECONDS = 2.0
+NON_ATOMIC_BACKOFF_SECONDS = 15.0
 DNA_BASE = Decimal("1000000000000000000")
 MAX_DATABASE_URL_BYTES = 4096
 MAX_OFFICIAL_INDEXER_SQL_BYTES = 256 * 1024
@@ -2133,11 +2135,23 @@ class RewardIndexer:
         client: Optional[IdenaRPCClientMinimal],
         rolling_data_dir: Path,
         poll_interval: int,
+        live_settle_seconds: float = LIVE_SETTLE_SECONDS,
+        non_atomic_backoff_seconds: float = NON_ATOMIC_BACKOFF_SECONDS,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        if poll_interval < 1:
+            raise ValueError("poll_interval must be at least 1 second")
+        if live_settle_seconds < 0:
+            raise ValueError("live_settle_seconds must be non-negative")
+        if non_atomic_backoff_seconds < 0:
+            raise ValueError("non_atomic_backoff_seconds must be non-negative")
         self.ledger = ledger
         self.client = client
         self.rolling_data_dir = rolling_data_dir
         self.poll_interval = poll_interval
+        self.live_settle_seconds = live_settle_seconds
+        self.non_atomic_backoff_seconds = non_atomic_backoff_seconds
+        self.sleeper = sleeper
 
     def rpc(self) -> IdenaRPCClientMinimal:
         if self.client is None:
@@ -2501,7 +2515,28 @@ class RewardIndexer:
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
-    def process_block_live(self, epoch: int, block: Dict[str, Any]) -> int:
+    def wait_for_live_block_stability(
+        self,
+        block: Dict[str, Any],
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        height = int(block["height"])
+        if self.live_settle_seconds <= 0:
+            return block, height
+        self.sleeper(self.live_settle_seconds)
+        fresh_block = self.get_last_block()
+        fresh_height = int(fresh_block["height"])
+        block_hash = str(block.get("hash") or "")
+        fresh_hash = str(fresh_block.get("hash") or "")
+        if fresh_height != height or (block_hash and fresh_hash and fresh_hash != block_hash):
+            print(
+                f"[INFO] deferring live scan: head moved from {height} to {fresh_height} "
+                "during settle wait",
+                file=sys.stderr,
+            )
+            return None, fresh_height
+        return fresh_block, fresh_height
+
+    def process_block_live(self, epoch: int, block: Dict[str, Any]) -> Optional[int]:
         height = int(block["height"])
         changed = 0
         addresses = set(self.watched_addresses())
@@ -2528,7 +2563,7 @@ class RewardIndexer:
                 f"[INFO] discarding non-atomic scan: started at height {height}, ended at {fresh_block['height']}",
                 file=sys.stderr,
             )
-            return 0
+            return None
         for address in sorted_addresses:
             try:
                 identity = identities_by_address.get(address)
@@ -2586,6 +2621,27 @@ class RewardIndexer:
         self.ledger.conn.commit()
         return changed
 
+    def deferred_live_result(
+        self,
+        *,
+        epoch: int,
+        height: int,
+        imported: int,
+        seeded: int,
+        current_height: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        result = {
+            "epoch": epoch,
+            "height": height,
+            "importedRollingEvents": imported,
+            "seededPositions": seeded,
+            "liveChanges": 0,
+            "deferredLiveBlock": True,
+        }
+        if current_height is not None:
+            result["currentHeight"] = current_height
+        return result
+
     def once(self) -> Dict[str, Any]:
         epoch_info = self.get_epoch()
         epoch = int(epoch_info.get("epoch"))
@@ -2615,7 +2671,23 @@ class RewardIndexer:
                 "historical balance RPC unavailable; live delta indexer resumed at current tip",
             )
 
-        changed = self.process_block_live(epoch, last_block)
+        stable_block, current_height = self.wait_for_live_block_stability(last_block)
+        if stable_block is None:
+            return self.deferred_live_result(
+                epoch=epoch,
+                height=height,
+                imported=imported,
+                seeded=seeded,
+                current_height=current_height,
+            )
+        changed = self.process_block_live(epoch, stable_block)
+        if changed is None:
+            return self.deferred_live_result(
+                epoch=epoch,
+                height=height,
+                imported=imported,
+                seeded=seeded,
+            )
         return {
             "epoch": epoch,
             "height": height,
@@ -2624,15 +2696,22 @@ class RewardIndexer:
             "liveChanges": changed,
         }
 
+    def sleep_interval_for_result(self, result: Dict[str, Any]) -> float:
+        if result.get("deferredLiveBlock"):
+            return max(float(self.poll_interval), self.non_atomic_backoff_seconds)
+        return float(self.poll_interval)
+
     def run(self) -> None:
         while True:
+            sleep_seconds = float(self.poll_interval)
             try:
                 result = self.once()
+                sleep_seconds = self.sleep_interval_for_result(result)
                 if not result.get("skippedLiveBlock"):
                     print(f"[INFO] {utc_now()} {json.dumps(result, sort_keys=True)}", flush=True)
             except (IdenaRPCError, OSError, ValueError, sqlite3.Error) as exc:
                 print(f"[ERROR] {utc_now()} {exc}", file=sys.stderr, flush=True)
-            time.sleep(self.poll_interval)
+            self.sleeper(sleep_seconds)
 
 
 def change_to_delta_atoms(change: Any) -> int:
@@ -2680,6 +2759,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-file", default=os.getenv("IDENA_API_KEY_FILE", ""))
     parser.add_argument("--allow-remote-rpc", action="store_true")
     parser.add_argument("--poll-interval", type=int, default=POLL_INTERVAL_SECONDS)
+    parser.add_argument("--live-settle-seconds", type=float, default=LIVE_SETTLE_SECONDS)
+    parser.add_argument(
+        "--non-atomic-backoff-seconds",
+        type=float,
+        default=NON_ATOMIC_BACKOFF_SECONDS,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("run")
@@ -2776,6 +2861,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         client=client,
         rolling_data_dir=args.rolling_data_dir,
         poll_interval=args.poll_interval,
+        live_settle_seconds=args.live_settle_seconds,
+        non_atomic_backoff_seconds=args.non_atomic_backoff_seconds,
     )
     try:
         if args.command == "run":

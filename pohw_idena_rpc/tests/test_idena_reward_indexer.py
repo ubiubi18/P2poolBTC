@@ -47,16 +47,32 @@ class FakeRpcResponse:
 
 
 class StubLiveRewardIndexer(reward_indexer.RewardIndexer):
-    def __init__(self, *, ledger, rolling_data_dir, epoch, height, live_changes=0):
+    def __init__(
+        self,
+        *,
+        ledger,
+        rolling_data_dir,
+        epoch,
+        height,
+        live_changes=0,
+        block_heights=None,
+        live_settle_seconds=0,
+        non_atomic_backoff_seconds=15,
+    ):
+        self.sleeps = []
         super().__init__(
             ledger=ledger,
             client=None,
             rolling_data_dir=rolling_data_dir,
             poll_interval=1,
+            live_settle_seconds=live_settle_seconds,
+            non_atomic_backoff_seconds=non_atomic_backoff_seconds,
+            sleeper=self.sleeps.append,
         )
         self.epoch = epoch
         self.height = height
         self.live_changes = live_changes
+        self.block_heights = list(block_heights or [height])
         self.process_calls = 0
         self.seed_calls = 0
 
@@ -64,9 +80,13 @@ class StubLiveRewardIndexer(reward_indexer.RewardIndexer):
         return {"epoch": self.epoch}
 
     def get_last_block(self):
+        if len(self.block_heights) > 1:
+            height = self.block_heights.pop(0)
+        else:
+            height = self.block_heights[0]
         return {
-            "height": self.height,
-            "hash": f"0x{self.height:064x}",
+            "height": height,
+            "hash": f"0x{height:064x}",
             "coinbase": "",
             "timestamp": "2026-07-08T00:00:00Z",
             "flags": [],
@@ -81,6 +101,8 @@ class StubLiveRewardIndexer(reward_indexer.RewardIndexer):
 
     def process_block_live(self, epoch, block):
         self.process_calls += 1
+        if self.live_changes is None:
+            return None
         self.ledger.set_meta("last_height", int(block["height"]))
         self.ledger.conn.commit()
         return self.live_changes
@@ -166,6 +188,80 @@ class RewardIndexerTests(unittest.TestCase):
         self.assertNotIn("skippedLiveBlock", result)
         self.assertEqual(indexer.process_calls, 1)
         self.assertEqual(indexer.seed_calls, 0)
+
+    def test_once_defers_before_live_scan_when_head_moves_during_settle(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            ledger.set_meta("last_height", 99)
+            ledger.set_meta("seeded_epoch_7", "1")
+            ledger.conn.commit()
+            indexer = StubLiveRewardIndexer(
+                ledger=ledger,
+                rolling_data_dir=Path(tmp),
+                epoch=7,
+                height=100,
+                block_heights=[100, 101],
+                live_settle_seconds=2,
+            )
+
+            try:
+                result = indexer.once()
+            finally:
+                ledger.close()
+
+        self.assertEqual(result["height"], 100)
+        self.assertEqual(result["currentHeight"], 101)
+        self.assertEqual(result["liveChanges"], 0)
+        self.assertTrue(result["deferredLiveBlock"])
+        self.assertNotIn("skippedLiveBlock", result)
+        self.assertEqual(indexer.process_calls, 0)
+        self.assertEqual(indexer.sleeps, [2])
+
+    def test_once_defers_after_non_atomic_live_scan(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            ledger.set_meta("last_height", 99)
+            ledger.set_meta("seeded_epoch_7", "1")
+            ledger.conn.commit()
+            indexer = StubLiveRewardIndexer(
+                ledger=ledger,
+                rolling_data_dir=Path(tmp),
+                epoch=7,
+                height=100,
+                live_changes=None,
+            )
+
+            try:
+                result = indexer.once()
+            finally:
+                ledger.close()
+
+        self.assertEqual(result["height"], 100)
+        self.assertEqual(result["liveChanges"], 0)
+        self.assertTrue(result["deferredLiveBlock"])
+        self.assertEqual(indexer.process_calls, 1)
+
+    def test_deferred_live_block_uses_backoff_sleep_interval(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            indexer = StubLiveRewardIndexer(
+                ledger=ledger,
+                rolling_data_dir=Path(tmp),
+                epoch=7,
+                height=100,
+                non_atomic_backoff_seconds=15,
+            )
+            try:
+                self.assertEqual(
+                    indexer.sleep_interval_for_result({"deferredLiveBlock": True}),
+                    15,
+                )
+                self.assertEqual(
+                    indexer.sleep_interval_for_result({"liveChanges": 0}),
+                    1,
+                )
+            finally:
+                ledger.close()
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_reward_ledger_rejects_symlink_ancestor_database_path(self):

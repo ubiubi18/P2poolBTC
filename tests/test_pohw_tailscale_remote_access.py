@@ -127,7 +127,7 @@ exit 0
             "allow in on tailscale0 to any port 22 proto tcp comment SSH over Tailscale",
             ufw_log,
         )
-        self.assertIn("up --hostname=pibtc --accept-dns=true --accept-routes=false", tailscale_log)
+        self.assertIn("up --hostname=pibtc --accept-dns=false --accept-routes=false", tailscale_log)
         self.assertIn("--auth-key=file:", tailscale_log)
         self.assertIn("set --ssh", tailscale_log)
         self.assertNotIn("tskey-auth-test-only", result.stdout)
