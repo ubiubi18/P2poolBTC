@@ -259,6 +259,11 @@ if is_truthy "$ENABLE_SSH"; then
 fi
 
 up_args=(up "--hostname=$HOSTNAME" "--accept-dns=$ACCEPT_DNS" "--accept-routes=$ACCEPT_ROUTES")
+if is_truthy "$ENABLE_SSH"; then
+  up_args+=(--ssh)
+else
+  up_args+=(--ssh=false)
+fi
 if [[ -n "$AUTHKEY_FILE" ]]; then
   up_args+=("--auth-key=file:$AUTHKEY_FILE")
 fi
@@ -280,9 +285,6 @@ if ! is_truthy "$DRY_RUN" && ! tailscale_authenticated; then
   exit 1
 fi
 
-if is_truthy "$ENABLE_SSH"; then
-  run_cmd "$TAILSCALE_BIN" set --ssh
-fi
 ensure_key_ssh_serve
 
 ip4="$(tailscale_ip4 || true)"

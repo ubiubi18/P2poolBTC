@@ -162,9 +162,12 @@ printf '%s\\n' \\
             "allow in on tailscale0 to any port 22 proto tcp comment SSH over Tailscale",
             ufw_log,
         )
-        self.assertIn("up --hostname=pibtc --accept-dns=false --accept-routes=false", tailscale_log)
+        self.assertIn(
+            "up --hostname=pibtc --accept-dns=false --accept-routes=false --ssh",
+            tailscale_log,
+        )
         self.assertIn("--auth-key=file:", tailscale_log)
-        self.assertIn("set --ssh", tailscale_log)
+        self.assertNotIn("set --ssh", tailscale_log)
         self.assertIn(
             "serve --bg --yes --tcp=2222 tcp://127.0.0.1:22",
             tailscale_log,
