@@ -498,6 +498,8 @@ python3 pohw_idena_rpc/idena_reward_indexer.py \
 
 `sync-official-api` defaults to ten completed epochs so invitation liabilities can be reconstructed across their full clawback window. It imports exact validation/staking/session reward categories from `/Epoch/{epoch}/IdentityRewards`, aggregate epoch mining summaries from `/Address/{address}/MiningRewardSummaries`, and invitation/invitee credits plus later kill reversals into the liability ledger. Consensus scoring remains one epoch because the snapshot path exports only `--latest-epoch` (or the explicitly pinned `IDENA_REWARD_EPOCH`). Set `IDENA_OFFICIAL_API_SYNC=true` in the snapshot environment to let `pohw-idena-snapshot.service` run this fallback automatically when no Postgres URL is configured.
 
+The first writable open of an existing large reward ledger after this upgrade builds a partial index over exact events and performs one canonical-source reconciliation. Keep the live indexer stopped for that migration and retain a database/WAL backup. Later starts and exact imports reconcile only the epochs they touch.
+
 Build the snapshot registry ABI:
 
 ```sh

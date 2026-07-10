@@ -84,6 +84,8 @@ OFFICIAL_API_SOURCE = "idena_public_api"
 EXACT_SOURCE_PRIORITY_MANUAL = 100
 EXACT_SOURCE_PRIORITY_OFFICIAL_API = 200
 EXACT_SOURCE_PRIORITY_OFFICIAL_INDEXER = 300
+EXACT_SOURCE_RECONCILIATION_META_KEY = "exact_reward_sources_reconciled_v1"
+MAX_LOCAL_RECONCILIATION_EPOCHS = 500
 REPLAY_KINDS = {
     "Validation",
     "Proposer",
@@ -321,6 +323,9 @@ class RewardLedger:
               ON reward_events(epoch, kind, height);
             CREATE INDEX IF NOT EXISTS idx_reward_events_replay_export
               ON reward_events(kind, confidence, epoch, height);
+            CREATE INDEX IF NOT EXISTS idx_reward_events_exact_source_epoch
+              ON reward_events(source, epoch)
+              WHERE confidence = 'exact';
             CREATE TABLE IF NOT EXISTS exact_reward_sources (
               epoch INTEGER PRIMARY KEY,
               source TEXT NOT NULL,
@@ -383,7 +388,9 @@ class RewardLedger:
         self.ensure_table_column(
             "invitation_liabilities", "source", "source TEXT NOT NULL DEFAULT ''"
         )
-        self.reconcile_exact_reward_sources()
+        if self.get_meta(EXACT_SOURCE_RECONCILIATION_META_KEY) != "1":
+            self.reconcile_exact_reward_sources()
+            self.set_meta(EXACT_SOURCE_RECONCILIATION_META_KEY, "1", commit=False)
         self.conn.commit()
 
     def ensure_table_column(self, table: str, column: str, declaration: str) -> None:
@@ -394,31 +401,55 @@ class RewardLedger:
         if column not in columns:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
 
-    def reconcile_exact_reward_sources(self) -> None:
-        rows = self.conn.execute(
-            """
-            SELECT epoch, source
-            FROM reward_events
-            WHERE confidence = 'exact'
-            GROUP BY epoch, source
-            ORDER BY epoch, source
-            """
-        ).fetchall()
+    def reconcile_exact_reward_sources(self, epochs: Optional[Sequence[int]] = None) -> None:
+        selected_epochs = None if epochs is None else sorted({int(epoch) for epoch in epochs})
+        if selected_epochs == []:
+            return
+        if selected_epochs is not None and len(selected_epochs) > MAX_LOCAL_RECONCILIATION_EPOCHS:
+            selected_epochs = None
+        if selected_epochs is None:
+            rows = self.conn.execute(
+                """
+                SELECT epoch, source
+                FROM reward_events
+                WHERE confidence = 'exact'
+                GROUP BY epoch, source
+                ORDER BY epoch, source
+                """
+            ).fetchall()
+            existing_rows = self.conn.execute(
+                "SELECT epoch, source, priority FROM exact_reward_sources"
+            ).fetchall()
+            self.conn.execute("DELETE FROM exact_reward_sources")
+        else:
+            placeholders = ",".join(["?"] * len(selected_epochs))
+            rows = self.conn.execute(
+                f"""
+                SELECT epoch, source
+                FROM reward_events
+                WHERE confidence = 'exact' AND epoch IN ({placeholders})
+                GROUP BY epoch, source
+                ORDER BY epoch, source
+                """,
+                selected_epochs,
+            ).fetchall()
+            existing_rows = self.conn.execute(
+                f"SELECT epoch, source, priority FROM exact_reward_sources "
+                f"WHERE epoch IN ({placeholders})",
+                selected_epochs,
+            ).fetchall()
+            self.conn.execute(
+                f"DELETE FROM exact_reward_sources WHERE epoch IN ({placeholders})",
+                selected_epochs,
+            )
         candidates_by_epoch: Dict[int, List[str]] = {}
         for row in rows:
             candidates_by_epoch.setdefault(int(row["epoch"]), []).append(str(row["source"]))
 
-        existing_rows = self.conn.execute(
-            "SELECT epoch, source, priority FROM exact_reward_sources"
-        ).fetchall()
         existing = {
             int(row["epoch"]): (str(row["source"]), int(row["priority"]))
             for row in existing_rows
         }
-        self.conn.execute(
-            "DELETE FROM exact_reward_sources WHERE epoch NOT IN "
-            "(SELECT DISTINCT epoch FROM reward_events WHERE confidence = 'exact')"
-        )
         for epoch, sources in candidates_by_epoch.items():
             previous = existing.get(epoch)
             ranked = []
@@ -711,10 +742,19 @@ class RewardLedger:
         events_by_epoch: Dict[int, List[Dict[str, Any]]] = {}
         for event in converted_events:
             events_by_epoch.setdefault(int(event["epoch"]), []).append(event)
+        affected_epochs = set(events_by_epoch)
         imported = 0
         self.conn.execute("SAVEPOINT statscollector_replay_import")
         try:
             if replace_source:
+                affected_epochs.update(
+                    int(row["epoch"])
+                    for row in self.conn.execute(
+                        "SELECT DISTINCT epoch FROM reward_events "
+                        "WHERE source = ? AND confidence = 'exact'",
+                        (source,),
+                    ).fetchall()
+                )
                 self.conn.execute(
                     "DELETE FROM reward_events WHERE source = ? AND confidence = 'exact'",
                     (source,),
@@ -762,7 +802,7 @@ class RewardLedger:
                 ).fetchone()[0]
                 if max_height:
                     self.set_meta("last_exact_reward_height", max_height, commit=False)
-            self.reconcile_exact_reward_sources()
+            self.reconcile_exact_reward_sources(sorted(affected_epochs))
             self.rebuild_exact_invitation_liabilities()
             self.conn.execute("RELEASE SAVEPOINT statscollector_replay_import")
         except Exception:

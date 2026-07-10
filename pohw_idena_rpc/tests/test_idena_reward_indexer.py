@@ -109,6 +109,89 @@ class StubLiveRewardIndexer(reward_indexer.RewardIndexer):
 
 
 class RewardIndexerTests(unittest.TestCase):
+    def test_exact_source_schema_reconciliation_runs_once(self):
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "rewards.sqlite3"
+            ledger = RewardLedger(db)
+            try:
+                indexes = {
+                    row[1]: row
+                    for row in ledger.conn.execute("PRAGMA index_list(reward_events)")
+                }
+                self.assertIn("idx_reward_events_exact_source_epoch", indexes)
+                self.assertEqual(
+                    ledger.get_meta(reward_indexer.EXACT_SOURCE_RECONCILIATION_META_KEY),
+                    "1",
+                )
+                migration_plan = " ".join(
+                    str(row[3])
+                    for row in ledger.conn.execute(
+                        "EXPLAIN QUERY PLAN "
+                        "SELECT epoch, source FROM reward_events "
+                        "WHERE confidence = 'exact' GROUP BY epoch, source"
+                    )
+                )
+                replacement_plan = " ".join(
+                    str(row[3])
+                    for row in ledger.conn.execute(
+                        "EXPLAIN QUERY PLAN "
+                        "SELECT DISTINCT epoch FROM reward_events "
+                        "WHERE source = ? AND confidence = 'exact'",
+                        ("test-source",),
+                    )
+                )
+                self.assertIn("idx_reward_events_exact_source_epoch", migration_plan)
+                self.assertIn("idx_reward_events_exact_source_epoch", replacement_plan)
+            finally:
+                ledger.close()
+
+            with patch.object(
+                RewardLedger,
+                "reconcile_exact_reward_sources",
+                side_effect=AssertionError("reconciliation repeated"),
+            ):
+                reopened = RewardLedger(db)
+                reopened.close()
+
+    def test_missing_reconciliation_marker_repairs_exact_sources(self):
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "rewards.sqlite3"
+            ledger = RewardLedger(db)
+            source = "test_exact"
+            ledger.import_statscollector_replay_events(
+                [
+                    {
+                        "address": "0x" + "a" * 40,
+                        "epoch": 211,
+                        "height": 211,
+                        "hash": "0x" + "1" * 64,
+                        "kind": "Validation",
+                        "amount_atoms": "5",
+                    }
+                ],
+                source=source,
+            )
+            ledger.conn.execute("DELETE FROM exact_reward_sources")
+            ledger.conn.execute(
+                "DELETE FROM meta WHERE key = ?",
+                (reward_indexer.EXACT_SOURCE_RECONCILIATION_META_KEY,),
+            )
+            ledger.conn.commit()
+            ledger.close()
+
+            repaired = RewardLedger(db)
+            try:
+                canonical = repaired.conn.execute(
+                    "SELECT source FROM exact_reward_sources WHERE epoch = 211"
+                ).fetchone()
+                self.assertEqual(canonical["source"], source)
+                self.assertEqual(
+                    repaired.get_meta(reward_indexer.EXACT_SOURCE_RECONCILIATION_META_KEY),
+                    "1",
+                )
+            finally:
+                repaired.close()
+
     def test_official_api_default_covers_invitation_liability_window(self):
         args = reward_indexer.build_arg_parser().parse_args(["sync-official-api"])
 
@@ -659,6 +742,55 @@ class RewardIndexerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(exact_rows, 2)
+
+    def test_exact_source_replacement_removes_dropped_epoch(self):
+        with TemporaryDirectory() as tmp:
+            ledger = RewardLedger(Path(tmp) / "rewards.sqlite3")
+            source = "idena_public_api:test-window"
+            events = [
+                {
+                    "address": "0x" + "a" * 40,
+                    "epoch": epoch,
+                    "height": epoch,
+                    "hash": "0x" + f"{epoch:064x}",
+                    "kind": "Validation",
+                    "amount_atoms": "5",
+                }
+                for epoch in (210, 211)
+            ]
+            self.assertEqual(
+                ledger.import_statscollector_replay_events(
+                    events,
+                    source=source,
+                    replace_source=True,
+                ),
+                2,
+            )
+            self.assertEqual(
+                ledger.import_statscollector_replay_events(
+                    [events[1]],
+                    source=source,
+                    replace_source=True,
+                ),
+                1,
+            )
+            canonical_epochs = [
+                int(row["epoch"])
+                for row in ledger.conn.execute(
+                    "SELECT epoch FROM exact_reward_sources ORDER BY epoch"
+                )
+            ]
+            exact_epochs = [
+                int(row["epoch"])
+                for row in ledger.conn.execute(
+                    "SELECT DISTINCT epoch FROM reward_events "
+                    "WHERE confidence = 'exact' ORDER BY epoch"
+                )
+            ]
+            ledger.close()
+
+        self.assertEqual(canonical_epochs, [211])
+        self.assertEqual(exact_epochs, [211])
 
     def test_export_replay_latest_epoch_selects_one_window(self):
         with TemporaryDirectory() as tmp:
