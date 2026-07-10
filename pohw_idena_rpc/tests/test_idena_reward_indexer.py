@@ -140,8 +140,33 @@ class RewardIndexerTests(unittest.TestCase):
                         ("test-source",),
                     )
                 )
+                epoch_delete_plan = " ".join(
+                    str(row[3])
+                    for row in ledger.conn.execute(
+                        "EXPLAIN QUERY PLAN "
+                        "DELETE FROM reward_events INDEXED BY "
+                        "idx_reward_events_exact_source_epoch "
+                        "WHERE epoch = ? AND confidence = 'exact' AND source <> ?",
+                        (211, "test-source"),
+                    )
+                )
+                max_epoch_plan = " ".join(
+                    str(row[3])
+                    for row in ledger.conn.execute(
+                        "EXPLAIN QUERY PLAN "
+                        "SELECT MAX(reward_events.epoch) "
+                        "FROM reward_events INDEXED BY "
+                        "idx_reward_events_exact_source_epoch "
+                        "JOIN exact_reward_sources canonical_source "
+                        "ON canonical_source.epoch = reward_events.epoch "
+                        "AND canonical_source.source = reward_events.source "
+                        "WHERE reward_events.confidence = 'exact'"
+                    )
+                )
                 self.assertIn("idx_reward_events_exact_source_epoch", migration_plan)
                 self.assertIn("idx_reward_events_exact_source_epoch", replacement_plan)
+                self.assertIn("idx_reward_events_exact_source_epoch", epoch_delete_plan)
+                self.assertIn("idx_reward_events_exact_source_epoch", max_epoch_plan)
             finally:
                 ledger.close()
 

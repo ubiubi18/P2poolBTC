@@ -489,7 +489,7 @@ class RewardLedger:
         max_epoch_row = self.conn.execute(
             """
             SELECT MAX(reward_events.epoch)
-            FROM reward_events
+            FROM reward_events INDEXED BY idx_reward_events_exact_source_epoch
             JOIN exact_reward_sources canonical_source
               ON canonical_source.epoch = reward_events.epoch
              AND canonical_source.source = reward_events.source
@@ -771,7 +771,8 @@ class RewardLedger:
                 if active_rank is not None and incoming_rank < active_rank:
                     continue
                 self.conn.execute(
-                    "DELETE FROM reward_events "
+                    "DELETE FROM reward_events INDEXED BY "
+                    "idx_reward_events_exact_source_epoch "
                     "WHERE epoch = ? AND confidence = 'exact' AND source <> ?",
                     (epoch, source),
                 )
