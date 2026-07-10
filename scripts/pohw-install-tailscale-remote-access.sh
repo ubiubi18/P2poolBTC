@@ -10,6 +10,10 @@ INSTALLER_PATH="${POHW_TAILSCALE_INSTALLER_PATH:-/tmp/pohw-tailscale-install.sh}
 INSTALL_IF_MISSING="${POHW_TAILSCALE_INSTALL_IF_MISSING:-true}"
 HOSTNAME="${POHW_TAILSCALE_HOSTNAME:-pibtc}"
 ENABLE_SSH="${POHW_TAILSCALE_ENABLE_SSH:-true}"
+ENABLE_KEY_SSH_SERVE="${POHW_TAILSCALE_ENABLE_KEY_SSH_SERVE:-false}"
+KEY_SSH_SERVE_PORT="${POHW_TAILSCALE_KEY_SSH_SERVE_PORT:-2222}"
+SSHD_BIN="${POHW_TAILSCALE_SSHD_BIN:-sshd}"
+ID_BIN="${POHW_TAILSCALE_ID_BIN:-id}"
 CONFIGURE_UFW="${POHW_TAILSCALE_CONFIGURE_UFW:-true}"
 UFW_INTERFACE="${POHW_TAILSCALE_UFW_INTERFACE:-tailscale0}"
 ACCEPT_DNS="${POHW_TAILSCALE_ACCEPT_DNS:-false}"
@@ -68,6 +72,67 @@ validate_interface() {
   local value="$1"
   if [[ ! "$value" =~ ^[a-zA-Z0-9_.:-]{1,32}$ ]]; then
     echo "Invalid Tailscale firewall interface: $value" >&2
+    exit 1
+  fi
+}
+
+validate_port() {
+  local value="$1" numeric
+  if [[ ! "$value" =~ ^[0-9]{1,5}$ ]]; then
+    echo "Invalid unprivileged Tailscale SSH Serve port: $value" >&2
+    exit 1
+  fi
+  numeric=$((10#$value))
+  if (( numeric < 1024 || numeric > 65535 )); then
+    echo "Invalid unprivileged Tailscale SSH Serve port: $value" >&2
+    exit 1
+  fi
+}
+
+validate_key_ssh_policy() {
+  local policy
+  if ! command -v "$SSHD_BIN" >/dev/null 2>&1; then
+    echo "sshd is required for key-only Tailscale SSH Serve: $SSHD_BIN" >&2
+    exit 1
+  fi
+  if ! policy="$($SSHD_BIN -T -C "user=$SSH_USER,host=localhost,addr=127.0.0.1")"; then
+    echo "Unable to inspect the effective sshd policy for $SSH_USER" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$policy" | python3 -c '
+import sys
+
+user = sys.argv[1]
+settings = {}
+allow_users = []
+for raw in sys.stdin:
+    parts = raw.strip().split()
+    if not parts:
+        continue
+    key = parts[0].lower()
+    if key == "allowusers":
+        allow_users.extend(parts[1:])
+    elif len(parts) > 1:
+        settings[key] = parts[1].lower()
+
+required = {
+    "pubkeyauthentication": "yes",
+    "passwordauthentication": "no",
+    "kbdinteractiveauthentication": "no",
+    "permitrootlogin": "no",
+}
+for key, expected in required.items():
+    actual = settings.get(key)
+    if actual != expected:
+        display = actual or "missing"
+        raise SystemExit(f"unsafe sshd policy: {key}={display}; expected {expected}")
+if allow_users and user not in allow_users:
+    raise SystemExit(f"unsafe sshd policy: {user} is not present in AllowUsers")
+' "$SSH_USER"; then
+    exit 1
+  fi
+  if ! "$ID_BIN" -u "$SSH_USER" >/dev/null 2>&1; then
+    echo "Configured Tailscale SSH user does not exist: $SSH_USER" >&2
     exit 1
   fi
 }
@@ -169,6 +234,15 @@ ensure_tailscale_ssh_ufw_rule() {
   run_cmd "$UFW_BIN" allow in on "$UFW_INTERFACE" to any port 22 proto tcp comment "SSH over Tailscale"
 }
 
+ensure_key_ssh_serve() {
+  if ! is_truthy "$ENABLE_KEY_SSH_SERVE"; then
+    return 0
+  fi
+  validate_port "$KEY_SSH_SERVE_PORT"
+  validate_key_ssh_policy
+  run_cmd "$TAILSCALE_BIN" serve --bg --yes "--tcp=$KEY_SSH_SERVE_PORT" tcp://127.0.0.1:22
+}
+
 need_root
 validate_hostname "$HOSTNAME"
 validate_ssh_user "$SSH_USER"
@@ -180,7 +254,9 @@ fi
 
 ensure_tailscale_installed
 run_cmd "$SYSTEMCTL_BIN" enable --now tailscaled
-ensure_tailscale_ssh_ufw_rule
+if is_truthy "$ENABLE_SSH"; then
+  ensure_tailscale_ssh_ufw_rule
+fi
 
 up_args=(up "--hostname=$HOSTNAME" "--accept-dns=$ACCEPT_DNS" "--accept-routes=$ACCEPT_ROUTES")
 if [[ -n "$AUTHKEY_FILE" ]]; then
@@ -207,8 +283,17 @@ fi
 if is_truthy "$ENABLE_SSH"; then
   run_cmd "$TAILSCALE_BIN" set --ssh
 fi
+ensure_key_ssh_serve
 
 ip4="$(tailscale_ip4 || true)"
+key_ssh_help="Key-only SSH Serve fallback: disabled"
+key_tunnel_help=""
+if is_truthy "$ENABLE_KEY_SSH_SERVE"; then
+  printf -v key_ssh_help 'Key-only SSH Serve fallback:\n  ssh -p %s %s@%s' \
+    "$KEY_SSH_SERVE_PORT" "$SSH_USER" "$HOSTNAME"
+  printf -v key_tunnel_help '\nDashboard tunnel through key-only fallback:\n  POHW_PI_SSH_PORT=%s /mnt/ssd/p2pool/scripts/pohw-dashboard-tunnel.sh %s@%s' \
+    "$KEY_SSH_SERVE_PORT" "$SSH_USER" "$HOSTNAME"
+fi
 cat <<EOF
 PoHW Tailscale remote access is configured.
 
@@ -216,7 +301,9 @@ Tailnet hostname: ${HOSTNAME}
 Tailnet IPv4: ${ip4:-unknown}
 Normal SSH over tailnet:
   ssh ${SSH_USER}@${HOSTNAME}
+${key_ssh_help}
 
 Dashboard tunnel over tailnet:
   /mnt/ssd/p2pool/scripts/pohw-dashboard-tunnel.sh ${SSH_USER}@${HOSTNAME}
+${key_tunnel_help}
 EOF

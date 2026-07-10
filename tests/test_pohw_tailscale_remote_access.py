@@ -74,11 +74,40 @@ exit 0
         fake.chmod(0o700)
         return fake
 
+    def write_fake_sshd(self, root: Path, *, password_authentication: str = "no") -> Path:
+        fake = root / "sshd"
+        fake.write_text(
+            f"""#!/usr/bin/env bash
+printf '%s\\n' \\
+  'pubkeyauthentication yes' \\
+  'passwordauthentication {password_authentication}' \\
+  'kbdinteractiveauthentication no' \\
+  'permitrootlogin no' \\
+  'allowusers ubuntu'
+""",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        return fake
+
+    def write_fake_id(self, root: Path) -> Path:
+        fake = root / "id"
+        fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o700)
+        return fake
+
     def run_installer(
         self,
         root: Path,
         authkey_file: Optional[Path],
+        extra_env: Optional[dict[str, str]] = None,
     ) -> subprocess.CompletedProcess[str]:
+        sshd = root / "sshd"
+        if not sshd.exists():
+            self.write_fake_sshd(root)
+        fake_id = root / "id"
+        if not fake_id.exists():
+            self.write_fake_id(root)
         env = dict(os.environ)
         env.update(
             {
@@ -89,6 +118,10 @@ exit 0
                 "POHW_TAILSCALE_INSTALL_IF_MISSING": "false",
                 "POHW_TAILSCALE_HOSTNAME": "pibtc",
                 "POHW_TAILSCALE_SSH_USER": "ubuntu",
+                "POHW_TAILSCALE_ENABLE_KEY_SSH_SERVE": "true",
+                "POHW_TAILSCALE_KEY_SSH_SERVE_PORT": "2222",
+                "POHW_TAILSCALE_SSHD_BIN": str(sshd),
+                "POHW_TAILSCALE_ID_BIN": str(fake_id),
                 "POHW_FAKE_TAILSCALE_STATE": str(root / "tailscale.state"),
                 "POHW_FAKE_TAILSCALE_LOG": str(root / "tailscale.log"),
                 "POHW_FAKE_SYSTEMCTL_LOG": str(root / "systemctl.log"),
@@ -97,6 +130,8 @@ exit 0
         )
         if authkey_file is not None:
             env["POHW_TAILSCALE_AUTHKEY_FILE"] = str(authkey_file)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             ["bash", str(INSTALLER)],
             cwd=REPO_ROOT,
@@ -130,6 +165,10 @@ exit 0
         self.assertIn("up --hostname=pibtc --accept-dns=false --accept-routes=false", tailscale_log)
         self.assertIn("--auth-key=file:", tailscale_log)
         self.assertIn("set --ssh", tailscale_log)
+        self.assertIn(
+            "serve --bg --yes --tcp=2222 tcp://127.0.0.1:22",
+            tailscale_log,
+        )
         self.assertNotIn("tskey-auth-test-only", result.stdout)
         self.assertNotIn("tskey-auth-test-only", result.stderr)
 
@@ -164,6 +203,41 @@ exit 0
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("too permissive", result.stderr)
+
+    def test_rejects_invalid_key_ssh_serve_port(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-tailscale-bad-port-") as temp:
+            root = Path(temp)
+            self.write_fake_tailscale(root, backend_state="Running")
+            self.write_fake_systemctl(root)
+            self.write_fake_ufw(root)
+
+            result = self.run_installer(
+                root,
+                authkey_file=None,
+                extra_env={"POHW_TAILSCALE_KEY_SSH_SERVE_PORT": "22"},
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid unprivileged", result.stderr)
+
+    def test_rejects_password_enabled_sshd_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-tailscale-unsafe-sshd-") as temp:
+            root = Path(temp)
+            self.write_fake_tailscale(root, backend_state="Running")
+            self.write_fake_systemctl(root)
+            self.write_fake_ufw(root)
+            sshd = self.write_fake_sshd(root, password_authentication="yes")
+
+            result = self.run_installer(
+                root,
+                authkey_file=None,
+                extra_env={
+                    "POHW_TAILSCALE_SSHD_BIN": str(sshd),
+                },
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("passwordauthentication=yes", result.stderr)
 
 
 if __name__ == "__main__":

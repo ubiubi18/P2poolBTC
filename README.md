@@ -806,6 +806,19 @@ sudo POHW_TAILSCALE_AUTHKEY_FILE=/etc/pohw/tailscale.authkey \
 
 The installer also adds an SSH allow rule on `tailscale0` when UFW is present. Set `POHW_TAILSCALE_CONFIGURE_UFW=false` only if another firewall policy already permits Tailscale SSH.
 
+Tailscale SSH policy can require a periodic browser identity check. For unattended key-based access, optionally publish the Pi's existing OpenSSH daemon on a separate tailnet-only TCP port:
+
+```sh
+sudo POHW_TAILSCALE_ENABLE_KEY_SSH_SERVE=true \
+  POHW_TAILSCALE_KEY_SSH_SERVE_PORT=2222 \
+  /mnt/ssd/p2pool/scripts/pohw-install-tailscale-remote-access.sh
+
+ssh -p 2222 ubuntu@pibtc
+POHW_PI_SSH_PORT=2222 scripts/pohw-dashboard-tunnel.sh ubuntu@pibtc
+```
+
+This fallback still requires an authorized Tailscale device and the OpenSSH private key. Before enabling it, the installer verifies that public-key authentication is enabled, password and keyboard-interactive authentication are disabled, root login is disabled, and the configured user is allowed. Tailscale Serve keeps port `2222` inside the tailnet; do not add a router-forward or public UFW rule for it.
+
 After both the Mac and Pi are in the same tailnet, SSH and the dashboard tunnel work from any IP range:
 
 ```sh
