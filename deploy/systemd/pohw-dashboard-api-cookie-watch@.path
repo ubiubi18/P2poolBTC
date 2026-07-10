@@ -1,7 +1,6 @@
 [Unit]
 Description=Watch Bitcoin RPC cookie for PoHW dashboard API reload (%I)
-Wants=pohw-dashboard-api.service
-After=bitcoind-mainnet.service pohw-dashboard-api.service
+RequiresMountsFor=/%I
 
 [Path]
 PathChanged=/%I

@@ -885,6 +885,63 @@ sudo systemctl daemon-reload
 
 For a Pi with Bitcoin Core on `/mnt/ssd`, start from `deploy/bitcoin/bitcoin-mainnet.conf.example` and copy only non-secret settings into the live `bitcoin.conf`. The template keeps RPC local-only, keeps a full unpruned chain for fork/testing work, and uses `dbcache=1536` for a 4 GiB Pi to reduce SSD pressure during AssumeUTXO background validation. The `60-resource.conf` drop-in lowers Bitcoin CPU/I/O priority so Idena and PoHW control services stay responsive while background validation runs. Reduce `dbcache` if the host shows real memory pressure.
 
+### Dedicated Bitcoin Disk
+
+For a split-disk Pi, keep the repository, Idena, and PoHW state under `/mnt/ssd`, and mount the Bitcoin disk separately at `/mnt/bitcoin-wd`. Use a filesystem UUID in the Pi's local `/etc/fstab`; do not commit the UUID or a `/dev/sdX` name. A suitable local entry is:
+
+```text
+UUID=REPLACE_WITH_LOCAL_UUID /mnt/bitcoin-wd ext4 defaults,noatime,nofail,x-systemd.automount,x-systemd.device-timeout=30s 0 2
+```
+
+Before allowing a newer Bitcoin Core version to write an older datadir, stop Core and preserve at least `chainstate`, `blocks/index`, the live configuration, and the mutable tail of `blk*.dat`/`rev*.dat`. Keep the previous Bitcoin disk unchanged until the replacement node has survived a clean restart. The dedicated datadir used by the supplied drop-ins is `/mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet`.
+
+Install the dedicated-disk overrides after the standard hardening/runtime drop-ins:
+
+```sh
+sudo install -d -m 755 \
+  /etc/systemd/system/bitcoind-mainnet.service.d \
+  /etc/systemd/system/pohw-auto-bootstrap.service.d \
+  /etc/systemd/system/pohw-dashboard-api.service.d \
+  /etc/systemd/system/pohw-health-status.service.d
+sudo install -m 644 deploy/systemd/bitcoind-mainnet-wd.conf \
+  /etc/systemd/system/bitcoind-mainnet.service.d/70-wd-datadir.conf
+sudo install -m 644 deploy/systemd/bitcoind-mainnet-sync-priority.conf \
+  /etc/systemd/system/bitcoind-mainnet.service.d/80-sync-priority.conf
+for service in pohw-auto-bootstrap pohw-dashboard-api pohw-health-status; do
+  sudo install -m 644 deploy/systemd/pohw-bitcoin-wd-readonly.conf \
+    "/etc/systemd/system/${service}.service.d/50-bitcoin-wd.conf"
+done
+```
+
+Archive any older drop-in that still adds `RequiresMountsFor=/mnt/ssd` to `bitcoind-mainnet.service`; systemd dependencies from that file cannot be removed by a later drop-in. Set these three path-only values in `/etc/pohw/p2pool.env`, preserving all other protected values:
+
+```text
+POHW_BITCOIN_DATADIR=/mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet
+POHW_BITCOIN_RPC_COOKIE_FILE=/mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet/.cookie
+BITCOIN_RPC_COOKIE_FILE=/mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet/.cookie
+```
+
+Use the templated cookie watcher for the new location. The watcher intentionally has no `Wants=` or `After=` dependency on runtime services; adding those dependencies can pull Bitcoin and the dashboard into `paths.target` and create a boot ordering cycle.
+
+```sh
+sudo install -m 644 deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
+sudo systemctl disable --now pohw-dashboard-api-cookie-watch.path
+COOKIE_UNIT="$(systemd-escape --path /mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet/.cookie)"
+sudo systemctl daemon-reload
+sudo systemctl enable --now "pohw-dashboard-api-cookie-watch@${COOKIE_UNIT}.path"
+sudo systemd-analyze verify bitcoind-mainnet.service "pohw-dashboard-api-cookie-watch@${COOKIE_UNIT}.path"
+sudo systemctl enable --now bitcoind-mainnet.service
+```
+
+During an intentional Bitcoin-only sync window, the `80-sync-priority.conf` override cancels the normal Idena-friendly CPU/I/O de-prioritization. Keep Idena and both priority/pressure guard timers disabled during that window. Remove the override and reload systemd before resuming Idena:
+
+```sh
+sudo rm /etc/systemd/system/bitcoind-mainnet.service.d/80-sync-priority.conf
+sudo systemctl daemon-reload
+```
+
+Validate the migration with a clean reboot. The acceptance checks are: both mounts are read-write, `bitcoind-mainnet.service` starts without restarts from the dedicated datadir, Idena remains in the intended state, the cookie watcher and dashboard are active, and the tailnet SSH path returns after boot.
+
 If UFW is enabled, expose only the intended ports:
 
 ```sh
