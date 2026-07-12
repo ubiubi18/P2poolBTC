@@ -1,0 +1,39 @@
+[Unit]
+Description=Import a validated Idena public-state transfer on the Pi
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/idena /var/lib/idena-return-inbox /var/lib/idena-return-backup /var/lib/idena-return-failed /var/lib/idena-return-state
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/idena-return/import.env
+ExecStart=/usr/local/sbin/idena-public-state-import
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/idena /var/lib/idena-return-inbox /var/lib/idena-return-backup /var/lib/idena-return-failed /var/lib/idena-return-state /run/lock
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+MemoryDenyWriteExecute=true

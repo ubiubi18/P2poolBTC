@@ -1,0 +1,12 @@
+[Unit]
+Description=Wait for the Hetzner Idena bootstrap node to synchronize
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=idena-public-state-export.service
+
+[Install]
+WantedBy=timers.target
