@@ -40,6 +40,16 @@ class IdenaModernRuntimeTest(unittest.TestCase):
                 for value in required:
                     self.assertIn(value, unit)
 
+        idena_unit = (SYSTEMD / "idena-modern-sdcard.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Environment=HOME=/var/lib/idena", idena_unit)
+        self.assertIn(
+            "Environment=XDG_CONFIG_HOME=/var/lib/idena/.config", idena_unit
+        )
+        self.assertIn("ProtectHome=true", idena_unit)
+        self.assertNotIn("/home/", idena_unit)
+
     def test_sdcard_health_unit_has_no_legacy_mount_dependency(self) -> None:
         unit = (SYSTEMD / "pohw-health-status-sdcard.service").read_text(
             encoding="utf-8"

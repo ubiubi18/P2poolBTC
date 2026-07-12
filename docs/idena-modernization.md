@@ -93,6 +93,10 @@ Expose only the configured Idena TCP P2P port when the node must accept public
 peers. Keep JSON-RPC on loopback and never publish port `9009`. A compatibility
 relay and a modern canary on the same host must use distinct P2P ports.
 
+The Idena unit points `HOME` and `XDG_CONFIG_HOME` at `/var/lib/idena`. This
+lets Kubo load optional NoPFS denylist configuration while `ProtectHome=true`
+continues to deny access to user home directories.
+
 ## Acceptance And Rollback
 
 Acceptance requires: service active with zero restarts, RPC version equal to the
