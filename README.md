@@ -5,6 +5,11 @@ It explores a voluntary mining layer where every node can replay the same sharec
 
 Bitcoin and Idena stay unchanged. This repo builds the experimental coordination layer between them.
 
+`compatibility/stack-lock.json` pins the reviewed Idena candidate consumed by
+PoHW. Run `python3 scripts/pohw-idena-compatibility-lock.py` before deployment;
+the production installers additionally require root-owned source provenance
+files for both modern and legacy binaries.
+
 The idea is simple:
 
 - Bitcoin hashrate still mines the block.

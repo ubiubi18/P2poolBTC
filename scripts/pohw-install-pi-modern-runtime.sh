@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="${POHW_RUNTIME_DIR:-/opt/p2pool}"
 STATE_DIR="${POHW_STATE_DIR:-/var/lib/pohw-p2pool}"
 MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"
+MODERN_IDENA_PROVENANCE="${IDENA_MODERN_PROVENANCE_FILE:-${MODERN_IDENA_BIN}.source-commit}"
 IDENA_DATADIR="${IDENA_DATADIR:-/var/lib/idena}"
 
 UNITS=(
@@ -61,6 +62,12 @@ if [[ ! -x "$MODERN_IDENA_BIN" ]]; then
   echo "Modern Idena binary is missing or not executable: $MODERN_IDENA_BIN" >&2
   exit 1
 fi
+if [[ -z "$(find "$MODERN_IDENA_PROVENANCE" -maxdepth 0 -type f -uid 0 ! -perm /022 -print 2>/dev/null)" ]]; then
+  echo "Modern Idena provenance must be a root-owned, non-writable regular file: $MODERN_IDENA_PROVENANCE" >&2
+  exit 1
+fi
+python3 "$ROOT_DIR/scripts/pohw-idena-compatibility-lock.py" \
+  --modern-provenance-file "$MODERN_IDENA_PROVENANCE"
 if [[ "$(cat "$IDENA_DATADIR/ipfs/version")" != "18" ]]; then
   echo "Idena IPFS repository must be migrated to version 18 before installing runtime overrides." >&2
   exit 1
