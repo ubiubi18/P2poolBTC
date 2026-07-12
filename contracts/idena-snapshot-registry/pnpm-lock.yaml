@@ -9,18 +9,18 @@ importers:
   .:
     devDependencies:
       assemblyscript:
-        specifier: ^0.27.35
-        version: 0.27.37
+        specifier: ^0.28.19
+        version: 0.28.19
 
 packages:
 
-  assemblyscript@0.27.37:
-    resolution: {integrity: sha512-YtY5k3PiV3SyUQ6gRlR2OCn8dcVRwkpiG/k2T5buoL2ymH/Z/YbaYWbk/f9mO2HTgEtGWjPiAQrIuvA7G/63Gg==}
-    engines: {node: '>=18', npm: '>=10'}
+  assemblyscript@0.28.19:
+    resolution: {integrity: sha512-yOAlAb9EsrI00oUaf6qUTtTcYYeelG2iC3f1LnA45XUeSlMrp2O2FF5Llj4P+Y84ZiIlh/ciEEpOaPwwmOKq8g==}
+    engines: {node: '>=20', npm: '>=10'}
     hasBin: true
 
-  binaryen@116.0.0-nightly.20240114:
-    resolution: {integrity: sha512-0GZrojJnuhoe+hiwji7QFaL3tBlJoA+KFUN7ouYSDGZLSo9CKM8swQX8n/UcbR0d1VuZKU+nhogNzv423JEu5A==}
+  binaryen@130.0.0-nightly.20260609:
+    resolution: {integrity: sha512-Zyl9Tw638x08LDew22YtxdYiUGxn+quzpR3ySIS4Nccv6yAiO5j1Yko9IEPNpj/aBZf71xtD/6hYXsgZ2ye3ew==}
     hasBin: true
 
   long@5.3.2:
@@ -28,11 +28,11 @@ packages:
 
 snapshots:
 
-  assemblyscript@0.27.37:
+  assemblyscript@0.28.19:
     dependencies:
-      binaryen: 116.0.0-nightly.20240114
+      binaryen: 130.0.0-nightly.20260609
       long: 5.3.2
 
-  binaryen@116.0.0-nightly.20240114: {}
+  binaryen@130.0.0-nightly.20260609: {}
 
   long@5.3.2: {}
