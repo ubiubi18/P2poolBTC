@@ -1,0 +1,35 @@
+[Unit]
+Description=PoHW secret-safe host health status (SD-card runtime)
+Wants=network-online.target
+After=network-online.target idena.service
+RequiresMountsFor=/opt/p2pool /var/lib/idena /var/lib/pohw-p2pool/health
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/p2pool
+EnvironmentFile=-/etc/pohw/p2pool.env
+ExecStart=/usr/bin/python3 /opt/p2pool/scripts/pohw-health-status.py --bitcoin-datadir /mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet --idena-datadir /var/lib/idena --idena-api-key-file /var/lib/idena/api.key --idena-ipfs-repo-version 18 --mount-path / --output /var/lib/pohw-p2pool/health/status.json --format summary
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/opt/p2pool /var/lib/idena
+ReadWritePaths=/var/lib/pohw-p2pool/health

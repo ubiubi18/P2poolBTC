@@ -29,10 +29,6 @@ class IdenaModernRuntimeTest(unittest.TestCase):
                 "/opt/p2pool/scripts/pohw-snapshot-if-synced.sh",
                 "/var/lib/pohw-p2pool/snapshots",
             ),
-            "pohw-health-status-sdcard.conf": (
-                "/opt/p2pool/scripts/pohw-health-status.py",
-                "--idena-ipfs-repo-version 18",
-            ),
         }
 
         for name, required in expected.items():
@@ -44,11 +40,27 @@ class IdenaModernRuntimeTest(unittest.TestCase):
                 for value in required:
                     self.assertIn(value, unit)
 
+    def test_sdcard_health_unit_has_no_legacy_mount_dependency(self) -> None:
+        unit = (SYSTEMD / "pohw-health-status-sdcard.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/opt/p2pool/scripts/pohw-health-status.py", unit)
+        self.assertIn("--idena-ipfs-repo-version 18", unit)
+        self.assertIn(
+            "RequiresMountsFor=/opt/p2pool /var/lib/idena /var/lib/pohw-p2pool/health",
+            unit,
+        )
+        self.assertNotIn("RequiresMountsFor=/mnt", unit)
+        self.assertNotIn("ReadOnlyPaths=/mnt", unit)
+
     def test_installer_is_fail_closed_and_does_not_enable_services(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('RUNTIME_DIR="${POHW_RUNTIME_DIR:-/opt/p2pool}"', installer)
         self.assertIn('MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"', installer)
         self.assertIn('"$(cat "$IDENA_DATADIR/ipfs/version")" != "18"', installer)
+        self.assertIn("install_full_unit pohw-health-status.service", installer)
+        self.assertIn("pohw-health-status.service.d/50-bitcoin-wd.conf", installer)
+        self.assertIn("Health service still depends on a legacy SSD mount", installer)
         self.assertIn("systemd-analyze verify", installer)
         self.assertNotIn("\nsystemctl enable", installer)
         self.assertNotIn("\nsystemctl restart", installer)

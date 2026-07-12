@@ -43,6 +43,7 @@ install -d -m 0750 -o ubuntu -g ubuntu \
   "$STATE_DIR/rewards/rolling" \
   "$STATE_DIR/idena-session-recorder" \
   "$STATE_DIR/snapshots"
+install -d -m 0700 -o root -g root "$STATE_DIR/runtime-backup"
 
 install_dropin() {
   local unit=$1 source=$2
@@ -51,11 +52,29 @@ install_dropin() {
   install -m 0644 -o root -g root "$source" "$target/60-sdcard-modern.conf"
 }
 
+install_full_unit() {
+  local unit=$1 source=$2
+  local target="/etc/systemd/system/$unit"
+  local backup="$STATE_DIR/runtime-backup/$unit"
+
+  if [[ -f "$target" && ! -f "$backup" ]]; then
+    install -m 0600 -o root -g root "$target" "$backup"
+  fi
+  install -m 0644 -o root -g root "$source" "$target"
+}
+
 install_dropin idena.service "$ROOT_DIR/deploy/systemd/idena-modern-sdcard.conf"
 install_dropin idena-reward-indexer.service "$ROOT_DIR/deploy/systemd/idena-reward-indexer-sdcard.conf"
 install_dropin idena-session-recorder.service "$ROOT_DIR/deploy/systemd/idena-session-recorder-sdcard.conf"
 install_dropin pohw-idena-snapshot.service "$ROOT_DIR/deploy/systemd/pohw-idena-snapshot-sdcard.conf"
-install_dropin pohw-health-status.service "$ROOT_DIR/deploy/systemd/pohw-health-status-sdcard.conf"
+install_full_unit pohw-health-status.service "$ROOT_DIR/deploy/systemd/pohw-health-status-sdcard.service"
+
+# RequiresMountsFor dependencies from the legacy SSD drop-ins cannot be
+# reliably removed by a later drop-in. Remove only the two known obsolete
+# overrides after preserving the original base unit above.
+rm -f \
+  /etc/systemd/system/pohw-health-status.service.d/50-bitcoin-wd.conf \
+  /etc/systemd/system/pohw-health-status.service.d/60-sdcard-modern.conf
 
 systemctl daemon-reload
 systemd-analyze verify \
@@ -64,6 +83,12 @@ systemd-analyze verify \
   idena-session-recorder.service \
   pohw-idena-snapshot.service \
   pohw-health-status.service
+
+if systemctl show pohw-health-status.service --property=RequiresMountsFor --value \
+  | grep -Eq 'mnt-(ssd|bitcoin)'; then
+  echo "Health service still depends on a legacy SSD mount." >&2
+  exit 1
+fi
 
 cat <<EOF
 Modern Pi runtime overrides installed.
