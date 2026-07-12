@@ -1,0 +1,43 @@
+[Unit]
+Description=PoHW Idena reward ledger indexer (SD-card runtime)
+Wants=idena.service
+After=idena.service
+RequiresMountsFor=/opt/p2pool/pohw_idena_rpc /var/lib/idena /var/lib/pohw-p2pool/rewards
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/p2pool/pohw_idena_rpc
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/p2pool/pohw_idena_rpc/idena_reward_indexer.py --db /var/lib/pohw-p2pool/rewards/reward_ledger.sqlite3 --rolling-data-dir /var/lib/pohw-p2pool/rewards/rolling --rpc-url http://127.0.0.1:9009 --api-key-file /var/lib/idena/api.key --poll-interval 5 run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+Nice=10
+CPUWeight=20
+IOWeight=20
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadOnlyPaths=/opt/p2pool /var/lib/idena
+ReadWritePaths=/var/lib/pohw-p2pool/rewards
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

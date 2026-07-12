@@ -1,0 +1,40 @@
+[Unit]
+Description=Idena original-chain node (modern SD-card runtime)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/lib/idena
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/var/lib/idena
+ExecStart=/usr/local/libexec/idena-node-modern --config=/var/lib/idena/config.json --datadir=/var/lib/idena --fast=false
+Restart=always
+RestartSec=10
+TimeoutStopSec=5min
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+UMask=0077
+ReadOnlyPaths=/usr/local/libexec/idena-node-modern /var/lib/idena/config.json
+ReadWritePaths=/var/lib/idena
+
+[Install]
+WantedBy=multi-user.target

@@ -11,21 +11,21 @@ INSTALLER = ROOT / "scripts" / "pohw-install-pi-modern-runtime.sh"
 
 
 class IdenaModernRuntimeTest(unittest.TestCase):
-    def test_sdcard_dropins_replace_legacy_ssd_paths(self) -> None:
+    def test_sdcard_units_replace_legacy_ssd_paths(self) -> None:
         expected = {
-            "idena-modern-sdcard.conf": (
+            "idena-modern-sdcard.service": (
                 "/usr/local/libexec/idena-node-modern",
                 "/var/lib/idena",
             ),
-            "idena-reward-indexer-sdcard.conf": (
+            "idena-reward-indexer-sdcard.service": (
                 "/opt/p2pool/pohw_idena_rpc/idena_reward_indexer.py",
                 "/var/lib/pohw-p2pool/rewards",
             ),
-            "idena-session-recorder-sdcard.conf": (
+            "idena-session-recorder-sdcard.service": (
                 "/opt/p2pool/pohw_idena_rpc/idena_session_recorder.py",
                 "/var/lib/pohw-p2pool/idena-session-recorder",
             ),
-            "pohw-idena-snapshot-sdcard.conf": (
+            "pohw-idena-snapshot-sdcard.service": (
                 "/opt/p2pool/scripts/pohw-snapshot-if-synced.sh",
                 "/var/lib/pohw-p2pool/snapshots",
             ),
@@ -35,8 +35,8 @@ class IdenaModernRuntimeTest(unittest.TestCase):
             with self.subTest(dropin=name):
                 unit = (SYSTEMD / name).read_text(encoding="utf-8")
                 self.assertNotIn("/mnt/ssd", unit)
-                self.assertIn("RequiresMountsFor=\n", unit)
-                self.assertIn("ReadOnlyPaths=\n", unit)
+                self.assertIn("RequiresMountsFor=", unit)
+                self.assertIn("ReadOnlyPaths=", unit)
                 for value in required:
                     self.assertIn(value, unit)
 
@@ -58,9 +58,16 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         self.assertIn('RUNTIME_DIR="${POHW_RUNTIME_DIR:-/opt/p2pool}"', installer)
         self.assertIn('MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"', installer)
         self.assertIn('"$(cat "$IDENA_DATADIR/ipfs/version")" != "18"', installer)
-        self.assertIn("install_full_unit pohw-health-status.service", installer)
+        for unit in (
+            "idena.service",
+            "idena-reward-indexer.service",
+            "idena-session-recorder.service",
+            "pohw-idena-snapshot.service",
+            "pohw-health-status.service",
+        ):
+            self.assertIn(f"install_full_unit {unit}", installer)
         self.assertIn("pohw-health-status.service.d/50-bitcoin-wd.conf", installer)
-        self.assertIn("Health service still depends on a legacy SSD mount", installer)
+        self.assertIn("still depends on a legacy runtime path", installer)
         self.assertIn("systemd-analyze verify", installer)
         self.assertNotIn("\nsystemctl enable", installer)
         self.assertNotIn("\nsystemctl restart", installer)

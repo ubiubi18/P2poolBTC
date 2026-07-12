@@ -45,13 +45,6 @@ install -d -m 0750 -o ubuntu -g ubuntu \
   "$STATE_DIR/snapshots"
 install -d -m 0700 -o root -g root "$STATE_DIR/runtime-backup"
 
-install_dropin() {
-  local unit=$1 source=$2
-  local target="/etc/systemd/system/${unit}.d"
-  install -d -m 0755 -o root -g root "$target"
-  install -m 0644 -o root -g root "$source" "$target/60-sdcard-modern.conf"
-}
-
 install_full_unit() {
   local unit=$1 source=$2
   local target="/etc/systemd/system/$unit"
@@ -63,16 +56,24 @@ install_full_unit() {
   install -m 0644 -o root -g root "$source" "$target"
 }
 
-install_dropin idena.service "$ROOT_DIR/deploy/systemd/idena-modern-sdcard.conf"
-install_dropin idena-reward-indexer.service "$ROOT_DIR/deploy/systemd/idena-reward-indexer-sdcard.conf"
-install_dropin idena-session-recorder.service "$ROOT_DIR/deploy/systemd/idena-session-recorder-sdcard.conf"
-install_dropin pohw-idena-snapshot.service "$ROOT_DIR/deploy/systemd/pohw-idena-snapshot-sdcard.conf"
+install_full_unit idena.service "$ROOT_DIR/deploy/systemd/idena-modern-sdcard.service"
+install_full_unit idena-reward-indexer.service "$ROOT_DIR/deploy/systemd/idena-reward-indexer-sdcard.service"
+install_full_unit idena-session-recorder.service "$ROOT_DIR/deploy/systemd/idena-session-recorder-sdcard.service"
+install_full_unit pohw-idena-snapshot.service "$ROOT_DIR/deploy/systemd/pohw-idena-snapshot-sdcard.service"
 install_full_unit pohw-health-status.service "$ROOT_DIR/deploy/systemd/pohw-health-status-sdcard.service"
 
-# RequiresMountsFor dependencies from the legacy SSD drop-ins cannot be
-# reliably removed by a later drop-in. Remove only the two known obsolete
-# overrides after preserving the original base unit above.
+# List-valued mount dependencies from legacy units cannot be reliably removed
+# by a later drop-in. Remove only known obsolete overrides after preserving
+# each original base unit above.
 rm -f \
+  /etc/systemd/system/idena.service.d/20-restart.conf \
+  /etc/systemd/system/idena.service.d/30-hardening.conf \
+  /etc/systemd/system/idena.service.d/40-extra-hardening.conf \
+  /etc/systemd/system/idena.service.d/50-sdcard.conf \
+  /etc/systemd/system/idena.service.d/60-sdcard-modern.conf \
+  /etc/systemd/system/idena-reward-indexer.service.d/60-sdcard-modern.conf \
+  /etc/systemd/system/idena-session-recorder.service.d/60-sdcard-modern.conf \
+  /etc/systemd/system/pohw-idena-snapshot.service.d/60-sdcard-modern.conf \
   /etc/systemd/system/pohw-health-status.service.d/50-bitcoin-wd.conf \
   /etc/systemd/system/pohw-health-status.service.d/60-sdcard-modern.conf
 
@@ -84,11 +85,18 @@ systemd-analyze verify \
   pohw-idena-snapshot.service \
   pohw-health-status.service
 
-if systemctl show pohw-health-status.service --property=RequiresMountsFor --value \
-  | grep -Eq 'mnt-(ssd|bitcoin)'; then
-  echo "Health service still depends on a legacy SSD mount." >&2
-  exit 1
-fi
+for unit in \
+  idena.service \
+  idena-reward-indexer.service \
+  idena-session-recorder.service \
+  pohw-idena-snapshot.service \
+  pohw-health-status.service; do
+  if systemctl show "$unit" --property=RequiresMountsFor --value \
+    | grep -Eq 'mnt-(ssd|bitcoin)|home-ubuntu'; then
+    echo "$unit still depends on a legacy runtime path." >&2
+    exit 1
+  fi
+done
 
 cat <<EOF
 Modern Pi runtime overrides installed.

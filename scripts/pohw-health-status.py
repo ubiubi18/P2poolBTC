@@ -309,12 +309,15 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
         )
         sync = client.call("bcn_syncing")
         client_version = client.call("dna_version")
+        peers = client.call("net_peers")
     except (IdenaRPCError, RuntimeError, OSError, ValueError) as exc:
         return {"status": "error", "ok": False, "error": scrub_text(str(exc))}
     if not isinstance(sync, dict):
         return {"status": "invalid_response", "ok": False}
     if not isinstance(client_version, str) or not client_version.strip():
         return {"status": "invalid_version", "ok": False}
+    if not isinstance(peers, list):
+        return {"status": "invalid_peers", "ok": False}
     current = int(sync.get("currentBlock") or 0)
     highest = int(sync.get("highestBlock") or 0)
     syncing = bool(sync.get("syncing")) and not (highest > 0 and current >= highest)
@@ -327,6 +330,7 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
         "currentBlock": current,
         "highestBlock": highest,
         "clientVersion": scrub_text(client_version, limit=96),
+        "peerCount": len(peers),
         "ready": not syncing and not wrong_time,
     }
 
@@ -344,6 +348,7 @@ def probe_idena_p2p(
     datadir: Path,
     min_peers: int,
     expected_repo_version: int = 0,
+    peer_count: int | None = None,
     max_log_bytes: int = 2 * 1024 * 1024,
 ) -> dict[str, Any]:
     status: dict[str, Any] = {"status": "ok", "ok": True, "warnings": []}
@@ -393,11 +398,16 @@ def probe_idena_p2p(
         status["activeIpfsPort"] = active_port
     if latest_loop:
         status["latestLoop"] = latest_loop
+    observed_peer_count = peer_count
+    if observed_peer_count is None and latest_loop:
+        observed_peer_count = latest_loop["total_peers"]
+    if observed_peer_count is not None:
+        status["peerCount"] = observed_peer_count
 
     warnings: list[str] = []
     if configured_port is not None and active_port is not None and active_port != configured_port:
         warnings.append("idena_ipfs_port_drift")
-    if min_peers > 0 and latest_loop and latest_loop["total_peers"] < min_peers:
+    if min_peers > 0 and observed_peer_count is not None and observed_peer_count < min_peers:
         warnings.append("idena_low_peer_count")
     if expected_repo_version > 0 and repo_version != expected_repo_version:
         warnings.append("idena_ipfs_repo_version_mismatch")
@@ -537,6 +547,7 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         Path(args.idena_datadir),
         args.idena_min_peers,
         expected_repo_version=args.idena_ipfs_repo_version,
+        peer_count=idena_rpc.get("peerCount") if idena_rpc.get("ok") else None,
     )
     disk = probe_disk(mount_path)
     io_status = probe_iostat(mount_path, args.iostat_timeout, enabled=not args.skip_iostat)
@@ -605,7 +616,7 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
             f" p2p={idena_p2p.get('status', 'unknown')} "
             f"port={idena_p2p.get('activeIpfsPort', 'unknown')}"
             f"(config={idena_p2p.get('configuredIpfsPort', 'unknown')}) "
-            f"peers={latest_loop.get('total_peers', 'unknown')}"
+            f"peers={idena_p2p.get('peerCount', latest_loop.get('total_peers', 'unknown'))}"
         )
         if "repoVersion" in idena_p2p:
             idena_line += f" repo={idena_p2p['repoVersion']}"

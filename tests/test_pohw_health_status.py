@@ -31,6 +31,8 @@ class PohwHealthStatusTest(unittest.TestCase):
                     }
                 if method == "dna_version":
                     return "1.1.2-modern.4+compat"
+                if method == "net_peers":
+                    return [{"id": "peer-a"}, {"id": "peer-b"}]
                 raise AssertionError(method)
 
         original = health.IdenaRPCClientMinimal
@@ -46,6 +48,7 @@ class PohwHealthStatusTest(unittest.TestCase):
 
         self.assertTrue(parsed["ready"])
         self.assertEqual(parsed["clientVersion"], "1.1.2-modern.4+compat")
+        self.assertEqual(parsed["peerCount"], 2)
 
     def test_parse_bitcoin_debug_log_extracts_tip_and_limited_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-health-log-") as temp:
@@ -235,6 +238,25 @@ sda            157.00  32136.00    54.00  25.59   86.87   204.69   16.00   2220.
         self.assertEqual(parsed["repoVersion"], 12)
         self.assertEqual(parsed["status"], "warning")
         self.assertIn("idena_ipfs_repo_version_mismatch", parsed["warnings"])
+
+    def test_probe_idena_p2p_prefers_current_rpc_peer_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-idena-rpc-peers-") as temp:
+            datadir = Path(temp)
+            (datadir / "logs").mkdir()
+            (datadir / "config.json").write_text(
+                json.dumps({"IpfsConf": {"IpfsPort": 40405}}),
+                encoding="utf-8",
+            )
+            (datadir / "logs" / "output.log").write_text("", encoding="utf-8")
+
+            parsed = health.probe_idena_p2p(
+                datadir,
+                min_peers=2,
+                peer_count=1,
+            )
+
+        self.assertEqual(parsed["peerCount"], 1)
+        self.assertIn("idena_low_peer_count", parsed["warnings"])
 
     def test_summary_lines_include_idena_p2p_warnings(self) -> None:
         lines = health.summary_lines(
