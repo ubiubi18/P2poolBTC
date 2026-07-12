@@ -50,6 +50,38 @@ class PohwHealthStatusTest(unittest.TestCase):
         self.assertEqual(parsed["clientVersion"], "1.1.2-modern.4+compat")
         self.assertEqual(parsed["peerCount"], 2)
 
+    def test_probe_idena_rpc_reports_initial_api_without_false_error(self) -> None:
+        class FakeClient:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            def call(self, method: str) -> object:
+                if method == "bcn_syncing":
+                    return {
+                        "currentBlock": 101,
+                        "highestBlock": 200,
+                        "syncing": True,
+                        "wrongTime": False,
+                    }
+                raise health.IdenaRPCError("method is not available during initialization")
+
+        original = health.IdenaRPCClientMinimal
+        health.IdenaRPCClientMinimal = FakeClient
+        try:
+            parsed = health.probe_idena_rpc(
+                "http://127.0.0.1:9009",
+                Path("/not/read/by/fake-client"),
+                timeout_seconds=1,
+            )
+        finally:
+            health.IdenaRPCClientMinimal = original
+
+        self.assertEqual(parsed["status"], "initializing")
+        self.assertTrue(parsed["ok"])
+        self.assertFalse(parsed["ready"])
+        self.assertEqual(parsed["currentBlock"], 101)
+        self.assertNotIn("error", parsed)
+
     def test_parse_bitcoin_debug_log_extracts_tip_and_limited_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-health-log-") as temp:
             log = Path(temp) / "debug.log"

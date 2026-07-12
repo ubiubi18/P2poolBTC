@@ -308,31 +308,45 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
             timeout=timeout_seconds,
         )
         sync = client.call("bcn_syncing")
-        client_version = client.call("dna_version")
-        peers = client.call("net_peers")
     except (IdenaRPCError, RuntimeError, OSError, ValueError) as exc:
         return {"status": "error", "ok": False, "error": scrub_text(str(exc))}
     if not isinstance(sync, dict):
         return {"status": "invalid_response", "ok": False}
-    if not isinstance(client_version, str) or not client_version.strip():
-        return {"status": "invalid_version", "ok": False}
-    if not isinstance(peers, list):
-        return {"status": "invalid_peers", "ok": False}
     current = int(sync.get("currentBlock") or 0)
     highest = int(sync.get("highestBlock") or 0)
     syncing = bool(sync.get("syncing")) and not (highest > 0 and current >= highest)
     wrong_time = bool(sync.get("wrongTime"))
-    return {
+    status = {
         "status": "ok",
         "ok": True,
         "syncing": syncing,
         "wrongTime": wrong_time,
         "currentBlock": current,
         "highestBlock": highest,
-        "clientVersion": scrub_text(client_version, limit=96),
-        "peerCount": len(peers),
         "ready": not syncing and not wrong_time,
     }
+    try:
+        client_version = client.call("dna_version")
+        peers = client.call("net_peers")
+    except (IdenaRPCError, RuntimeError, OSError, ValueError) as exc:
+        if syncing:
+            status["status"] = "initializing"
+            status["ready"] = False
+            return status
+        return {
+            **status,
+            "status": "error",
+            "ok": False,
+            "ready": False,
+            "error": scrub_text(str(exc)),
+        }
+    if not isinstance(client_version, str) or not client_version.strip():
+        return {**status, "status": "invalid_version", "ok": False, "ready": False}
+    if not isinstance(peers, list):
+        return {**status, "status": "invalid_peers", "ok": False, "ready": False}
+    status["clientVersion"] = scrub_text(client_version, limit=96)
+    status["peerCount"] = len(peers)
+    return status
 
 
 def read_file_tail(path: Path, max_bytes: int) -> str:
