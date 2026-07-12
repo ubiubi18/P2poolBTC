@@ -16,6 +16,37 @@ spec.loader.exec_module(health)
 
 
 class PohwHealthStatusTest(unittest.TestCase):
+    def test_probe_idena_rpc_reports_client_version(self) -> None:
+        class FakeClient:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            def call(self, method: str) -> object:
+                if method == "bcn_syncing":
+                    return {
+                        "currentBlock": 100,
+                        "highestBlock": 100,
+                        "syncing": False,
+                        "wrongTime": False,
+                    }
+                if method == "dna_version":
+                    return "1.1.2-modern.4+compat"
+                raise AssertionError(method)
+
+        original = health.IdenaRPCClientMinimal
+        health.IdenaRPCClientMinimal = FakeClient
+        try:
+            parsed = health.probe_idena_rpc(
+                "http://127.0.0.1:9009",
+                Path("/not/read/by/fake-client"),
+                timeout_seconds=1,
+            )
+        finally:
+            health.IdenaRPCClientMinimal = original
+
+        self.assertTrue(parsed["ready"])
+        self.assertEqual(parsed["clientVersion"], "1.1.2-modern.4+compat")
+
     def test_parse_bitcoin_debug_log_extracts_tip_and_limited_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-health-log-") as temp:
             log = Path(temp) / "debug.log"
@@ -182,6 +213,28 @@ sda            157.00  32136.00    54.00  25.59   86.87   204.69   16.00   2220.
         self.assertEqual(parsed["activeIpfsPort"], 40405)
         self.assertEqual(parsed["latestLoop"]["total_peers"], 5)
         self.assertNotIn("idena_ipfs_port_drift", parsed["warnings"])
+
+    def test_probe_idena_p2p_checks_modern_repo_version(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-idena-repo-version-") as temp:
+            datadir = Path(temp)
+            (datadir / "ipfs").mkdir()
+            (datadir / "logs").mkdir()
+            (datadir / "config.json").write_text(
+                json.dumps({"IpfsConf": {"IpfsPort": 40405}}),
+                encoding="utf-8",
+            )
+            (datadir / "ipfs" / "version").write_text("12\n", encoding="utf-8")
+            (datadir / "logs" / "output.log").write_text("", encoding="utf-8")
+
+            parsed = health.probe_idena_p2p(
+                datadir,
+                min_peers=0,
+                expected_repo_version=18,
+            )
+
+        self.assertEqual(parsed["repoVersion"], 12)
+        self.assertEqual(parsed["status"], "warning")
+        self.assertIn("idena_ipfs_repo_version_mismatch", parsed["warnings"])
 
     def test_summary_lines_include_idena_p2p_warnings(self) -> None:
         lines = health.summary_lines(

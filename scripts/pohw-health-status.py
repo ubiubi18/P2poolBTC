@@ -308,10 +308,13 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
             timeout=timeout_seconds,
         )
         sync = client.call("bcn_syncing")
+        client_version = client.call("dna_version")
     except (IdenaRPCError, RuntimeError, OSError, ValueError) as exc:
         return {"status": "error", "ok": False, "error": scrub_text(str(exc))}
     if not isinstance(sync, dict):
         return {"status": "invalid_response", "ok": False}
+    if not isinstance(client_version, str) or not client_version.strip():
+        return {"status": "invalid_version", "ok": False}
     current = int(sync.get("currentBlock") or 0)
     highest = int(sync.get("highestBlock") or 0)
     syncing = bool(sync.get("syncing")) and not (highest > 0 and current >= highest)
@@ -323,6 +326,7 @@ def probe_idena_rpc(url: str, api_key_file: Path, timeout_seconds: int) -> dict[
         "wrongTime": wrong_time,
         "currentBlock": current,
         "highestBlock": highest,
+        "clientVersion": scrub_text(client_version, limit=96),
         "ready": not syncing and not wrong_time,
     }
 
@@ -336,13 +340,19 @@ def read_file_tail(path: Path, max_bytes: int) -> str:
         return handle.read(max_bytes).decode("utf-8", errors="replace")
 
 
-def probe_idena_p2p(datadir: Path, min_peers: int, max_log_bytes: int = 2 * 1024 * 1024) -> dict[str, Any]:
+def probe_idena_p2p(
+    datadir: Path,
+    min_peers: int,
+    expected_repo_version: int = 0,
+    max_log_bytes: int = 2 * 1024 * 1024,
+) -> dict[str, Any]:
     status: dict[str, Any] = {"status": "ok", "ok": True, "warnings": []}
     config_path = datadir / "config.json"
     log_path = datadir / "logs" / "output.log"
     configured_port: int | None = None
     active_port: int | None = None
     latest_loop: dict[str, int] | None = None
+    repo_version: int | None = None
 
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -353,6 +363,13 @@ def probe_idena_p2p(datadir: Path, min_peers: int, max_log_bytes: int = 2 * 1024
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         status["configStatus"] = "error"
         status["configError"] = scrub_text(str(exc))
+
+    try:
+        repo_version = int((datadir / "ipfs" / "version").read_text(encoding="utf-8").strip())
+        status["repoVersion"] = repo_version
+    except (OSError, ValueError) as exc:
+        status["repoStatus"] = "unavailable"
+        status["repoError"] = scrub_text(str(exc))
 
     try:
         for line in read_file_tail(log_path, max_log_bytes).splitlines():
@@ -382,6 +399,8 @@ def probe_idena_p2p(datadir: Path, min_peers: int, max_log_bytes: int = 2 * 1024
         warnings.append("idena_ipfs_port_drift")
     if min_peers > 0 and latest_loop and latest_loop["total_peers"] < min_peers:
         warnings.append("idena_low_peer_count")
+    if expected_repo_version > 0 and repo_version != expected_repo_version:
+        warnings.append("idena_ipfs_repo_version_mismatch")
 
     status["warnings"] = warnings
     status["ok"] = not warnings
@@ -514,7 +533,11 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         node_network_limited=bool(bitcoin_log.get("nodeNetworkLimited")),
     )
     idena_rpc = probe_idena_rpc(args.idena_rpc_url, Path(args.idena_api_key_file), args.idena_rpc_timeout)
-    idena_p2p = probe_idena_p2p(Path(args.idena_datadir), args.idena_min_peers)
+    idena_p2p = probe_idena_p2p(
+        Path(args.idena_datadir),
+        args.idena_min_peers,
+        expected_repo_version=args.idena_ipfs_repo_version,
+    )
     disk = probe_disk(mount_path)
     io_status = probe_iostat(mount_path, args.iostat_timeout, enabled=not args.skip_iostat)
     readiness = compute_readiness(services, bitcoin_log, bitcoin_rpc, template, idena_rpc, idena_p2p)
@@ -574,6 +597,8 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
         f"ready={idena.get('ready', False)} "
         f"height={idena.get('currentBlock', 'unknown')}"
     )
+    if "clientVersion" in idena:
+        idena_line += f" version={idena['clientVersion']}"
     if idena_p2p:
         latest_loop = idena_p2p.get("latestLoop") or {}
         idena_line += (
@@ -582,6 +607,8 @@ def summary_lines(status: dict[str, Any]) -> list[str]:
             f"(config={idena_p2p.get('configuredIpfsPort', 'unknown')}) "
             f"peers={latest_loop.get('total_peers', 'unknown')}"
         )
+        if "repoVersion" in idena_p2p:
+            idena_line += f" repo={idena_p2p['repoVersion']}"
     lines.append(idena_line)
     if disk.get("status") == "ok":
         lines.append(
@@ -658,6 +685,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idena-api-key-file", default=os.getenv("IDENA_API_KEY_FILE", str(DEFAULT_IDENA_API_KEY_FILE)))
     parser.add_argument("--idena-rpc-timeout", type=int, default=int(os.getenv("POHW_HEALTH_IDENA_RPC_TIMEOUT", "5")))
     parser.add_argument("--idena-min-peers", type=int, default=int(os.getenv("POHW_HEALTH_IDENA_MIN_PEERS", "3")))
+    parser.add_argument(
+        "--idena-ipfs-repo-version",
+        type=int,
+        default=int(os.getenv("POHW_HEALTH_IDENA_IPFS_REPO_VERSION", "0")),
+    )
     parser.add_argument("--mount-path", default=os.getenv("POHW_HEALTH_MOUNT_PATH", str(DEFAULT_MOUNT)))
     parser.add_argument("--skip-iostat", action="store_true")
     parser.add_argument("--iostat-timeout", type=int, default=int(os.getenv("POHW_HEALTH_IOSTAT_TIMEOUT", "5")))
