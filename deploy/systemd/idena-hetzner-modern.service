@@ -15,7 +15,7 @@ Group=idena-modern
 WorkingDirectory=/srv/idena
 Environment=HOME=/srv/idena
 Environment=XDG_CONFIG_HOME=/srv/idena/.config
-ExecStart=/usr/local/libexec/idena-node-compat-v5 --config=/etc/idena-modern/config.json --datadir=/srv/idena --fast=false
+ExecStart=/usr/local/libexec/idena-node-compat-v6 --config=/etc/idena-modern/config.json --datadir=/srv/idena --fast=false
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=5min
@@ -39,7 +39,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
-ReadOnlyPaths=/etc/idena-modern/config.json /usr/local/libexec/idena-node-compat-v5
+ReadOnlyPaths=/etc/idena-modern/config.json /usr/local/libexec/idena-node-compat-v6
 ReadWritePaths=/srv/idena
 InaccessiblePaths=/srv/idena-original-relay
 

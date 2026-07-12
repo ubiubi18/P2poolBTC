@@ -16,9 +16,9 @@ DEFAULT_LOCK = ROOT / "compatibility" / "stack-lock.json"
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_LOCK_BYTES = 1024 * 1024
 EXPECTED = {
-    "release_id": "idena-mainnet-legacy-compat-2026.07.12-rc2",
+    "release_id": "idena-mainnet-legacy-compat-2026.07.12-rc3",
     "legacy_commit": "938be81dbdeff85f888f4337060a8ebabb12e5b5",
-    "node_commit": "4947ddfd41391cca0e51dc2635aaa8a06827a890",
+    "node_commit": "aafb254786ac3c82308550a7a82642019f077d6b",
     "gossip_protocol": "/idena/gossip/1.1.0",
     "intermediateGenesisHeaderSha256": "27e696414b955714ba7ed4defe063794c8dcadef28a7e61dd9249b8623571b3c",
     "stateSnapshotSha256": "7cf6f8c334d76a3617cbd5ac3aa5a104a8d337cb6ceb8d6906c62bf7fab8d131",

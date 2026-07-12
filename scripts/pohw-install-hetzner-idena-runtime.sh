@@ -27,11 +27,11 @@ CONFIGS=(
   /etc/idena-relay/config.json
 )
 BINARIES=(
-  /usr/local/libexec/idena-node-compat-v5
+  /usr/local/libexec/idena-node-compat-v6
   /usr/local/libexec/idena-node-1.1.2
 )
 PROVENANCE_FILES=(
-  /usr/local/libexec/idena-node-compat-v5.source-commit
+  /usr/local/libexec/idena-node-compat-v6.source-commit
   /usr/local/libexec/idena-node-1.1.2.source-commit
 )
 
