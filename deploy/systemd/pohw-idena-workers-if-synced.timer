@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically start PoHW Idena workers after synchronization
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=true
+Unit=pohw-idena-workers-if-synced.service
+
+[Install]
+WantedBy=timers.target

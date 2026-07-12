@@ -1,0 +1,36 @@
+[Unit]
+Description=Start PoHW Idena workers after full node synchronization
+After=network-online.target idena.service
+ConditionPathExists=/var/lib/idena/api.key
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=POHW_IDENA_WORKERS_STATE_DIR=/var/lib/pohw/idena-workers
+Environment=IDENA_RPC_URL=http://127.0.0.1:9009
+Environment=IDENA_API_KEY_FILE=/var/lib/idena/api.key
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/local/libexec/pohw/pohw-idena-workers-if-synced.py
+TimeoutStartSec=2min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/usr/local/libexec/pohw /var/lib/idena
+ReadWritePaths=/var/lib/pohw/idena-workers

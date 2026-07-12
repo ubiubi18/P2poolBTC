@@ -29,6 +29,10 @@ class PrivilegedRuntimeTest(unittest.TestCase):
                 "/usr/bin/python3 "
                 "/usr/local/libexec/pohw/pohw-idena-priority-guard.py"
             ),
+            "pohw-idena-workers-if-synced.service": (
+                "ExecStart=/usr/bin/python3 "
+                "/usr/local/libexec/pohw/pohw-idena-workers-if-synced.py"
+            ),
         }
         for unit_name, exec_start in expected.items():
             with self.subTest(unit=unit_name):
@@ -43,6 +47,7 @@ class PrivilegedRuntimeTest(unittest.TestCase):
             REPO_ROOT / "scripts" / "pohw-network-watchdog.sh",
             REPO_ROOT / "scripts" / "pohw-bitcoin-pressure-guard.py",
             REPO_ROOT / "scripts" / "pohw-idena-priority-guard.py",
+            REPO_ROOT / "scripts" / "pohw-idena-workers-if-synced.py",
             REPO_ROOT / "pohw_idena_rpc" / "__init__.py",
             REPO_ROOT / "pohw_idena_rpc" / "idena_rpc_client_minimal.py",
         )
@@ -55,6 +60,7 @@ class PrivilegedRuntimeTest(unittest.TestCase):
             "pohw-network-watchdog.sh",
             "pohw-bitcoin-pressure-guard.py",
             "pohw-idena-priority-guard.py",
+            "pohw-idena-workers-if-synced.py",
             "idena_rpc_client_minimal.py",
         ):
             with self.subTest(helper=helper):
@@ -68,6 +74,7 @@ class PrivilegedRuntimeTest(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("POHW_INSTALL_ENABLE_IDENA_PRIORITY_GUARD", installer)
         self.assertIn("POHW_INSTALL_ENABLE_BITCOIN_PRESSURE_GUARD", installer)
+        self.assertIn("POHW_INSTALL_ENABLE_IDENA_WORKERS_WATCHER", installer)
         self.assertEqual(
             installer.count(
                 "systemctl enable --now pohw-network-watchdog.timer "
@@ -81,6 +88,15 @@ class PrivilegedRuntimeTest(unittest.TestCase):
         )
         wants_line = next(line for line in idena_unit.splitlines() if line.startswith("Wants="))
         self.assertNotIn("idena.service", wants_line)
+
+        workers_unit = (SYSTEMD_DIR / "pohw-idena-workers-if-synced.service").read_text(
+            encoding="utf-8"
+        )
+        workers_wants = next(
+            (line for line in workers_unit.splitlines() if line.startswith("Wants=")),
+            "",
+        )
+        self.assertNotIn("idena.service", workers_wants)
 
 
 if __name__ == "__main__":

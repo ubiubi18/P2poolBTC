@@ -678,7 +678,7 @@ sudo cp deploy/systemd/pohw-mining-adapter.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.path /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
-sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
 ```
@@ -686,16 +686,18 @@ sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer p
 Or reinstall only the self-recovery layer idempotently. It always enables the network watchdog, but installs the two resource guards without changing their enablement:
 
 ```sh
-sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
-Opt into either resource guard explicitly when its policy matches the current workload:
+Opt into either resource guard or the post-sync worker watcher explicitly when its policy matches the current workload:
 
 ```sh
 sudo POHW_INSTALL_ENABLE_IDENA_PRIORITY_GUARD=true \
-  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 sudo POHW_INSTALL_ENABLE_BITCOIN_PRESSURE_GUARD=true \
-  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo POHW_INSTALL_ENABLE_IDENA_WORKERS_WATCHER=true \
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
 The installer copies all root-run helpers to root-owned `/usr/local/libexec/pohw`, keeps their state under root-owned `/var/lib/pohw`, and enforces root ownership with mode `0600` on `/etc/pohw/p2pool.env`. Root services never execute scripts from the writable Git checkout.
@@ -832,10 +834,12 @@ If MagicDNS is disabled in Tailscale, replace `pibtc` with the Pi's `100.x.y.z` 
 For a vacation-safe command-line status that avoids keys, cookies, addresses, and blockchain data, use the health monitor summary:
 
 ```sh
-ssh <pi-ssh-host> '/usr/bin/python3 /mnt/ssd/p2pool/scripts/pohw-health-status.py --format summary'
+ssh <pi-ssh-host> '/usr/bin/python3 /opt/p2pool/scripts/pohw-health-status.py --format summary'
 ```
 
-The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
+The legacy SSD timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
+
+On the SD-card runtime, the sanitized health state is stored at `/var/lib/pohw-p2pool/health/status.json`. `pohw-idena-workers-if-synced.timer` is an explicit opt-in that checks `bcn_syncing` every two minutes and starts only `idena-reward-indexer.service` and `idena-session-recorder.service` after the local node reaches the reported head with a valid clock. It never starts `idena.service`, so an operator pause remains in effect. Its secret-free status is `/var/lib/pohw/idena-workers/status.json`.
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 
