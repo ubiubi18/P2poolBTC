@@ -81,6 +81,10 @@ class IdenaPublicStateScriptsTest(unittest.TestCase):
         self.assertLess(ready_send, sent)
         self.assertIn('atomic_text_file "$SOURCE_RECOVERY_FILE"', text)
 
+    def test_export_copy_does_not_require_chown_capability(self) -> None:
+        text = EXPORTER.read_text(encoding="utf-8")
+        self.assertEqual(3, text.count("cp -a --no-preserve=ownership --reflink=auto"))
+
     def test_importer_journals_each_destructive_boundary(self) -> None:
         text = IMPORTER.read_text(encoding="utf-8")
         normal_flow = text[text.index('clear_directory "$BACKUP" "rollback directory"', 10000) :]
