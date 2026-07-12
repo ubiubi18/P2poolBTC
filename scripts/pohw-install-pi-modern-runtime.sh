@@ -7,6 +7,33 @@ STATE_DIR="${POHW_STATE_DIR:-/var/lib/pohw-p2pool}"
 MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"
 IDENA_DATADIR="${IDENA_DATADIR:-/var/lib/idena}"
 
+UNITS=(
+  idena.service
+  idena-reward-indexer.service
+  idena-session-recorder.service
+  pohw-idena-snapshot.service
+  pohw-health-status.service
+)
+SOURCES=(
+  "$ROOT_DIR/deploy/systemd/idena-modern-sdcard.service"
+  "$ROOT_DIR/deploy/systemd/idena-reward-indexer-sdcard.service"
+  "$ROOT_DIR/deploy/systemd/idena-session-recorder-sdcard.service"
+  "$ROOT_DIR/deploy/systemd/pohw-idena-snapshot-sdcard.service"
+  "$ROOT_DIR/deploy/systemd/pohw-health-status-sdcard.service"
+)
+LEGACY_DROPINS=(
+  /etc/systemd/system/idena.service.d/20-restart.conf
+  /etc/systemd/system/idena.service.d/30-hardening.conf
+  /etc/systemd/system/idena.service.d/40-extra-hardening.conf
+  /etc/systemd/system/idena.service.d/50-sdcard.conf
+  /etc/systemd/system/idena.service.d/60-sdcard-modern.conf
+  /etc/systemd/system/idena-reward-indexer.service.d/60-sdcard-modern.conf
+  /etc/systemd/system/idena-session-recorder.service.d/60-sdcard-modern.conf
+  /etc/systemd/system/pohw-idena-snapshot.service.d/60-sdcard-modern.conf
+  /etc/systemd/system/pohw-health-status.service.d/50-bitcoin-wd.conf
+  /etc/systemd/system/pohw-health-status.service.d/60-sdcard-modern.conf
+)
+
 if [[ "$(id -u)" != "0" ]]; then
   echo "Run as root, for example: sudo $0" >&2
   exit 1
@@ -23,8 +50,11 @@ if [[ "$ROOT_DIR" != "$RUNTIME_DIR" ]]; then
   echo "Run this installer from the protected runtime checkout at $RUNTIME_DIR" >&2
   exit 1
 fi
-if [[ "$(stat -c %u "$RUNTIME_DIR")" != "0" ]]; then
-  echo "Runtime checkout must be root-owned: $RUNTIME_DIR" >&2
+unsafe_runtime_entry="$(
+  find "$RUNTIME_DIR" -xdev \( -type l -o ! -uid 0 -o -perm /022 \) -print -quit
+)"
+if [[ -n "$unsafe_runtime_entry" ]]; then
+  echo "Runtime checkout contains a symlink, non-root owner, or writable entry: $unsafe_runtime_entry" >&2
   exit 1
 fi
 if [[ ! -x "$MODERN_IDENA_BIN" ]]; then
@@ -45,58 +75,103 @@ install -d -m 0750 -o ubuntu -g ubuntu \
   "$STATE_DIR/snapshots"
 install -d -m 0700 -o root -g root "$STATE_DIR/runtime-backup"
 
-install_full_unit() {
-  local unit=$1 source=$2
-  local target="/etc/systemd/system/$unit"
-  local backup="$STATE_DIR/runtime-backup/$unit"
+TXN_DIR="$(mktemp -d /run/pohw-modern-runtime.XXXXXX)"
+STAGE_DIR="$TXN_DIR/stage"
+BACKUP_DIR="$TXN_DIR/backup"
+install -d -m 0700 -o root -g root "$STAGE_DIR" "$BACKUP_DIR"
 
-  if [[ -f "$target" && ! -f "$backup" ]]; then
-    install -m 0600 -o root -g root "$target" "$backup"
+MUTATED=0
+rollback_transaction() {
+  local rc=${1:-1}
+  trap - ERR INT TERM
+  if [[ "$MUTATED" == "1" ]]; then
+    for unit in "${UNITS[@]}"; do
+      rm -f "/etc/systemd/system/$unit"
+      rm -rf "/etc/systemd/system/$unit.d"
+      if [[ -e "$BACKUP_DIR/$unit" || -L "$BACKUP_DIR/$unit" ]]; then
+        cp -a "$BACKUP_DIR/$unit" "/etc/systemd/system/$unit"
+      fi
+      if [[ -d "$BACKUP_DIR/$unit.d" ]]; then
+        cp -a "$BACKUP_DIR/$unit.d" "/etc/systemd/system/$unit.d"
+      fi
+    done
+    systemctl daemon-reload || true
   fi
-  install -m 0644 -o root -g root "$source" "$target"
+  rm -rf "$TXN_DIR"
+  exit "$rc"
 }
+trap 'rollback_transaction $?' ERR
+trap 'rollback_transaction 130' INT
+trap 'rollback_transaction 143' TERM
 
-install_full_unit idena.service "$ROOT_DIR/deploy/systemd/idena-modern-sdcard.service"
-install_full_unit idena-reward-indexer.service "$ROOT_DIR/deploy/systemd/idena-reward-indexer-sdcard.service"
-install_full_unit idena-session-recorder.service "$ROOT_DIR/deploy/systemd/idena-session-recorder-sdcard.service"
-install_full_unit pohw-idena-snapshot.service "$ROOT_DIR/deploy/systemd/pohw-idena-snapshot-sdcard.service"
-install_full_unit pohw-health-status.service "$ROOT_DIR/deploy/systemd/pohw-health-status-sdcard.service"
+STAGED_UNITS=()
+for index in "${!UNITS[@]}"; do
+  unit="${UNITS[$index]}"
+  source="${SOURCES[$index]}"
+  if [[ ! -f "$source" || -L "$source" ]]; then
+    echo "Unit source is not a regular file: $source" >&2
+    false
+  fi
+  install -m 0644 -o root -g root "$source" "$STAGE_DIR/$unit"
+  STAGED_UNITS+=("$STAGE_DIR/$unit")
+done
+
+# Verify the complete replacement set before changing live systemd state.
+systemd-analyze verify "${STAGED_UNITS[@]}"
+
+for unit in "${UNITS[@]}"; do
+  target="/etc/systemd/system/$unit"
+  persistent_backup="$STATE_DIR/runtime-backup/$unit"
+  if [[ -e "$target" || -L "$target" ]]; then
+    cp -a "$target" "$BACKUP_DIR/$unit"
+    if [[ ! -f "$persistent_backup" ]]; then
+      install -m 0600 -o root -g root "$target" "$persistent_backup"
+    fi
+  fi
+  if [[ -d "$target.d" ]]; then
+    cp -a "$target.d" "$BACKUP_DIR/$unit.d"
+    if [[ ! -e "$persistent_backup.d" ]]; then
+      cp -a "$target.d" "$persistent_backup.d"
+    fi
+  fi
+done
+
+MUTATED=1
+for unit in "${UNITS[@]}"; do
+  install -m 0644 -o root -g root "$STAGE_DIR/$unit" "/etc/systemd/system/$unit"
+done
 
 # List-valued mount dependencies from legacy units cannot be reliably removed
 # by a later drop-in. Remove only known obsolete overrides after preserving
 # each original base unit above.
-rm -f \
-  /etc/systemd/system/idena.service.d/20-restart.conf \
-  /etc/systemd/system/idena.service.d/30-hardening.conf \
-  /etc/systemd/system/idena.service.d/40-extra-hardening.conf \
-  /etc/systemd/system/idena.service.d/50-sdcard.conf \
-  /etc/systemd/system/idena.service.d/60-sdcard-modern.conf \
-  /etc/systemd/system/idena-reward-indexer.service.d/60-sdcard-modern.conf \
-  /etc/systemd/system/idena-session-recorder.service.d/60-sdcard-modern.conf \
-  /etc/systemd/system/pohw-idena-snapshot.service.d/60-sdcard-modern.conf \
-  /etc/systemd/system/pohw-health-status.service.d/50-bitcoin-wd.conf \
-  /etc/systemd/system/pohw-health-status.service.d/60-sdcard-modern.conf
+rm -f "${LEGACY_DROPINS[@]}"
+
+for unit in "${UNITS[@]}"; do
+  unsafe_dropin="$(
+    find "/etc/systemd/system/$unit.d" -maxdepth 1 \
+      \( -type l -o \( -type f \( ! -uid 0 -o -perm /022 \) \) \) \
+      -print -quit 2>/dev/null || true
+  )"
+  if [[ -n "$unsafe_dropin" ]]; then
+    echo "$unit has an unsafe non-root, writable, or symlinked drop-in: $unsafe_dropin" >&2
+    false
+  fi
+done
 
 systemctl daemon-reload
-systemd-analyze verify \
-  idena.service \
-  idena-reward-indexer.service \
-  idena-session-recorder.service \
-  pohw-idena-snapshot.service \
-  pohw-health-status.service
+systemd-analyze verify "${UNITS[@]}"
 
-for unit in \
-  idena.service \
-  idena-reward-indexer.service \
-  idena-session-recorder.service \
-  pohw-idena-snapshot.service \
-  pohw-health-status.service; do
+for unit in "${UNITS[@]}"; do
   if systemctl show "$unit" --property=RequiresMountsFor --value \
     | grep -Eq 'mnt-(ssd|bitcoin)|home-ubuntu'; then
     echo "$unit still depends on a legacy runtime path." >&2
-    exit 1
+    false
   fi
 done
+
+MUTATED=0
+trap - ERR INT TERM
+rm -rf "$TXN_DIR"
 
 cat <<EOF
 Modern Pi runtime overrides installed.

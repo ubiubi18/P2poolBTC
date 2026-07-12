@@ -1,0 +1,47 @@
+[Unit]
+Description=Idena 1.1.2 outbound compatibility relay (Hetzner runtime)
+Documentation=https://www.idena.io/guide
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/srv/idena-original-relay
+ConditionPathIsDirectory=/srv/idena-original-relay
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=idena-relay
+Group=idena-relay
+WorkingDirectory=/srv/idena-original-relay
+Environment=HOME=/srv/idena-original-relay
+Environment=XDG_CONFIG_HOME=/srv/idena-original-relay/.config
+ExecStart=/usr/local/libexec/idena-node-1.1.2 --config=/etc/idena-relay/config.json --datadir=/srv/idena-original-relay --fast=false
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=5min
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+ReadOnlyPaths=/etc/idena-relay/config.json /usr/local/libexec/idena-node-1.1.2
+ReadWritePaths=/srv/idena-original-relay
+InaccessiblePaths=/srv/idena
+
+[Install]
+WantedBy=multi-user.target

@@ -58,9 +58,31 @@ If the stopped legacy node left an empty `repo.lock`, remove it only after both
 After migration, require version 18, run `ipfs repo verify`, and compare the
 IPFS identity and swarm key byte-for-byte with the backup.
 
-Existing Badger v1 blockstores remain readable but are deprecated by Kubo.
-Plan a separate tested export/import to flatfs before Badger support is removed;
-do not combine that datastore conversion with this node upgrade.
+New repositories created by the modern Idena fork use FlatFS. Existing Badger
+v1 repositories remain readable and are deliberately preserved in place so an
+upgrade cannot silently discard data. Kubo plans to remove Badger v1 later in
+2026 and states that no complete automated conversion is feasible. Its supported
+path creates a new FlatFS repository and transfers pinned DAGs only.
+
+Before considering that transfer, stop the node, make an offline copy, migrate
+the copy to repository version 18, and audit its pin coverage without printing
+CIDs or identities:
+
+```sh
+sudo -u IDENA_USER env \
+  IPFS_PATH=/offline/idena-ipfs-copy \
+  IPFS_BIN=/usr/local/libexec/ipfs-kubo-0.42.0 \
+  /opt/p2pool/scripts/pohw-audit-ipfs-datastore-migration.sh
+```
+
+An exit status of `2` means pinned-data export would omit local blocks. Do not
+convert or replace the live repository in that case. Keep the modern runtime on
+the existing Badger repository until Idena-specific retention semantics prove
+that those unpinned blocks are disposable or an upstream full-block migration
+path exists. Never use the archived `ipfs-ds-convert`; its maintainers warn that
+it targets repository version 11 and may damage data. See the
+[Kubo Badger removal plan](https://github.com/ipfs/kubo/issues/11186) and
+[archived converter warning](https://github.com/ipfs-inactive/ipfs-ds-convert).
 
 ## Binary And Services
 
@@ -89,6 +111,67 @@ service or timer. These units are replaced as complete units because
 reliably removed by later drop-ins. Previous units are retained under
 `/var/lib/pohw-p2pool/runtime-backup/`.
 
+### Hetzner Runtime Isolation
+
+The modern node and legacy compatibility relay must never share a Unix user,
+configuration directory, or writable data directory. Before installing the
+units, stop both services and stage the existing private configuration without
+printing it:
+
+```sh
+sudo systemctl stop idena-bootstrap.service idena-original-relay.service
+getent passwd idena-modern >/dev/null || sudo useradd --system --home-dir /srv/idena --shell /usr/sbin/nologin idena-modern
+getent passwd idena-relay >/dev/null || sudo useradd --system --home-dir /srv/idena-original-relay --shell /usr/sbin/nologin idena-relay
+sudo install -d -m 0750 -o root -g idena-modern /etc/idena-modern
+sudo install -d -m 0750 -o root -g idena-relay /etc/idena-relay
+sudo install -m 0640 -o root -g idena-modern MODERN_CONFIG.json /etc/idena-modern/config.json
+sudo install -m 0640 -o root -g idena-relay RELAY_CONFIG.json /etc/idena-relay/config.json
+sudo chown -R idena-modern:idena-modern /srv/idena
+sudo chown -R idena-relay:idena-relay /srv/idena-original-relay
+sudo chmod 0700 /srv/idena /srv/idena-original-relay
+```
+
+The two config files must bind JSON-RPC to loopback and point at their own data
+directories. `/srv/idena` must be a dedicated mount point with IPFS repository
+version 18. Install the checksum-verified binaries at the paths named in the
+unit files, deploy this repository as a root-owned checkout at `/opt/p2pool`,
+then run:
+
+```sh
+sudo /opt/p2pool/scripts/pohw-install-hetzner-idena-runtime.sh --restart
+```
+
+The installer validates ownership, modes, RPC binding, data-directory
+separation, binaries, IPFS version, and systemd units before mutation. It saves
+the prior unit files under `/var/lib/pohw-p2pool/hetzner-runtime-backup/` and
+restores both units if an active service does not restart. It never enables an
+inactive service. Enable a new deployment only after the acceptance checks:
+
+```sh
+sudo systemctl enable idena-bootstrap.service idena-original-relay.service
+```
+
+Treat the legacy relay as outbound-only. Do not publish its P2P port. Permit
+only the intended modern P2P port and SSH in the host firewall; keep both RPC
+ports private. Re-run the installer without `--restart` to validate and stage a
+new unit revision without interrupting either node.
+
+Keep RAID and NVMe monitoring active on the dedicated host:
+
+```sh
+sudo apt-get install -y mdadm nvme-cli smartmontools
+sudo systemctl enable --now smartmontools.service
+systemctl is-active mdmonitor.service smartmontools.service
+cat /proc/mdstat
+sudo nvme smart-log /dev/nvme0
+sudo nvme smart-log /dev/nvme1
+```
+
+Require zero NVMe critical warnings and media errors, and all mirrored arrays to
+show every member online. The large Bitcoin array may be RAID0 because its data
+is independently reproducible; identity, configuration, and sharechain state
+must remain on mirrored storage and in encrypted off-host backups.
+
 Expose only the configured Idena TCP P2P port when the node must accept public
 peers. Keep JSON-RPC on loopback and never publish port `9009`. A compatibility
 relay and a modern canary on the same host must use distinct P2P ports.
@@ -103,7 +186,9 @@ Acceptance requires: service active with zero restarts, RPC version equal to the
 intended build, IPFS repo version 18, original baseline blocks unchanged, at
 least one original-chain peer, increasing height, and no panic/fatal log entry.
 
-If any check fails, stop Idena, remove the modern systemd drop-in, restore the
-complete backup into `/var/lib/idena`, reload systemd, and start the unchanged
-legacy binary. Preserve the failed modern data separately for diagnosis; never
-merge its database files into the rollback copy.
+If any Pi check fails, stop Idena, restore the complete unit backup and data
+backup, reload systemd, and start the unchanged legacy binary. On Hetzner,
+restore the two service files and any saved drop-in directories from
+`/var/lib/pohw-p2pool/hetzner-runtime-backup/`, then reload systemd and restart
+the previously active services. Preserve failed modern data separately for
+diagnosis; never merge its database files into the rollback copy.

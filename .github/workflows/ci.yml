@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,6 +25,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit Rust dependencies
+        run: cargo audit
       - name: Test
         run: cargo test --workspace
 
@@ -40,6 +47,10 @@ jobs:
         run: python -m compileall -q scripts pohw_idena_rpc tests
       - name: Check shell syntax
         run: bash -n scripts/*.sh
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
 
   javascript:
     runs-on: ubuntu-latest
@@ -50,10 +61,14 @@ jobs:
           node-version: "22"
       - name: Install dashboard dependencies
         run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard install --frozen-lockfile
+      - name: Audit dashboard dependencies
+        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard audit --prod
       - name: Build dashboard
         run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
       - name: Install contract dependencies
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
+      - name: Audit contract dependencies
+        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry audit --prod
       - name: Test contract
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
 

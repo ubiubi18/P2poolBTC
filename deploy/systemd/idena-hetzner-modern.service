@@ -1,23 +1,26 @@
 [Unit]
-Description=Idena original-chain node (modern SD-card runtime)
+Description=Idena original-chain node (modern Hetzner runtime)
+Documentation=https://www.idena.io/guide
 Wants=network-online.target
 After=network-online.target
-RequiresMountsFor=/var/lib/idena
+RequiresMountsFor=/srv/idena
+ConditionPathIsMountPoint=/srv/idena
 StartLimitIntervalSec=5min
 StartLimitBurst=3
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/var/lib/idena
-Environment=HOME=/var/lib/idena
-Environment=XDG_CONFIG_HOME=/var/lib/idena/.config
-ExecStart=/usr/local/libexec/idena-node-modern --config=/var/lib/idena/config.json --datadir=/var/lib/idena --fast=false
+User=idena-modern
+Group=idena-modern
+WorkingDirectory=/srv/idena
+Environment=HOME=/srv/idena
+Environment=XDG_CONFIG_HOME=/srv/idena/.config
+ExecStart=/usr/local/libexec/idena-node-compat-v5 --config=/etc/idena-modern/config.json --datadir=/srv/idena --fast=false
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=5min
 LimitNOFILE=65536
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -36,9 +39,9 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
-UMask=0077
-ReadOnlyPaths=/usr/local/libexec/idena-node-modern /var/lib/idena/config.json
-ReadWritePaths=/var/lib/idena
+ReadOnlyPaths=/etc/idena-modern/config.json /usr/local/libexec/idena-node-compat-v5
+ReadWritePaths=/srv/idena
+InaccessiblePaths=/srv/idena-original-relay
 
 [Install]
 WantedBy=multi-user.target

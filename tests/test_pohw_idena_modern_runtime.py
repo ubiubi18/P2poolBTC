@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD = ROOT / "deploy" / "systemd"
 INSTALLER = ROOT / "scripts" / "pohw-install-pi-modern-runtime.sh"
+HETZNER_INSTALLER = ROOT / "scripts" / "pohw-install-hetzner-idena-runtime.sh"
+IPFS_MIGRATION_AUDIT = ROOT / "scripts" / "pohw-audit-ipfs-datastore-migration.sh"
 
 
 class IdenaModernRuntimeTest(unittest.TestCase):
@@ -49,6 +51,10 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         )
         self.assertIn("ProtectHome=true", idena_unit)
         self.assertNotIn("/home/", idena_unit)
+        self.assertIn("StartLimitIntervalSec=5min", idena_unit)
+        self.assertIn("StartLimitBurst=3", idena_unit)
+        self.assertIn("Restart=on-failure", idena_unit)
+        self.assertIn("RestartSec=30", idena_unit)
 
     def test_sdcard_health_unit_has_no_legacy_mount_dependency(self) -> None:
         unit = (SYSTEMD / "pohw-health-status-sdcard.service").read_text(
@@ -68,15 +74,14 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         self.assertIn('RUNTIME_DIR="${POHW_RUNTIME_DIR:-/opt/p2pool}"', installer)
         self.assertIn('MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"', installer)
         self.assertIn('"$(cat "$IDENA_DATADIR/ipfs/version")" != "18"', installer)
-        for unit in (
-            "idena.service",
-            "idena-reward-indexer.service",
-            "idena-session-recorder.service",
-            "pohw-idena-snapshot.service",
-            "pohw-health-status.service",
-        ):
-            self.assertIn(f"install_full_unit {unit}", installer)
+        self.assertIn('find "$RUNTIME_DIR" -xdev', installer)
+        self.assertIn("-type l -o ! -uid 0 -o -perm /022", installer)
+        self.assertIn("rollback_transaction", installer)
+        self.assertIn('systemd-analyze verify "${STAGED_UNITS[@]}"', installer)
+        self.assertIn('cp -a "$BACKUP_DIR/$unit.d"', installer)
+        self.assertIn('cp -a "$target.d" "$persistent_backup.d"', installer)
         self.assertIn("pohw-health-status.service.d/50-bitcoin-wd.conf", installer)
+        self.assertIn("has an unsafe non-root, writable, or symlinked drop-in", installer)
         self.assertIn("still depends on a legacy runtime path", installer)
         self.assertIn("systemd-analyze verify", installer)
         self.assertNotIn("\nsystemctl enable", installer)
@@ -85,6 +90,70 @@ class IdenaModernRuntimeTest(unittest.TestCase):
     def test_installer_parses(self) -> None:
         result = subprocess.run(
             ["bash", "-n", str(INSTALLER)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hetzner_units_use_separate_locked_down_identities(self) -> None:
+        expected = {
+            "idena-hetzner-modern.service": (
+                "idena-modern",
+                "/srv/idena",
+                "/etc/idena-modern/config.json",
+                "/srv/idena-original-relay",
+            ),
+            "idena-hetzner-legacy-relay.service": (
+                "idena-relay",
+                "/srv/idena-original-relay",
+                "/etc/idena-relay/config.json",
+                "/srv/idena",
+            ),
+        }
+
+        for name, (user, datadir, config, inaccessible) in expected.items():
+            with self.subTest(unit=name):
+                unit = (SYSTEMD / name).read_text(encoding="utf-8")
+                self.assertIn(f"User={user}", unit)
+                self.assertIn(f"Group={user}", unit)
+                self.assertIn(f"WorkingDirectory={datadir}", unit)
+                self.assertIn(f"--config={config}", unit)
+                self.assertIn(f"ReadWritePaths={datadir}", unit)
+                self.assertIn(f"InaccessiblePaths={inaccessible}", unit)
+                self.assertIn("StartLimitIntervalSec=5min", unit)
+                self.assertIn("StartLimitBurst=3", unit)
+                self.assertIn("Restart=on-failure", unit)
+                self.assertIn("RestartSec=30", unit)
+                self.assertIn("ProtectSystem=strict", unit)
+                self.assertIn("CapabilityBoundingSet=", unit)
+
+    def test_hetzner_installer_is_transactional_and_parses(self) -> None:
+        installer = HETZNER_INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("--restart", installer)
+        self.assertIn("rollback_transaction", installer)
+        self.assertIn('systemd-analyze verify "${STAGED_UNITS[@]}"', installer)
+        self.assertIn('runuser -u idena-modern -- test ! -x', installer)
+        self.assertIn('runuser -u idena-relay -- test ! -x', installer)
+        self.assertNotIn("\nsystemctl enable", installer)
+
+        result = subprocess.run(
+            ["bash", "-n", str(HETZNER_INSTALLER)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_ipfs_migration_audit_fails_closed_on_unpinned_blocks(self) -> None:
+        audit = IPFS_MIGRATION_AUDIT.read_text(encoding="utf-8")
+        self.assertIn("unpinned_local_blocks", audit)
+        self.assertIn("Pinned-data migration would omit local blocks", audit)
+        self.assertIn("exit 2", audit)
+        self.assertNotIn("pin ls --type=recursive --quiet\n", audit)
+
+        result = subprocess.run(
+            ["bash", "-n", str(IPFS_MIGRATION_AUDIT)],
             text=True,
             capture_output=True,
             check=False,
