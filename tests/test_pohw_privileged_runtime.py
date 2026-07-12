@@ -97,6 +97,9 @@ class PrivilegedRuntimeTest(unittest.TestCase):
             "",
         )
         self.assertNotIn("idena.service", workers_wants)
+        self.assertIn("CapabilityBoundingSet=CAP_DAC_READ_SEARCH", workers_unit)
+        self.assertIn("AmbientCapabilities=CAP_DAC_READ_SEARCH", workers_unit)
+        self.assertNotIn("CAP_DAC_OVERRIDE", workers_unit)
 
 
 if __name__ == "__main__":
