@@ -274,6 +274,7 @@ trap 'rm -f "$tmp_file"' EXIT
   write_env_line POHW_FORK_ACTIVATION_MANIFEST "$DATADIR/fork-activation.json"
   write_env_line POHW_FORK_POST_FORK_POW_LIMIT_BITS "207fffff"
   write_env_line POHW_FORK_TARGET_SPACING_SECONDS "600"
+  write_env_line POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS "1000000000000000"
   write_env_line POHW_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS "4096"
   write_env_line POHW_FORK_INHERITED_UTXO_SPENDING_ENABLED "false"
   write_env_line POHW_FORK_ALLOW_NON_MAINNET_RPC "false"

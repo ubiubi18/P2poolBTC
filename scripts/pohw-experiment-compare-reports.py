@@ -25,6 +25,10 @@ REGISTRATION_PROOF_FILE = "miner-registration-envelope.json"
 REGISTRATION_PROOF_MAX_AGE_SECONDS = "0"
 REGISTRATION_PROOF_VERIFY_TIMEOUT_SECONDS = 120
 FORK_ACTIVATION_HASH_TAG = b"POHW1_FORK_ACTIVATION"
+FORK_ACTIVATION_SCHEMA_VERSION = 2
+FORK_DIFFICULTY_ALGORITHM = "bootstrap_then_bitcoin_2016_v1"
+BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL = 2016
+U64_MAX = (1 << 64) - 1
 
 SECRET_NAME_RE = re.compile(
     r"(^|[./_-])("
@@ -46,6 +50,28 @@ SECRET_VALUE_PATTERNS = [
     ),
 ]
 HEX_32_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def compact_target(bits: int) -> int:
+    exponent = bits >> 24
+    mantissa = bits & 0xFFFFFF
+    if exponent > 32 or mantissa > 0x7FFFFF:
+        return 0
+    if exponent <= 3:
+        return mantissa >> (8 * (3 - exponent))
+    return mantissa << (8 * (exponent - 3))
+
+
+def compact_from_target(target: int) -> int:
+    size = (target.bit_length() + 7) // 8
+    if size <= 3:
+        compact = target << (8 * (3 - size))
+    else:
+        compact = target >> (8 * (size - 3))
+    if compact & 0x00800000:
+        compact >>= 8
+        size += 1
+    return compact | (size << 24)
 
 
 @dataclass
@@ -348,6 +374,9 @@ def validate_fork_activation_manifest(
             comparator = "positive" if positive else "non-negative"
             error(f"{key} must be {comparator}")
             return None
+        if value > U64_MAX:
+            error(f"{key} must fit in an unsigned 64-bit integer")
+            return None
         return value
 
     def require_hash(parent: dict[str, Any], key: str) -> str | None:
@@ -373,8 +402,8 @@ def validate_fork_activation_manifest(
         return timestamp.astimezone(timezone.utc)
 
     schema_version = require_u64(data, "schema_version", positive=True)
-    if schema_version is not None and schema_version != 1:
-        error("schema_version must be 1")
+    if schema_version is not None and schema_version != FORK_ACTIVATION_SCHEMA_VERSION:
+        error(f"schema_version must be {FORK_ACTIVATION_SCHEMA_VERSION}")
     activation_id = require_hash(data, "activation_id")
     config = require_dict(data, "config")
     fork_point = require_dict(data, "fork_point")
@@ -395,8 +424,32 @@ def validate_fork_activation_manifest(
             config,
             "inherited_utxo_spending_enabled",
         )
-        require_u64(config, "post_fork_pow_limit_bits", positive=True)
-        require_u64(config, "target_spacing_seconds", positive=True)
+        pow_limit_bits = require_u64(config, "post_fork_pow_limit_bits", positive=True)
+        if pow_limit_bits is not None:
+            if pow_limit_bits > 0xFFFFFFFF:
+                error("config.post_fork_pow_limit_bits must fit in 32 bits")
+            else:
+                pow_limit = compact_target(pow_limit_bits)
+                if pow_limit == 0:
+                    error("config.post_fork_pow_limit_bits decodes to a zero target")
+                elif compact_from_target(pow_limit) != pow_limit_bits:
+                    error("config.post_fork_pow_limit_bits must be canonical")
+        target_spacing = require_u64(config, "target_spacing_seconds", positive=True)
+        if target_spacing is not None:
+            if target_spacing < 4:
+                error("config.target_spacing_seconds must be at least 4")
+            elif target_spacing > U64_MAX // (BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL * 4):
+                error("config.target_spacing_seconds overflows the bounded Bitcoin retarget period")
+        difficulty_algorithm = require_str(config, "difficulty_algorithm")
+        if (
+            difficulty_algorithm is not None
+            and difficulty_algorithm != FORK_DIFFICULTY_ALGORITHM
+        ):
+            error(
+                "config.difficulty_algorithm must be "
+                f"{FORK_DIFFICULTY_ALGORITHM}"
+            )
+        require_u64(config, "bootstrap_handoff_hashrate_hps", positive=True)
         if (
             inherited_utxo_spending_enabled is not None
             and replay_protection_required is not None
@@ -472,6 +525,10 @@ def compute_fork_activation_id(data: dict[str, Any]) -> str:
             ],
             "post_fork_pow_limit_bits": config["post_fork_pow_limit_bits"],
             "target_spacing_seconds": config["target_spacing_seconds"],
+            "difficulty_algorithm": config["difficulty_algorithm"],
+            "bootstrap_handoff_hashrate_hps": config[
+                "bootstrap_handoff_hashrate_hps"
+            ],
         },
         "fork_point": {
             "inherited_tip_height": fork_point["inherited_tip_height"],

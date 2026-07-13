@@ -8,14 +8,15 @@ Bitcoin mainnet.
 ## Consensus Contract
 
 Every node loads the same canonical `fork-activation.json`. The activation ID
-commits to the inherited tip, first fork height, launch time, fixed post-fork
-target, target spacing, and inherited-UTXO policy.
+commits to the inherited tip, first fork height, launch time, post-fork PoW
+limit, target spacing, difficulty algorithm, bootstrap handoff hashrate, and
+inherited-UTXO policy.
 
 Experiment 0 deliberately has a small complete consensus surface:
 
 - the first fork block must extend the manifest's inherited Bitcoin tip;
 - every later block must extend a known fork block;
-- header `nBits` must equal the manifest's fixed post-fork PoW limit;
+- header `nBits` must equal the branch's deterministic next target;
 - SHA256d proof of work, merkle root, witness commitment, block weight, future
   time, and median-time-past are validated;
 - the coinbase must begin with the minimally encoded BIP34 height;
@@ -28,6 +29,27 @@ Experiment 0 deliberately has a small complete consensus surface:
 Coinbase-only consensus is intentional. It makes the current chain complete for
 the no-value payout-accounting experiment without pretending that this Rust
 prototype reimplements Bitcoin Core's script, UTXO, mempool, and policy engines.
+
+### Difficulty Schedule
+
+Manifest schema 2 uses `bootstrap_then_bitcoin_2016_v1`:
+
+1. The first fork block uses the manifest PoW limit.
+2. During bootstrap, every child target is the parent target multiplied by the
+   timestamp delta divided by target spacing. The delta is bounded to 1/4x..4x
+   spacing and the target is capped at the manifest PoW limit.
+3. When target work divided by target spacing reaches
+   `bootstrap_handoff_hashrate_hps`, that block becomes a Bitcoin retarget epoch
+   anchor. The default threshold is `1000000000000000` hashes/second (`1 PH/s`).
+4. Descendants then keep one target for 2016 blocks and apply Bitcoin Core's
+   bounded retarget formula at each epoch boundary. They cannot return to the
+   bootstrap DAA. A reorg that removes the handoff block also removes its state,
+   as with any other branch-local consensus transition.
+
+The 512-bit intermediate preserves Bitcoin's multiply-then-divide result even
+at the intentionally easy bootstrap target. Status reports `difficulty_phase`,
+the manifest threshold, estimated target-implied hashrate, and blocks remaining
+until the next Bitcoin retarget.
 
 ## Ports
 
@@ -56,6 +78,7 @@ Set these values in the protected node environment:
 ```sh
 POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE
 POHW_FORK_ACTIVATION_MANIFEST=/var/lib/pohw-p2pool/fork-activation.json
+POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS=1000000000000000
 POHW_FORK_CHAIN_DATADIR=/var/lib/pohw-p2pool/fork-chain
 POHW_FORK_RPC_BIND_ADDR=127.0.0.1:40408
 POHW_FORK_P2P_BIND_ADDR=<node-address>:40409
@@ -101,9 +124,10 @@ sudo install -m 0644 deploy/systemd/pohw-mining-adapter-server.conf \
   /etc/systemd/system/pohw-mining-adapter.service.d/server.conf
 ```
 
-Keep Stratum disabled until miner registration, snapshot fields, and a fixed
-target appropriate for the expected hashrate have been selected. The easy
-`207fffff` development target must not be exposed to untrusted public peers.
+Keep Stratum disabled until miner registration, snapshot fields, and the
+bootstrap handoff threshold have been selected. Keep the easy `207fffff`
+bootstrap phase on trusted, firewalled peers; do not expose it as a public
+permissionless network.
 
 Read status through the activation-bound loopback RPC:
 
@@ -184,6 +208,5 @@ log with a different activation manifest.
 
 - general post-fork transaction and script/UTXO consensus;
 - inherited UTXO replay protection and spending;
-- adaptive difficulty adjustment beyond the fixed Experiment 0 target;
 - production anti-eclipse, authenticated peer policy, and network diversity;
 - production FROST signer operation and real-value payouts.

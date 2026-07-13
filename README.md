@@ -45,7 +45,8 @@ Working prototype pieces:
 - deterministic `POHW1` commitment model,
 - reproducible Bitcoin-mainnet-history fork activation manifest generation,
 - complete Experiment 0 coinbase-only fork consensus with durable replay,
-  cumulative-work fork choice, peer synchronization, and a loopback control RPC,
+  cumulative-work fork choice, bootstrap difficulty, irreversible Bitcoin-2016
+  difficulty handoff, peer synchronization, and a loopback control RPC,
 - live fork templates and fork-only block submission wired into the Stratum adapter,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
@@ -66,7 +67,6 @@ Not done yet:
 
 - general post-fork transaction/script and UTXO consensus,
 - inherited UTXO replay protection and spending,
-- adaptive post-fork DAA beyond the fixed Experiment 0 target,
 - production P2Pool fork-choice and anti-eclipse logic,
 - long-running networked ChillDKG/FROST signer daemon,
 - complete idena-go reward extraction for every reward source,
@@ -188,7 +188,17 @@ cargo run -p p2pool-node -- prepare-fork-activation \
   --manifest-out ./fork-activation.json
 ```
 
-The command derives the first Bitcoin mainnet block at or after the launch timestamp, records the inherited parent tip, resets post-fork difficulty to testnet-safe `0x207fffff` by default, and emits an `activation_id`. Every participant should compare the same `fork-activation.json` before mining. Inherited-mainnet UTXO spending remains disabled unless `--inherited-utxo-spending-enabled` is explicitly set, and it should stay disabled until replay protection exists.
+The command derives the first Bitcoin mainnet block at or after the launch
+timestamp, records the inherited parent tip, starts at the no-value bootstrap
+PoW limit `0x207fffff`, and emits an `activation_id`. Bootstrap difficulty
+adjusts every block. At a difficulty-implied hashrate of `1 PH/s` by default,
+the chain irreversibly hands descendants to Bitcoin's normal 2016-block
+retarget mechanism. Set `--bootstrap-handoff-hashrate-hps` before activation to
+choose another threshold. The algorithm, threshold, and spacing are committed
+by the manifest, so every participant must use the identical
+`fork-activation.json`. Inherited-mainnet UTXO spending remains disabled unless
+`--inherited-utxo-spending-enabled` is explicitly set, and it should stay
+disabled until replay protection exists.
 
 Run the activation-bound Experiment 0 chain and inspect its live status:
 
@@ -198,10 +208,11 @@ target/release/p2pool-node fork-chain-status \
   --activation-manifest .pohw-p2pool/fork-activation.json
 ```
 
-The fork node validates fixed-target PoW, ancestry, merkle and witness roots,
-block weight, BIP34 height, subsidy, time, and coinbase-only transaction rules;
-persists every accepted branch; selects cumulative work; and synchronizes fork
-blocks with configured peers. See [Experiment 0 Fork-Chain Node](docs/fork-chain-node.md).
+The fork node validates scheduled-target PoW, ancestry, merkle and witness
+roots, block weight, BIP34 height, subsidy, time, and coinbase-only transaction
+rules; persists every accepted branch; selects cumulative work; and
+synchronizes fork blocks with configured peers. See
+[Experiment 0 Fork-Chain Node](docs/fork-chain-node.md).
 
 For Experiment 0, set `POHW_FORK_LAUNCH_TIMESTAMP_UTC` in `.pohw-experiment.env` and use the wrapper:
 

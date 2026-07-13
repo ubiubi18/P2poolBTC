@@ -17,7 +17,10 @@ use pohw_core::dkg_transport::{
     decrypt_round2_package, dkg_package_hash, encrypt_round2_package, DkgMessageBody,
     DkgMessageEnvelope, DkgPeerIdentity, DkgRound1BroadcastBody, DkgSessionId,
 };
-use pohw_core::fork::{select_fork_point, ForkActivationManifest, ForkConfig, MainnetBlockRef};
+use pohw_core::fork::{
+    select_fork_point, ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
+    MainnetBlockRef, DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS,
+};
 use pohw_core::gossip::GossipEnvelope;
 use pohw_core::payout::{ParticipantAccount, PayoutSchedule};
 use pohw_core::sharechain::{
@@ -116,6 +119,8 @@ enum Command {
         post_fork_pow_limit_bits: String,
         #[arg(long, default_value_t = 600)]
         target_spacing_seconds: u64,
+        #[arg(long, default_value_t = DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS)]
+        bootstrap_handoff_hashrate_hps: u64,
         #[arg(long)]
         inherited_utxo_spending_enabled: bool,
         #[arg(long, default_value_t = 4096)]
@@ -1437,6 +1442,7 @@ async fn main() -> Result<()> {
             launch_timestamp_utc,
             post_fork_pow_limit_bits,
             target_spacing_seconds,
+            bootstrap_handoff_hashrate_hps,
             inherited_utxo_spending_enabled,
             timestamp_search_window_blocks,
             allow_non_mainnet_rpc,
@@ -1466,6 +1472,7 @@ async fn main() -> Result<()> {
                     inherited_utxo_spending_enabled,
                     post_fork_pow_limit_bits,
                     target_spacing_seconds,
+                    bootstrap_handoff_hashrate_hps,
                     timestamp_search_window_blocks,
                     allow_non_mainnet_rpc,
                 },
@@ -5130,6 +5137,7 @@ struct PrepareForkActivationInput {
     inherited_utxo_spending_enabled: bool,
     post_fork_pow_limit_bits: u32,
     target_spacing_seconds: u64,
+    bootstrap_handoff_hashrate_hps: u64,
     timestamp_search_window_blocks: u64,
     allow_non_mainnet_rpc: bool,
 }
@@ -5139,9 +5147,12 @@ async fn prepare_fork_activation(
     input: PrepareForkActivationInput,
 ) -> Result<ForkActivationManifest> {
     let chain_name = validate_fork_chain_name(&input.chain_name)?;
-    if input.target_spacing_seconds == 0 {
+    if input.target_spacing_seconds < 4 {
+        return Err(anyhow!("--target-spacing-seconds must be at least 4"));
+    }
+    if input.bootstrap_handoff_hashrate_hps == 0 {
         return Err(anyhow!(
-            "--target-spacing-seconds must be greater than zero"
+            "--bootstrap-handoff-hashrate-hps must be greater than zero"
         ));
     }
     if input.timestamp_search_window_blocks == 0
@@ -5190,6 +5201,8 @@ async fn prepare_fork_activation(
         inherited_utxo_spending_enabled: input.inherited_utxo_spending_enabled,
         post_fork_pow_limit_bits: input.post_fork_pow_limit_bits,
         target_spacing_seconds: input.target_spacing_seconds,
+        difficulty_algorithm: ForkDifficultyAlgorithm::BootstrapThenBitcoin2016V1,
+        bootstrap_handoff_hashrate_hps: input.bootstrap_handoff_hashrate_hps,
     };
 
     ForkActivationManifest::new(config, fork_point, launch_block).map_err(Into::into)

@@ -3,8 +3,24 @@ use bitcoin::pow::{CompactTarget, Target};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const FORK_ACTIVATION_SCHEMA_VERSION: u16 = 1;
+pub const FORK_ACTIVATION_SCHEMA_VERSION: u16 = 2;
+pub const BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 2_016;
+pub const DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS: u64 = 1_000_000_000_000_000;
 const FORK_ACTIVATION_HASH_TAG: &[u8] = b"POHW1_FORK_ACTIVATION";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkDifficultyAlgorithm {
+    #[serde(rename = "bootstrap_then_bitcoin_2016_v1")]
+    BootstrapThenBitcoin2016V1,
+}
+
+impl ForkDifficultyAlgorithm {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BootstrapThenBitcoin2016V1 => "bootstrap_then_bitcoin_2016_v1",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkConfig {
@@ -13,6 +29,8 @@ pub struct ForkConfig {
     pub inherited_utxo_spending_enabled: bool,
     pub post_fork_pow_limit_bits: u32,
     pub target_spacing_seconds: u64,
+    pub difficulty_algorithm: ForkDifficultyAlgorithm,
+    pub bootstrap_handoff_hashrate_hps: u64,
 }
 
 impl ForkConfig {
@@ -26,11 +44,18 @@ impl ForkConfig {
             inherited_utxo_spending_enabled: false,
             post_fork_pow_limit_bits: 0x207f_ffff,
             target_spacing_seconds: 600,
+            difficulty_algorithm: ForkDifficultyAlgorithm::BootstrapThenBitcoin2016V1,
+            bootstrap_handoff_hashrate_hps: DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS,
         }
     }
 
     pub fn post_fork_pow_limit_bits_hex(&self) -> String {
         format!("{:08x}", self.post_fork_pow_limit_bits)
+    }
+
+    pub fn bitcoin_retarget_timespan_seconds(&self) -> Option<u64> {
+        self.target_spacing_seconds
+            .checked_mul(BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL)
     }
 }
 
@@ -97,14 +122,29 @@ impl ForkActivationManifest {
             return Err(ForkError::LaunchBlockBeforeLaunchTimestamp);
         }
         let chain_name = validate_chain_name(&config.chain_name)?;
-        if config.target_spacing_seconds == 0 {
+        if config.target_spacing_seconds < 4 {
             return Err(ForkError::InvalidTargetSpacing);
         }
-        if Target::from_compact(CompactTarget::from_consensus(
-            config.post_fork_pow_limit_bits,
-        )) == Target::ZERO
+        if config
+            .bitcoin_retarget_timespan_seconds()
+            .and_then(|timespan| timespan.checked_mul(4))
+            .is_none()
         {
+            return Err(ForkError::BitcoinRetargetTimespanOverflow);
+        }
+        if config.bootstrap_handoff_hashrate_hps == 0 {
+            return Err(ForkError::InvalidBootstrapHandoffHashrate);
+        }
+        let pow_limit_bits = CompactTarget::from_consensus(config.post_fork_pow_limit_bits);
+        if config.post_fork_pow_limit_bits >> 24 > 32 {
             return Err(ForkError::InvalidPostForkPowLimitBits);
+        }
+        let pow_limit = Target::from_compact(pow_limit_bits);
+        if pow_limit == Target::ZERO {
+            return Err(ForkError::InvalidPostForkPowLimitBits);
+        }
+        if pow_limit.to_compact_lossy() != pow_limit_bits {
+            return Err(ForkError::NonCanonicalPostForkPowLimitBits);
         }
 
         let config = ForkConfig {
@@ -113,6 +153,8 @@ impl ForkActivationManifest {
             inherited_utxo_spending_enabled: config.inherited_utxo_spending_enabled,
             post_fork_pow_limit_bits: config.post_fork_pow_limit_bits,
             target_spacing_seconds: config.target_spacing_seconds,
+            difficulty_algorithm: config.difficulty_algorithm,
+            bootstrap_handoff_hashrate_hps: config.bootstrap_handoff_hashrate_hps,
         };
         let fork_point = ForkPoint {
             inherited_tip_height: fork_point.inherited_tip_height,
@@ -185,10 +227,16 @@ pub enum ForkError {
     LaunchBlockBeforeLaunchTimestamp,
     #[error("chain name must be 1-64 ASCII letters, digits, '.', '_' or '-'")]
     InvalidChainName,
-    #[error("target spacing seconds must be greater than zero")]
+    #[error("target spacing seconds must be at least 4 so the 1/4x retarget bound is nonzero")]
     InvalidTargetSpacing,
+    #[error("target spacing is too large for a 2016-block Bitcoin retarget period")]
+    BitcoinRetargetTimespanOverflow,
+    #[error("bootstrap handoff hashrate must be greater than zero")]
+    InvalidBootstrapHandoffHashrate,
     #[error("post-fork compact PoW limit bits decode to an impossible zero target")]
     InvalidPostForkPowLimitBits,
+    #[error("post-fork compact PoW limit bits are not canonically encoded")]
+    NonCanonicalPostForkPowLimitBits,
     #[error("fork activation manifest fields or activation_id are not canonical")]
     ManifestIntegrityMismatch,
     #[error("{field} must be 32 bytes encoded as 64 hex characters")]
@@ -326,7 +374,16 @@ mod tests {
             ForkActivationManifest::new(config, fork_point, launch_block).expect("manifest");
 
         assert!(manifest.replay_protection_required);
+        assert_eq!(manifest.schema_version, 2);
         assert_eq!(manifest.config.post_fork_pow_limit_bits_hex(), "207fffff");
+        assert_eq!(
+            manifest.config.difficulty_algorithm,
+            ForkDifficultyAlgorithm::BootstrapThenBitcoin2016V1
+        );
+        assert_eq!(
+            manifest.config.bootstrap_handoff_hashrate_hps,
+            DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS
+        );
         assert_eq!(manifest.fork_point.inherited_tip_hash, "aa".repeat(32));
         assert_eq!(manifest.launch_block.block_hash, "bb".repeat(32));
     }
@@ -358,12 +415,22 @@ mod tests {
         let changed =
             ForkActivationManifest::new(changed, fork_point, launch_block).expect("manifest");
 
+        let mut threshold_changed_config = first.config.clone();
+        threshold_changed_config.bootstrap_handoff_hashrate_hps += 1;
+        let threshold_changed = ForkActivationManifest::new(
+            threshold_changed_config,
+            first.fork_point.clone(),
+            first.launch_block.clone(),
+        )
+        .expect("manifest");
+
         assert_eq!(first.activation_id, second.activation_id);
         assert_eq!(
             first.activation_id,
-            "69242d8f37e5f9e3995b3f7ec92b764471cfad2abb354251dec4e0bd7bcaf937"
+            "eaa1046d1f672b49edcb0fe31ae17545da98ea73405d65a81ac668bd6684a841"
         );
         assert_ne!(first.activation_id, changed.activation_id);
+        assert_ne!(first.activation_id, threshold_changed.activation_id);
     }
 
     #[test]
@@ -433,6 +500,42 @@ mod tests {
         );
 
         let mut bad_config = valid_config.clone();
+        bad_config.target_spacing_seconds = 3;
+        assert_eq!(
+            ForkActivationManifest::new(
+                bad_config,
+                valid_fork_point.clone(),
+                valid_launch_block.clone()
+            )
+            .unwrap_err(),
+            ForkError::InvalidTargetSpacing
+        );
+
+        let mut bad_config = valid_config.clone();
+        bad_config.target_spacing_seconds = u64::MAX;
+        assert_eq!(
+            ForkActivationManifest::new(
+                bad_config,
+                valid_fork_point.clone(),
+                valid_launch_block.clone()
+            )
+            .unwrap_err(),
+            ForkError::BitcoinRetargetTimespanOverflow
+        );
+
+        let mut bad_config = valid_config.clone();
+        bad_config.bootstrap_handoff_hashrate_hps = 0;
+        assert_eq!(
+            ForkActivationManifest::new(
+                bad_config,
+                valid_fork_point.clone(),
+                valid_launch_block.clone()
+            )
+            .unwrap_err(),
+            ForkError::InvalidBootstrapHandoffHashrate
+        );
+
+        let mut bad_config = valid_config.clone();
         bad_config.post_fork_pow_limit_bits = 0;
         assert_eq!(
             ForkActivationManifest::new(
@@ -442,6 +545,30 @@ mod tests {
             )
             .unwrap_err(),
             ForkError::InvalidPostForkPowLimitBits
+        );
+
+        let mut bad_config = valid_config.clone();
+        bad_config.post_fork_pow_limit_bits = 0xff00_0001;
+        assert_eq!(
+            ForkActivationManifest::new(
+                bad_config,
+                valid_fork_point.clone(),
+                valid_launch_block.clone()
+            )
+            .unwrap_err(),
+            ForkError::InvalidPostForkPowLimitBits
+        );
+
+        let mut bad_config = valid_config.clone();
+        bad_config.post_fork_pow_limit_bits = 0x0200_0100;
+        assert_eq!(
+            ForkActivationManifest::new(
+                bad_config,
+                valid_fork_point.clone(),
+                valid_launch_block.clone()
+            )
+            .unwrap_err(),
+            ForkError::NonCanonicalPostForkPowLimitBits
         );
 
         let mut bad_fork_point = valid_fork_point.clone();

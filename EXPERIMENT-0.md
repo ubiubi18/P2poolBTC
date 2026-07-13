@@ -136,7 +136,14 @@ The group must agree on one `POHW_FORK_LAUNCH_TIMESTAMP_UTC` before any fork min
 scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
 ```
 
-The manifest records the first Bitcoin mainnet block at or after the launch timestamp, the inherited parent tip, post-fork test difficulty parameters, and an `activation_id`. Share the manifest or at least the `activation_id`, `first_fork_height`, and `inherited_tip_hash` out of band. Do not set `POHW_FORK_INHERITED_UTXO_SPENDING_ENABLED=true` for Experiment 0.
+The manifest records the first Bitcoin mainnet block at or after the launch
+timestamp, the inherited parent tip, bootstrap PoW limit, per-block bootstrap
+DAA, hashrate handoff threshold, Bitcoin-2016 retarget phase, and an
+`activation_id`. The default handoff is `1 PH/s`; set
+`POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS` before creating the shared manifest
+to choose another value. Share the complete manifest and compare its
+`activation_id` out of band. Do not set
+`POHW_FORK_INHERITED_UTXO_SPENDING_ENABLED=true` for Experiment 0.
 
 ## Preflight
 

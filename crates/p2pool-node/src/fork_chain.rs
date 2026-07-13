@@ -7,8 +7,12 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::pow::{CompactTarget, Target, Work};
 use bitcoin::{Block, BlockHash, Weight};
 use chrono::Utc;
+use crypto_bigint::{Encoding, U256 as CryptoU256, U512 as CryptoU512};
 use fs2::FileExt;
-use pohw_core::fork::ForkActivationManifest;
+use pohw_core::fork::{
+    ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
+    BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL,
+};
 use pohw_core::sharechain::BitcoinWorkTemplate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,7 +42,7 @@ const MAX_CONNECTIONS: usize = 128;
 const MAX_CONNECTIONS_PER_IP: usize = 16;
 const MAX_PEERS: usize = 64;
 const DEFAULT_NETWORK_TIMEOUT_SECONDS: u64 = 15;
-const FORK_PROTOCOL_VERSION: u16 = 1;
+const FORK_PROTOCOL_VERSION: u16 = 2;
 const FORK_BLOCK_VERSION: i32 = 0x2000_0000;
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,11 @@ pub(crate) struct ForkChainStatus {
     pub active_fork_block_count: usize,
     pub post_fork_pow_limit_bits: String,
     pub target_spacing_seconds: u64,
+    pub difficulty_algorithm: String,
+    pub difficulty_phase: String,
+    pub bootstrap_handoff_hashrate_hps: u64,
+    pub estimated_hashrate_hps: String,
+    pub blocks_until_bitcoin_retarget: Option<u64>,
     pub transaction_consensus: String,
 }
 
@@ -101,6 +110,22 @@ struct BlockNode {
     block_hex: String,
     height: u64,
     cumulative_work: Work,
+    difficulty_phase: DifficultyPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DifficultyPhase {
+    Bootstrap,
+    Bitcoin {
+        epoch_start_height: u64,
+        epoch_start_time: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NextDifficulty {
+    bits: CompactTarget,
+    phase: DifficultyPhase,
 }
 
 pub(crate) struct ForkChainStore {
@@ -151,18 +176,35 @@ impl ForkChainStore {
     }
 
     pub(crate) fn status(&self) -> ForkChainStatus {
-        let (tip_height, tip_hash, cumulative_work) = match self.active_tip {
+        let (tip_height, tip_hash, cumulative_work, phase, current_bits) = match self.active_tip {
             Some(hash) => {
                 let node = self
                     .blocks
                     .get(&hash)
                     .expect("active fork tip must exist in block map");
-                (node.height, hash.to_string(), node.cumulative_work)
+                (
+                    node.height,
+                    hash.to_string(),
+                    node.cumulative_work,
+                    node.difficulty_phase,
+                    node.block.header.bits,
+                )
             }
             None => (
                 self.manifest.fork_point.inherited_tip_height,
                 self.inherited_tip_hash.to_string(),
                 Work::from_be_bytes([0u8; 32]),
+                DifficultyPhase::Bootstrap,
+                CompactTarget::from_consensus(self.manifest.config.post_fork_pow_limit_bits),
+            ),
+        };
+        let blocks_until_bitcoin_retarget = match phase {
+            DifficultyPhase::Bootstrap => None,
+            DifficultyPhase::Bitcoin {
+                epoch_start_height, ..
+            } => Some(
+                BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL
+                    .saturating_sub(tip_height.saturating_sub(epoch_start_height)),
             ),
         };
         ForkChainStatus {
@@ -178,6 +220,20 @@ impl ForkChainStore {
             active_fork_block_count: self.active_by_height.len(),
             post_fork_pow_limit_bits: self.manifest.config.post_fork_pow_limit_bits_hex(),
             target_spacing_seconds: self.manifest.config.target_spacing_seconds,
+            difficulty_algorithm: self
+                .manifest
+                .config
+                .difficulty_algorithm
+                .as_str()
+                .to_string(),
+            difficulty_phase: phase.as_str().to_string(),
+            bootstrap_handoff_hashrate_hps: self.manifest.config.bootstrap_handoff_hashrate_hps,
+            estimated_hashrate_hps: estimated_hashrate_hps(
+                Target::from_compact(current_bits),
+                self.manifest.config.target_spacing_seconds,
+            )
+            .to_string(),
+            blocks_until_bitcoin_retarget,
             transaction_consensus: "coinbase-only; inherited and post-fork spends disabled"
                 .to_string(),
         }
@@ -195,11 +251,12 @@ impl ForkChainStore {
             .context("fork-chain median-time-past overflow")?;
         let curtime = now_unix.max(minimum_time);
         let curtime = u32::try_from(curtime).context("fork-chain template time exceeds u32")?;
+        let next_difficulty = self.next_difficulty(self.active_tip, height, curtime)?;
         Ok(BitcoinMiningJobTemplate {
             version: FORK_BLOCK_VERSION,
             previous_block_hash: status.tip_hash,
             curtime,
-            bits: self.manifest.config.post_fork_pow_limit_bits_hex(),
+            bits: format!("{:08x}", next_difficulty.bits.to_consensus()),
             height,
             coinbase_value_sats: block_subsidy_sats(height),
             transaction_hashes: Vec::new(),
@@ -274,10 +331,6 @@ impl ForkChainStore {
         if header.version.to_consensus() != FORK_BLOCK_VERSION {
             bail!("fork work template has an unsupported block version");
         }
-        let required_bits = self.manifest.config.post_fork_pow_limit_bits;
-        if header.bits.to_consensus() != required_bits {
-            bail!("fork work template difficulty bits do not match activation");
-        }
         let previous = header.prev_blockhash;
         let (height, parent) = if previous == self.inherited_tip_hash {
             (self.manifest.fork_point.first_fork_height, None)
@@ -296,6 +349,10 @@ impl ForkChainStore {
                 Some(previous),
             )
         };
+        let required_bits = self.next_difficulty(parent, height, header.time)?.bits;
+        if header.bits != required_bits {
+            bail!("fork work template difficulty bits do not match consensus schedule");
+        }
         let median_time_past = self.median_time_past(parent)?;
         if u64::from(header.time) <= median_time_past {
             bail!("fork work template time is not greater than median-time-past");
@@ -312,7 +369,7 @@ impl ForkChainStore {
             previous_block_hash: previous.to_string(),
             height,
             header_time: header.time,
-            bits: format!("{required_bits:08x}"),
+            bits: format!("{:08x}", required_bits.to_consensus()),
         })
     }
 
@@ -377,14 +434,6 @@ impl ForkChainStore {
         if block.header.version.to_consensus() != FORK_BLOCK_VERSION {
             bail!("fork block has an unsupported version");
         }
-        let required_bits =
-            CompactTarget::from_consensus(self.manifest.config.post_fork_pow_limit_bits);
-        let required_target = Target::from_compact(required_bits);
-        block
-            .header
-            .validate_pow(required_target)
-            .context("fork block has invalid difficulty bits or proof of work")?;
-
         let previous_hash = block.header.prev_blockhash;
         let (height, parent_work, parent_tip) = if previous_hash == self.inherited_tip_hash {
             (
@@ -406,6 +455,12 @@ impl ForkChainStore {
                 Some(previous_hash),
             )
         };
+        let next_difficulty = self.next_difficulty(parent_tip, height, block.header.time)?;
+        let required_target = Target::from_compact(next_difficulty.bits);
+        block
+            .header
+            .validate_pow(required_target)
+            .context("fork block has invalid difficulty bits or proof of work")?;
         let median_time_past = self.median_time_past(parent_tip)?;
         if u64::from(block.header.time) <= median_time_past {
             bail!(
@@ -429,7 +484,93 @@ impl ForkChainStore {
             block_hex,
             height,
             cumulative_work,
+            difficulty_phase: next_difficulty.phase,
         })
+    }
+
+    fn next_difficulty(
+        &self,
+        parent_hash: Option<BlockHash>,
+        child_height: u64,
+        child_time: u32,
+    ) -> Result<NextDifficulty> {
+        let pow_limit_bits =
+            CompactTarget::from_consensus(self.manifest.config.post_fork_pow_limit_bits);
+        let Some(parent_hash) = parent_hash else {
+            return Ok(NextDifficulty {
+                bits: pow_limit_bits,
+                phase: self.phase_after_bootstrap_block(pow_limit_bits, child_height, child_time),
+            });
+        };
+        let parent = self
+            .blocks
+            .get(&parent_hash)
+            .ok_or_else(|| anyhow!("fork-chain difficulty parent is unknown"))?;
+        match parent.difficulty_phase {
+            DifficultyPhase::Bootstrap => {
+                let elapsed = child_time.saturating_sub(parent.block.header.time);
+                let bits = next_work_required(
+                    parent.block.header.bits,
+                    u64::from(elapsed),
+                    self.manifest.config.target_spacing_seconds,
+                    &self.manifest.config,
+                )?;
+                Ok(NextDifficulty {
+                    bits,
+                    phase: self.phase_after_bootstrap_block(bits, child_height, child_time),
+                })
+            }
+            phase @ DifficultyPhase::Bitcoin {
+                epoch_start_height,
+                epoch_start_time,
+            } => {
+                let epoch_offset = child_height
+                    .checked_sub(epoch_start_height)
+                    .context("fork-chain Bitcoin retarget height underflow")?;
+                if epoch_offset < BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL {
+                    return Ok(NextDifficulty {
+                        bits: parent.block.header.bits,
+                        phase,
+                    });
+                }
+                if epoch_offset != BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL {
+                    bail!("fork-chain Bitcoin retarget state skipped an epoch boundary");
+                }
+                let actual_timespan = parent.block.header.time.saturating_sub(epoch_start_time);
+                let bits = next_work_required(
+                    parent.block.header.bits,
+                    u64::from(actual_timespan),
+                    self.manifest
+                        .config
+                        .bitcoin_retarget_timespan_seconds()
+                        .context("validated fork config lost its Bitcoin retarget timespan")?,
+                    &self.manifest.config,
+                )?;
+                Ok(NextDifficulty {
+                    bits,
+                    phase: DifficultyPhase::Bitcoin {
+                        epoch_start_height: child_height,
+                        epoch_start_time: child_time,
+                    },
+                })
+            }
+        }
+    }
+
+    fn phase_after_bootstrap_block(
+        &self,
+        bits: CompactTarget,
+        height: u64,
+        time: u32,
+    ) -> DifficultyPhase {
+        if Target::from_compact(bits).to_work() >= bootstrap_handoff_work(&self.manifest.config) {
+            DifficultyPhase::Bitcoin {
+                epoch_start_height: height,
+                epoch_start_time: time,
+            }
+        } else {
+            DifficultyPhase::Bootstrap
+        }
     }
 
     fn median_time_past(&self, parent: Option<BlockHash>) -> Result<u64> {
@@ -525,6 +666,85 @@ impl ForkChainStore {
     fn block_log_path(&self) -> PathBuf {
         self.datadir.join("fork-blocks.ndjson")
     }
+}
+
+impl DifficultyPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap",
+            Self::Bitcoin { .. } => "bitcoin_2016",
+        }
+    }
+}
+
+fn next_work_required(
+    previous_bits: CompactTarget,
+    actual_timespan: u64,
+    target_timespan: u64,
+    config: &ForkConfig,
+) -> Result<CompactTarget> {
+    match config.difficulty_algorithm {
+        ForkDifficultyAlgorithm::BootstrapThenBitcoin2016V1 => next_work_required_v1(
+            previous_bits,
+            actual_timespan,
+            target_timespan,
+            config.post_fork_pow_limit_bits,
+        ),
+    }
+}
+
+fn next_work_required_v1(
+    previous_bits: CompactTarget,
+    actual_timespan: u64,
+    target_timespan: u64,
+    pow_limit_bits: u32,
+) -> Result<CompactTarget> {
+    let min_timespan = target_timespan >> 2;
+    let max_timespan = target_timespan
+        .checked_mul(4)
+        .context("fork difficulty maximum retarget timespan overflow")?;
+    let actual_timespan = actual_timespan.clamp(min_timespan, max_timespan);
+
+    // The bootstrap target can be close to 2^255. Bitcoin Core's formula is
+    // target * timespan / target_timespan, so use a wide intermediate here.
+    let previous = CryptoU256::from_be_slice(&Target::from_compact(previous_bits).to_be_bytes());
+    let previous_wide: CryptoU512 = previous.resize();
+    let scaled = previous_wide.wrapping_mul(&CryptoU512::from_u64(actual_timespan));
+    let adjusted = scaled.wrapping_div(&CryptoU512::from_u64(target_timespan));
+
+    let pow_limit = CryptoU256::from_be_slice(
+        &Target::from_compact(CompactTarget::from_consensus(pow_limit_bits)).to_be_bytes(),
+    );
+    let pow_limit_wide: CryptoU512 = pow_limit.resize();
+    let bounded = if adjusted > pow_limit_wide {
+        pow_limit_wide
+    } else {
+        adjusted
+    };
+    let bounded: CryptoU256 = bounded.resize();
+    Ok(Target::from_be_bytes(bounded.to_be_bytes()).to_compact_lossy())
+}
+
+fn bootstrap_handoff_work(config: &ForkConfig) -> Work {
+    let expected_hashes = u128::from(config.bootstrap_handoff_hashrate_hps)
+        * u128::from(config.target_spacing_seconds);
+    let mut bytes = [0u8; 32];
+    bytes[16..].copy_from_slice(&expected_hashes.to_be_bytes());
+    Work::from_be_bytes(bytes)
+}
+
+fn estimated_hashrate_hps(target: Target, target_spacing_seconds: u64) -> u128 {
+    let bytes = target.to_work().to_be_bytes();
+    let expected_hashes = if bytes[..16].iter().any(|byte| *byte != 0) {
+        u128::MAX
+    } else {
+        u128::from_be_bytes(
+            bytes[16..]
+                .try_into()
+                .expect("a Work value always has a 16-byte low half"),
+        )
+    };
+    expected_hashes / u128::from(target_spacing_seconds)
 }
 
 #[derive(Debug, Clone)]
@@ -1361,8 +1581,13 @@ mod tests {
 
     fn manifest() -> ForkActivationManifest {
         let launch = Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap();
+        manifest_with_config(ForkConfig::no_value_testnet("pohw-experiment-0", launch))
+    }
+
+    fn manifest_with_config(config: ForkConfig) -> ForkActivationManifest {
+        let launch = config.launch_timestamp_utc;
         ForkActivationManifest::new(
-            ForkConfig::no_value_testnet("pohw-experiment-0", launch),
+            config,
             ForkPoint {
                 inherited_tip_height: 957_774,
                 inherited_tip_hash: "11".repeat(32),
@@ -1379,8 +1604,12 @@ mod tests {
     }
 
     fn write_manifest(dir: &Path) -> PathBuf {
+        write_manifest_value(dir, &manifest())
+    }
+
+    fn write_manifest_value(dir: &Path, manifest: &ForkActivationManifest) -> PathBuf {
         let path = dir.join("fork-activation.json");
-        fs::write(&path, serde_json::to_vec_pretty(&manifest()).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
         path
     }
 
@@ -1406,6 +1635,16 @@ mod tests {
     }
 
     fn mine_block(previous: BlockHash, height: u64, time: u32, amount: u64) -> Block {
+        mine_block_with_bits(previous, height, time, amount, 0x207f_ffff)
+    }
+
+    fn mine_block_with_bits(
+        previous: BlockHash,
+        height: u64,
+        time: u32,
+        amount: u64,
+        bits: u32,
+    ) -> Block {
         let tx = coinbase(height, amount);
         let mut block = Block {
             header: Header {
@@ -1413,7 +1652,7 @@ mod tests {
                 prev_blockhash: previous,
                 merkle_root: tx.compute_txid().to_raw_hash().into(),
                 time,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
+                bits: CompactTarget::from_consensus(bits),
                 nonce: 0,
             },
             txdata: vec![tx],
@@ -1446,6 +1685,251 @@ mod tests {
         }
         let reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
         assert_eq!(reopened.status().tip_hash, first.block_hash().to_string());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_daa_adjusts_each_block_and_rejects_stale_bits() {
+        let dir = test_dir("pohw-fork-chain-bootstrap-daa");
+        let manifest = manifest();
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let mut store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
+        let inherited = BlockHash::from_str(&manifest.fork_point.inherited_tip_hash).unwrap();
+        let first_time =
+            u32::try_from(manifest.config.launch_timestamp_utc.timestamp()).unwrap() + 1;
+        let first = mine_block(
+            inherited,
+            manifest.fork_point.first_fork_height,
+            first_time,
+            0,
+        );
+        store
+            .submit_block_at_time(
+                &hex::encode(serialize(&first)),
+                u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+            )
+            .unwrap();
+
+        let second_height = manifest.fork_point.first_fork_height + 1;
+        let second_time = first_time + 1;
+        let expected_harder = store
+            .next_difficulty(Some(first.block_hash()), second_height, second_time)
+            .unwrap()
+            .bits;
+        assert_eq!(
+            expected_harder,
+            Target::from_compact(first.header.bits)
+                .min_transition_threshold()
+                .to_compact_lossy()
+        );
+
+        let stale = mine_block(first.block_hash(), second_height, second_time, 0);
+        assert!(store
+            .submit_block_at_time(
+                &hex::encode(serialize(&stale)),
+                u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("difficulty"));
+
+        let second = mine_block_with_bits(
+            first.block_hash(),
+            second_height,
+            second_time,
+            0,
+            expected_harder.to_consensus(),
+        );
+        store
+            .submit_block_at_time(
+                &hex::encode(serialize(&second)),
+                u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+            )
+            .unwrap();
+        assert_eq!(store.status().difficulty_phase, "bootstrap");
+
+        let third_height = second_height + 1;
+        let third_time =
+            second_time + u32::try_from(4 * manifest.config.target_spacing_seconds).unwrap();
+        let expected_easier = store
+            .next_difficulty(Some(second.block_hash()), third_height, third_time)
+            .unwrap()
+            .bits;
+        assert!(Target::from_compact(expected_easier) > Target::from_compact(expected_harder));
+        assert!(
+            Target::from_compact(expected_easier)
+                <= Target::from_compact(CompactTarget::from_consensus(
+                    manifest.config.post_fork_pow_limit_bits
+                ))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hashrate_handoff_is_irreversible_and_survives_replay() {
+        let dir = test_dir("pohw-fork-chain-handoff");
+        let launch = Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap();
+        let mut config = ForkConfig::no_value_testnet("pohw-experiment-0", launch);
+        config.target_spacing_seconds = 4;
+        config.bootstrap_handoff_hashrate_hps = 2;
+        let manifest = manifest_with_config(config);
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let chain_dir = dir.join("chain");
+        let inherited = BlockHash::from_str(&manifest.fork_point.inherited_tip_hash).unwrap();
+        let first_height = manifest.fork_point.first_fork_height;
+        let first_time = u32::try_from(launch.timestamp()).unwrap() + 1;
+
+        {
+            let mut store = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+            let first = mine_block(inherited, first_height, first_time, 0);
+            store
+                .submit_block_at_time(
+                    &hex::encode(serialize(&first)),
+                    u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+                )
+                .unwrap();
+            assert_eq!(store.status().difficulty_phase, "bootstrap");
+
+            let second_height = first_height + 1;
+            let second_time = first_time + 1;
+            let second_bits = store
+                .next_difficulty(Some(first.block_hash()), second_height, second_time)
+                .unwrap()
+                .bits;
+            let second = mine_block_with_bits(
+                first.block_hash(),
+                second_height,
+                second_time,
+                0,
+                second_bits.to_consensus(),
+            );
+            store
+                .submit_block_at_time(
+                    &hex::encode(serialize(&second)),
+                    u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+                )
+                .unwrap();
+            let handoff_status = store.status();
+            assert_eq!(handoff_status.difficulty_phase, "bitcoin_2016");
+            assert_eq!(
+                handoff_status.blocks_until_bitcoin_retarget,
+                Some(BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL)
+            );
+
+            let third_height = second_height + 1;
+            let third_time = second_time + 1_000;
+            let third_difficulty = store
+                .next_difficulty(Some(second.block_hash()), third_height, third_time)
+                .unwrap();
+            assert_eq!(third_difficulty.bits, second_bits);
+            assert!(matches!(
+                third_difficulty.phase,
+                DifficultyPhase::Bitcoin { .. }
+            ));
+            let third = mine_block_with_bits(
+                second.block_hash(),
+                third_height,
+                third_time,
+                0,
+                third_difficulty.bits.to_consensus(),
+            );
+            store
+                .submit_block_at_time(
+                    &hex::encode(serialize(&third)),
+                    u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+                )
+                .unwrap();
+            assert_eq!(store.status().difficulty_phase, "bitcoin_2016");
+        }
+
+        let reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+        assert_eq!(reopened.status().difficulty_phase, "bitcoin_2016");
+        assert_eq!(
+            reopened.status().blocks_until_bitcoin_retarget,
+            Some(BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL - 1)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bitcoin_phase_uses_the_standard_2016_block_retarget_boundary() {
+        let dir = test_dir("pohw-fork-chain-bitcoin-retarget");
+        let manifest_path = write_manifest(&dir);
+        let mut store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
+        let epoch_start_height = manifest().fork_point.first_fork_height;
+        let epoch_start_time = 1_700_000_000;
+        let parent_height = epoch_start_height + BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL - 1;
+        let parent_time =
+            epoch_start_time + (BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL as u32 - 1) * 300;
+        let inherited = BlockHash::from_str(&manifest().fork_point.inherited_tip_hash).unwrap();
+        let early_height = epoch_start_height + 99;
+        let early_time = epoch_start_time + 99 * 600;
+        let mut early_block = mine_block(inherited, early_height, early_time, 0);
+        early_block.header.bits = CompactTarget::from_consensus(0x1d00_ffff);
+        let early_hash = early_block.block_hash();
+        let early_bits = early_block.header.bits;
+        store.blocks.insert(
+            early_hash,
+            BlockNode {
+                block: early_block,
+                block_hex: String::new(),
+                height: early_height,
+                cumulative_work: Target::from_compact(early_bits).to_work(),
+                difficulty_phase: DifficultyPhase::Bitcoin {
+                    epoch_start_height,
+                    epoch_start_time,
+                },
+            },
+        );
+        let mut parent_block = mine_block(inherited, parent_height, parent_time, 0);
+        parent_block.header.bits = CompactTarget::from_consensus(0x1d00_ffff);
+        let parent_hash = parent_block.block_hash();
+        let parent_bits = parent_block.header.bits;
+        store.blocks.insert(
+            parent_hash,
+            BlockNode {
+                block: parent_block,
+                block_hex: String::new(),
+                height: parent_height,
+                cumulative_work: Target::from_compact(parent_bits).to_work(),
+                difficulty_phase: DifficultyPhase::Bitcoin {
+                    epoch_start_height,
+                    epoch_start_time,
+                },
+            },
+        );
+
+        let before_boundary = store
+            .next_difficulty(Some(early_hash), early_height + 1, early_time + 600)
+            .unwrap();
+        assert_eq!(before_boundary.bits, early_bits);
+        assert_eq!(
+            before_boundary.phase,
+            DifficultyPhase::Bitcoin {
+                epoch_start_height,
+                epoch_start_time,
+            }
+        );
+
+        let boundary_height = epoch_start_height + BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL;
+        let boundary_time = parent_time + 600;
+        let boundary = store
+            .next_difficulty(Some(parent_hash), boundary_height, boundary_time)
+            .unwrap();
+        let expected = CompactTarget::from_next_work_required(
+            parent_bits,
+            u64::from(parent_time - epoch_start_time),
+            bitcoin::consensus::Params::MAINNET,
+        );
+        assert_eq!(boundary.bits, expected);
+        assert_ne!(boundary.bits, parent_bits);
+        assert_eq!(
+            boundary.phase,
+            DifficultyPhase::Bitcoin {
+                epoch_start_height: boundary_height,
+                epoch_start_time: boundary_time,
+            }
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1599,7 +2083,18 @@ mod tests {
             .unwrap();
         assert_eq!(store.status().tip_hash, smaller.block_hash().to_string());
 
-        let extension = mine_block(larger.block_hash(), 957_776, 1_783_900_803, 0);
+        let extension_bits = store
+            .next_difficulty(Some(larger.block_hash()), 957_776, 1_783_900_803)
+            .unwrap()
+            .bits
+            .to_consensus();
+        let extension = mine_block_with_bits(
+            larger.block_hash(),
+            957_776,
+            1_783_900_803,
+            0,
+            extension_bits,
+        );
         store
             .submit_block(&hex::encode(serialize(&extension)))
             .unwrap();

@@ -1059,6 +1059,7 @@ dependencies = [
  "bitcoin",
  "chrono",
  "clap",
+ "crypto-bigint",
  "fs2",
  "hex",
  "idena-lite-indexer",
