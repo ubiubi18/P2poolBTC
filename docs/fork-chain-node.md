@@ -86,6 +86,25 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pohw-fork-chain-node.service
 ```
 
+On a server that uses the dedicated `pohw` account and `/srv/sharechain`,
+install the matching server drop-ins after the base units:
+
+```sh
+sudo install -d -m 0755 /etc/systemd/system/pohw-fork-chain-node.service.d \
+  /etc/systemd/system/pohw-gossip-mesh.service.d \
+  /etc/systemd/system/pohw-mining-adapter.service.d
+sudo install -m 0644 deploy/systemd/pohw-fork-chain-node-server.conf \
+  /etc/systemd/system/pohw-fork-chain-node.service.d/server.conf
+sudo install -m 0644 deploy/systemd/pohw-gossip-mesh-server.conf \
+  /etc/systemd/system/pohw-gossip-mesh.service.d/server.conf
+sudo install -m 0644 deploy/systemd/pohw-mining-adapter-server.conf \
+  /etc/systemd/system/pohw-mining-adapter.service.d/server.conf
+```
+
+Keep Stratum disabled until miner registration, snapshot fields, and a fixed
+target appropriate for the expected hashrate have been selected. The easy
+`207fffff` development target must not be exposed to untrusted public peers.
+
 Read status through the activation-bound loopback RPC:
 
 ```sh

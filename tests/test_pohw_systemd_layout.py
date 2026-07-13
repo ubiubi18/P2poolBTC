@@ -63,6 +63,23 @@ class SystemdLayoutTests(unittest.TestCase):
             self.assertIn(f"ExecStart={exec_start}", unit)
             self.assertIn(f"ReadWritePaths={write_path}", unit)
 
+    def test_server_dropins_use_dedicated_sharechain_volume(self) -> None:
+        for name in (
+            "pohw-fork-chain-node-server.conf",
+            "pohw-gossip-mesh-server.conf",
+            "pohw-mining-adapter-server.conf",
+        ):
+            unit = (SYSTEMD / name).read_text(encoding="utf-8")
+            self.assertIn("User=pohw", unit)
+            self.assertIn("Group=pohw", unit)
+            self.assertIn("ReadWritePaths=\n", unit)
+            self.assertIn("ReadWritePaths=/srv/sharechain", unit)
+
+        gossip = (SYSTEMD / "pohw-gossip-mesh-server.conf").read_text(encoding="utf-8")
+        self.assertIn("RequiresMountsFor=\n", gossip)
+        self.assertIn("RequiresMountsFor=/srv/sharechain", gossip)
+        self.assertIn("WorkingDirectory=/opt/p2pool", gossip)
+
 
 if __name__ == "__main__":
     unittest.main()
