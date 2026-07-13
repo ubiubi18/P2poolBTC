@@ -1618,8 +1618,22 @@ mod tests {
         let store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
         let material = store.mining_template(1_783_900_801).unwrap();
         let job = build_stratum_job_from_template(&material, 4).unwrap().job;
+        let runtime_seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+            ^ std::process::id();
+        let extranonce1 = format!("{:08x}", runtime_seed.rotate_left(7));
+        let extranonce2 = format!("{:08x}", runtime_seed.rotate_left(17));
+        let nonce = format!("{:08x}", runtime_seed.rotate_left(29));
         let candidate = build_stratum_block_candidate(
-            &job, "aabbccdd", "01020304", &job.ntime, "00000000", 4, false,
+            &job,
+            &extranonce1,
+            &extranonce2,
+            &job.ntime,
+            &nonce,
+            4,
+            false,
         )
         .unwrap();
         let template = BitcoinWorkTemplate::from_bitcoin_header_hex(
