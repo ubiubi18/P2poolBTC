@@ -5,7 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/pohw-experiment-prepare-fork-activation.sh [ENV_FILE] [options]
 
-Derives the shared fork/testnet activation manifest from local Bitcoin Core.
+Derives a new, separate fork/testnet activation manifest from local Bitcoin
+Core. The env file must explicitly set
+POHW_EXPERIMENT_NETWORK_MODE=create-separate.
 
 Options:
   --chain-name NAME              Override POHW_FORK_CHAIN_NAME
@@ -175,6 +177,14 @@ fi
 
 if [[ "${POHW_EXPERIMENT_NO_VALUE_ACK:-}" != "I_UNDERSTAND_NO_VALUE" ]]; then
   echo "Set POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE before preparing Experiment 0 activation." >&2
+  exit 1
+fi
+
+NETWORK_MODE="${POHW_EXPERIMENT_NETWORK_MODE:-join-existing}"
+if [[ "$NETWORK_MODE" != "create-separate" ]]; then
+  echo "Refusing to derive a fork activation manifest in $NETWORK_MODE mode." >&2
+  echo "Joining nodes must use compatibility/experiment-0-activation.json." >&2
+  echo "Initialize another network with pohw-experiment-init.sh --separate-experiment." >&2
   exit 1
 fi
 

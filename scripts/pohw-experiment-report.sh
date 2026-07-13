@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -f
+umask 077
 
 ENV_FILE="${1:-${POHW_EXPERIMENT_ENV:-}}"
 validate_env_file() {
@@ -183,8 +185,8 @@ def read_limited_json_file(path):
 
 try:
     data = read_limited_json_file(path)
-except Exception:
-    raise SystemExit(0)
+except Exception as exc:
+    raise SystemExit(f"refusing to publish malformed JSON artifact {path}: {exc}") from exc
 
 PATH_KEYS = {
     "datadir",
@@ -194,11 +196,26 @@ PATH_KEYS = {
     "snapshot_dir",
     "workdir",
 }
+NETWORK_KEYS = {
+    "addr",
+    "advertise_addr",
+    "bind_addr",
+    "listening_on",
+    "peer_addr",
+    "peer_addrs",
+    "remote_addr",
+    "rpc_addr",
+}
+ERROR_KEYS = {"error"}
 
 def scrub(value):
     if isinstance(value, dict):
         return {
-            key: "<redacted>" if key in PATH_KEYS and isinstance(item, str) else scrub(item)
+            key: (
+                "<redacted>"
+                if key in PATH_KEYS | NETWORK_KEYS | ERROR_KEYS
+                else scrub(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -362,14 +379,20 @@ create_output_dir() {
 
 create_output_dir "$OUTPUT_DIR"
 
+gossip_peer_count=0
+for peer in $(split_words "$PEER_ADDRS"); do
+  [[ -z "$peer" ]] && continue
+  gossip_peer_count=$((gossip_peer_count + 1))
+done
+
 {
   echo "generated_at_utc=$(date -u +%FT%TZ)"
   echo "miner_id=$MINER_ID"
   echo "fork_chain_name=${POHW_FORK_CHAIN_NAME:-pohw-experiment-0}"
   echo "fork_launch_timestamp_utc=${POHW_FORK_LAUNCH_TIMESTAMP_UTC:-}"
-  echo "gossip_bind_addr=${POHW_GOSSIP_BIND_ADDR:-}"
-  echo "advertise_addr=${POHW_ADVERTISE_ADDR:-}"
-  echo "peer_addrs=$PEER_ADDRS"
+  echo "gossip_bind_configured=$([[ -n "${POHW_GOSSIP_BIND_ADDR:-}" ]] && echo true || echo false)"
+  echo "advertise_addr_configured=$([[ -n "${POHW_ADVERTISE_ADDR:-}" ]] && echo true || echo false)"
+  echo "gossip_peer_count=$gossip_peer_count"
   git -C "$WORKDIR" rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/^/git_branch=/' || true
   git -C "$WORKDIR" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
   if [[ -z "$(git -C "$WORKDIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
@@ -396,12 +419,15 @@ PoHW Experiment 0 report bundle.
 This bundle is intended to be shareable with other experiment participants.
 It should contain public replay status only. It must not contain private keys,
 Idena API keys, Bitcoin RPC cookies, dashboard API tokens, passwords, seed
-phrases, or raw service journals.
+phrases, peer network addresses, or raw service journals. The signed miner
+registration proof intentionally contains the public Idena address, payout
+script, and public keys needed to verify participant quorum.
 EOF
 
 run_capture status.json "${P2POOL_CMD[@]}" status --datadir "$DATADIR"
 redact_json_file "$OUTPUT_DIR/status.json"
 run_capture gossip-peers.json "${P2POOL_CMD[@]}" list-gossip-peers --datadir "$DATADIR"
+redact_json_file "$OUTPUT_DIR/gossip-peers.json"
 
 preflight_args=(multinode-preflight --datadir "$DATADIR" --snapshot-dir "$SNAPSHOT_DIR")
 if [[ -n "$MINER_ID" ]]; then

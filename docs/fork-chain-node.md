@@ -62,35 +62,64 @@ until the next Bitcoin retarget.
 
 The fork protocol uses bounded length-prefixed JSON frames. Every request carries
 the activation ID. Blocks received over RPC or P2P pass the same consensus
-validator before durable append.
+validator before durable append. Loopback control RPC and configured fork-peer
+IPs may submit blocks. Unconfigured P2P clients may read and synchronize chain
+data, but block submission is rejected.
 
 ## Prepare
 
-Build and create the activation manifest from synchronized Bitcoin Core:
+Build and initialize the default existing-network configuration. Initialization
+installs the repository's canonical Experiment 0 activation manifest:
 
 ```sh
 cargo build --release -p p2pool-node
-scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
+scripts/pohw-experiment-init.sh \
+  --miner-id alice \
+  --fork-peer-addrs <current-experiment-0-peer>:40409
 ```
+
+Do not run `pohw-experiment-prepare-fork-activation.sh` when joining Experiment
+0. It now requires the explicit `create-separate` mode documented in
+[`EXPERIMENT-0.md`](../EXPERIMENT-0.md#start-a-separate-experiment-explicit-opt-in).
 
 Set these values in the protected node environment:
 
 ```sh
 POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE
+POHW_EXPERIMENT_NETWORK_MODE=join-existing
 POHW_FORK_ACTIVATION_MANIFEST=/var/lib/pohw-p2pool/fork-activation.json
 POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS=1000000000000000
 POHW_FORK_CHAIN_DATADIR=/var/lib/pohw-p2pool/fork-chain
 POHW_FORK_RPC_BIND_ADDR=127.0.0.1:40408
 POHW_FORK_P2P_BIND_ADDR=<node-address>:40409
 POHW_FORK_ALLOW_NON_LOOPBACK_P2P=true
-POHW_FORK_PEER_ADDRS=<peer-a>:40409,<peer-b>:40409
+POHW_FORK_PEER_ADDRS=<current-experiment-0-peer>:40409
+POHW_FORK_BOOTSTRAP_FIRST_SEED=false
 POHW_STRATUM_FORK_CHAIN_RPC_ADDR=127.0.0.1:40408
 POHW_ADMIT_PEER_WORK_TEMPLATES=true
 ```
 
-Keep `POHW_FORK_P2P_BIND_ADDR` empty for a single-node test. When it is public,
-allow only the selected fork P2P TCP port through the host firewall. Never expose
-the control RPC.
+An outbound-only joining node may keep `POHW_FORK_P2P_BIND_ADDR` empty, but it
+must configure and reach an existing fork peer before mining. A deliberate
+single-node test belongs in `create-separate` mode. When P2P is public, allow
+only the selected fork P2P TCP port from announced participant IPs through the
+host firewall. Never expose the control RPC. The configured peer IPs form the
+temporary remote block-submission allowlist for the easy bootstrap phase; this
+is not a substitute for authenticated production peering.
+
+Only the designated coordinator may initialize the canonical first seed with:
+
+```sh
+scripts/pohw-experiment-init.sh \
+  --miner-id coordinator \
+  --bootstrap-first-seed
+```
+
+That writes `POHW_FORK_BOOTSTRAP_FIRST_SEED=true` and permits a peerless fork
+service, not Stratum or block production. When an independent second endpoint
+exists, set the flag to `false`, add that endpoint to `POHW_FORK_PEER_ADDRS`,
+and restart. The runner rejects both ordinary peerless joins and a stale
+first-seed exception combined with configured peers.
 
 ## Run
 
@@ -188,8 +217,11 @@ same active tip through fork P2P.
 ## Recovery And Rollback
 
 `fork-blocks.ndjson` is append-only and replayed through the full validator on
-every startup. A malformed, truncated, wrong-activation, or out-of-order record
-fails closed. Do not edit the log while the service is running.
+every startup. If a crash leaves only an incomplete final JSON record, startup
+removes that non-durable tail and replays the last complete record. A complete
+record written before its final newline is preserved. Complete malformed,
+wrong-activation, duplicate, and out-of-order records still fail closed. Do not
+edit the log while the service is running.
 
 Before deployment:
 

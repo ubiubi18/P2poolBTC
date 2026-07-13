@@ -11,6 +11,10 @@ port=8333
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 rpcport=8332
+# Required only when a local least-privilege service such as the host explorer
+# indexer authenticates through the rotating cookie. Treat bitcoin-group
+# membership as privileged and never expose the cookie outside this host.
+rpccookieperms=group
 
 # Full blockchain data for fork/testing work. Switch prune on only if historical
 # block availability is no longer needed.

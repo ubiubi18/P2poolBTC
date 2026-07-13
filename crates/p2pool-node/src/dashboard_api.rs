@@ -1,4 +1,7 @@
+use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
 use crate::bitcoin_rpc::{BitcoinRpcAuth, BitcoinRpcClient};
+use crate::explorer_api;
+use crate::fork_chain::ForkChainClient;
 use crate::local_node;
 use anyhow::{bail, Context, Result};
 use idena_lite_indexer::rpc::{EpochResponse, IdenaRpcClient, SyncingResponse};
@@ -56,6 +59,9 @@ pub struct DashboardApiConfig {
     pub bitcoin_rpc_auth: Option<BitcoinRpcAuth>,
     pub idena_rpc_url: Option<String>,
     pub idena_api_key_file: Option<PathBuf>,
+    pub public_explorer: bool,
+    pub fork_chain_client: Option<ForkChainClient>,
+    pub bitcoin_index_client: Option<BitcoinExplorerIndexClient>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,6 +77,7 @@ pub struct DashboardApiServerStatus {
     pub datadir: PathBuf,
     pub protocol: &'static str,
     pub note: &'static str,
+    pub public_explorer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -221,7 +228,8 @@ pub async fn run_dashboard_api_server(config: DashboardApiConfig) -> Result<()> 
             listening_on: local_addr,
             datadir: config.datadir.clone(),
             protocol: "pohw-dashboard-http-json-v1",
-            note: "read-only local dashboard API; GET /dashboard.json",
+            note: "read-only dashboard and explorer API",
+            public_explorer: config.public_explorer,
         })?
     );
 
@@ -974,8 +982,21 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
     };
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("");
-    if method != "OPTIONS" && !request_is_authorized(request, config) {
+    let raw_target = parts.next().unwrap_or("");
+    let target = match parse_request_target(raw_target) {
+        Ok(target) => target,
+        Err(_) => {
+            return Ok(http_response(
+                "400 Bad Request",
+                "application/json",
+                br#"{"error":"invalid request target"}"#,
+                cors_origin.as_deref(),
+            ));
+        }
+    };
+    let public_explorer_request =
+        method == "GET" && config.public_explorer && target.path.starts_with("/api/v1/");
+    if method != "OPTIONS" && !public_explorer_request && !request_is_authorized(request, config) {
         return Ok(http_response(
             "401 Unauthorized",
             "application/json",
@@ -983,7 +1004,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             cors_origin.as_deref(),
         ));
     }
-    match (method, path) {
+    match (method, target.path.as_str()) {
         ("OPTIONS", _) => Ok(http_response(
             "204 No Content",
             "text/plain",
@@ -999,10 +1020,13 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
         ("GET", "/") => Ok(http_response(
             "200 OK",
             "text/plain; charset=utf-8",
-            b"PoHW dashboard API. Use GET /dashboard.json\n",
+            b"PoHW dashboard and explorer API\n",
             cors_origin.as_deref(),
         )),
         ("GET", "/dashboard.json") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
             let snapshot = match build_dashboard_snapshot(config).await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
@@ -1024,6 +1048,564 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 cors_origin.as_deref(),
             ))
         }
+        ("GET", "/api/v1/overview") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let overview = match explorer_api::build_overview(
+                &config.datadir,
+                config.snapshot_dir.as_deref(),
+                config.fork_chain_client.as_ref(),
+                config.bitcoin_index_client.as_ref(),
+            )
+            .await
+            {
+                Ok(overview) => overview,
+                Err(err) => {
+                    eprintln!("warning: failed to build public explorer overview: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            json_http_response("200 OK", &overview, cors_origin.as_deref())
+        }
+        ("GET", "/api/v1/fork/blocks") => {
+            let (cursor, limit) = match explorer_pagination(&target.query) {
+                Ok(page) => page,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let page = match explorer_api::fork_block_page(
+                config.fork_chain_client.as_ref(),
+                cursor,
+                limit,
+            )
+            .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    eprintln!("warning: failed to build public fork block page: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            json_http_response("200 OK", &page, cors_origin.as_deref())
+        }
+        ("GET", path)
+            if path.starts_with("/api/v1/fork/blocks/") && path.ends_with("/transactions") =>
+        {
+            let block_hash =
+                &path["/api/v1/fork/blocks/".len()..path.len() - "/transactions".len()];
+            if explorer_api::validate_hash(block_hash, "fork block hash").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let (cursor, limit) = match explorer_numeric_pagination(&target.query) {
+                Ok(page) => page,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let page = match explorer_api::fork_block_transactions(
+                config.fork_chain_client.as_ref(),
+                block_hash,
+                cursor,
+                limit,
+            )
+            .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    eprintln!("warning: failed to build public fork transaction page: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            match page {
+                Some(page) => json_http_response("200 OK", &page, cors_origin.as_deref()),
+                None => Ok(explorer_not_found(cors_origin.as_deref())),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/fork/transactions/") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let txid = &path["/api/v1/fork/transactions/".len()..];
+            if explorer_api::validate_hash(txid, "fork transaction id").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let transaction = match explorer_api::fork_transaction_detail(
+                config.fork_chain_client.as_ref(),
+                txid,
+            )
+            .await
+            {
+                Ok(transaction) => transaction,
+                Err(err) => {
+                    eprintln!("warning: failed to build public fork transaction detail: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            match transaction {
+                Some(transaction) => {
+                    json_http_response("200 OK", &transaction, cors_origin.as_deref())
+                }
+                None => Ok(explorer_not_found(cors_origin.as_deref())),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/fork/addresses/") => {
+            let address_path = &path["/api/v1/fork/addresses/".len()..];
+            let (address, resource) =
+                if let Some(address) = address_path.strip_suffix("/transactions") {
+                    (address, "transactions")
+                } else if let Some(address) = address_path.strip_suffix("/utxos") {
+                    (address, "utxos")
+                } else {
+                    (address_path, "summary")
+                };
+            if explorer_api::validate_bitcoin_address(address).is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            match resource {
+                "summary" => {
+                    if !target.query.is_empty() {
+                        return Ok(bad_explorer_request(cors_origin.as_deref()));
+                    }
+                    match explorer_api::fork_address_summary(
+                        config.fork_chain_client.as_ref(),
+                        address,
+                    )
+                    .await
+                    {
+                        Ok(Some(summary)) => {
+                            json_http_response("200 OK", &summary, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to build public fork address summary: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "transactions" => {
+                    let (cursor, limit) = match explorer_numeric_pagination(&target.query) {
+                        Ok(page) => page,
+                        Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+                    };
+                    match explorer_api::fork_address_transactions(
+                        config.fork_chain_client.as_ref(),
+                        address,
+                        cursor,
+                        limit,
+                    )
+                    .await
+                    {
+                        Ok(Some(page)) => {
+                            json_http_response("200 OK", &page, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to build public fork address history: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "utxos" => {
+                    let (cursor, limit) = match explorer_numeric_pagination(&target.query) {
+                        Ok(page) => page,
+                        Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+                    };
+                    match explorer_api::fork_address_utxos(
+                        config.fork_chain_client.as_ref(),
+                        address,
+                        cursor,
+                        limit,
+                    )
+                    .await
+                    {
+                        Ok(Some(page)) => {
+                            json_http_response("200 OK", &page, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to build public fork address UTXOs: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        ("GET", "/api/v1/bitcoin/blocks") => {
+            if target.query.keys().any(|key| key != "startHeight") {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let start_height = match target
+                .query
+                .get("startHeight")
+                .map(|value| value.parse::<u64>())
+                .transpose()
+            {
+                Ok(height) => height,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let inherited_tip = explorer_inherited_tip(config).await;
+            match explorer_api::indexed_bitcoin_blocks(
+                config.bitcoin_index_client.as_ref(),
+                start_height,
+                inherited_tip,
+            )
+            .await
+            {
+                Ok(Some(page)) => json_http_response("200 OK", &page, cors_origin.as_deref()),
+                Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                Err(err) => {
+                    eprintln!("warning: Bitcoin history block page failed: {err:#}");
+                    Ok(explorer_unavailable(cors_origin.as_deref()))
+                }
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/bitcoin/transactions/") => {
+            let transaction_path = &path["/api/v1/bitcoin/transactions/".len()..];
+            let (txid, resource) = if let Some(txid) = transaction_path.strip_suffix("/outspends") {
+                (txid, "outspends")
+            } else {
+                (transaction_path, "transaction")
+            };
+            if explorer_api::validate_hash(txid, "Bitcoin transaction id").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            match resource {
+                "transaction" => {
+                    let inherited_tip = explorer_inherited_tip(config).await;
+                    match explorer_api::indexed_bitcoin_transaction(
+                        config.bitcoin_index_client.as_ref(),
+                        txid,
+                        inherited_tip,
+                    )
+                    .await
+                    {
+                        Ok(Some(transaction)) => {
+                            json_http_response("200 OK", &transaction, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: Bitcoin history transaction lookup failed: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "outspends" => {
+                    match explorer_api::indexed_bitcoin_transaction_outspends(
+                        config.bitcoin_index_client.as_ref(),
+                        txid,
+                    )
+                    .await
+                    {
+                        Ok(Some(outspends)) => {
+                            json_http_response("200 OK", &outspends, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: Bitcoin history transaction outspends failed: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/bitcoin/heights/") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let height = match path["/api/v1/bitcoin/heights/".len()..].parse::<u64>() {
+                Ok(height) => height,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let inherited_tip = explorer_inherited_tip(config).await;
+            match explorer_api::indexed_bitcoin_block_at_height(
+                config.bitcoin_index_client.as_ref(),
+                height,
+                inherited_tip,
+            )
+            .await
+            {
+                Ok(Some(block)) => json_http_response("200 OK", &block, cors_origin.as_deref()),
+                Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                Err(err) => {
+                    eprintln!("warning: Bitcoin history height lookup failed: {err:#}");
+                    Ok(explorer_unavailable(cors_origin.as_deref()))
+                }
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/bitcoin/blocks/") => {
+            let block_path = &path["/api/v1/bitcoin/blocks/".len()..];
+            let (block_hash, resource) =
+                if let Some(block_hash) = block_path.strip_suffix("/transactions") {
+                    (block_hash, "transactions")
+                } else {
+                    (block_path, "block")
+                };
+            if explorer_api::validate_hash(block_hash, "Bitcoin block hash").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let inherited_tip = explorer_inherited_tip(config).await;
+            match resource {
+                "block" => {
+                    if !target.query.is_empty() {
+                        return Ok(bad_explorer_request(cors_origin.as_deref()));
+                    }
+                    match explorer_api::indexed_bitcoin_block(
+                        config.bitcoin_index_client.as_ref(),
+                        block_hash,
+                        inherited_tip,
+                    )
+                    .await
+                    {
+                        Ok(Some(block)) => {
+                            json_http_response("200 OK", &block, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!("warning: Bitcoin history block lookup failed: {err:#}");
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "transactions" => {
+                    let start_index = match bitcoin_block_transaction_cursor(&target.query) {
+                        Ok(cursor) => cursor,
+                        Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+                    };
+                    match explorer_api::indexed_bitcoin_block_transactions(
+                        config.bitcoin_index_client.as_ref(),
+                        block_hash,
+                        start_index,
+                        inherited_tip,
+                    )
+                    .await
+                    {
+                        Ok(Some(page)) => {
+                            json_http_response("200 OK", &page, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: Bitcoin history block transactions failed: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/bitcoin/addresses/") => {
+            let address_path = &path["/api/v1/bitcoin/addresses/".len()..];
+            let (address, resource) =
+                if let Some(address) = address_path.strip_suffix("/transactions") {
+                    (address, "transactions")
+                } else if let Some(address) = address_path.strip_suffix("/utxos") {
+                    (address, "utxos")
+                } else {
+                    (address_path, "summary")
+                };
+            if explorer_api::validate_bitcoin_address(address).is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let inherited_tip = explorer_inherited_tip(config).await;
+            match resource {
+                "summary" => {
+                    if !target.query.is_empty() {
+                        return Ok(bad_explorer_request(cors_origin.as_deref()));
+                    }
+                    match explorer_api::indexed_bitcoin_address(
+                        config.bitcoin_index_client.as_ref(),
+                        address,
+                    )
+                    .await
+                    {
+                        Ok(Some(summary)) => {
+                            json_http_response("200 OK", &summary, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!("warning: Bitcoin history address lookup failed: {err:#}");
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "transactions" => {
+                    let cursor = match bitcoin_history_cursor(&target.query) {
+                        Ok(cursor) => cursor,
+                        Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+                    };
+                    match explorer_api::indexed_bitcoin_address_transactions(
+                        config.bitcoin_index_client.as_ref(),
+                        address,
+                        cursor.as_deref(),
+                        inherited_tip,
+                    )
+                    .await
+                    {
+                        Ok(Some(page)) => {
+                            json_http_response("200 OK", &page, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!(
+                                "warning: Bitcoin history address transactions failed: {err:#}"
+                            );
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                "utxos" => {
+                    if !target.query.is_empty() {
+                        return Ok(bad_explorer_request(cors_origin.as_deref()));
+                    }
+                    match explorer_api::indexed_bitcoin_address_utxos(
+                        config.bitcoin_index_client.as_ref(),
+                        address,
+                        inherited_tip,
+                    )
+                    .await
+                    {
+                        Ok(Some(utxos)) => {
+                            json_http_response("200 OK", &utxos, cors_origin.as_deref())
+                        }
+                        Ok(None) => Ok(explorer_not_found(cors_origin.as_deref())),
+                        Err(err) => {
+                            eprintln!("warning: Bitcoin history address UTXOs failed: {err:#}");
+                            Ok(explorer_unavailable(cors_origin.as_deref()))
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        ("GET", "/api/v1/sharechain/shares") => {
+            let (cursor, limit) = match explorer_pagination(&target.query) {
+                Ok(page) => page,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let page = match explorer_api::share_page(
+                &config.datadir,
+                config.snapshot_dir.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+            .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    eprintln!("warning: failed to build public share page: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            json_http_response("200 OK", &page, cors_origin.as_deref())
+        }
+        ("GET", "/api/v1/idena/snapshot") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let overview = match explorer_api::build_overview(
+                &config.datadir,
+                config.snapshot_dir.as_deref(),
+                config.fork_chain_client.as_ref(),
+                config.bitcoin_index_client.as_ref(),
+            )
+            .await
+            {
+                Ok(overview) => overview,
+                Err(err) => {
+                    eprintln!("warning: failed to build public Idena snapshot: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            json_http_response("200 OK", &overview.idena, cors_origin.as_deref())
+        }
+        ("GET", path) if path.starts_with("/api/v1/fork/heights/") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let height = match path["/api/v1/fork/heights/".len()..].parse::<u64>() {
+                Ok(height) => height,
+                Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+            };
+            let block =
+                match explorer_api::fork_block_at_height(config.fork_chain_client.as_ref(), height)
+                    .await
+                {
+                    Ok(block) => block,
+                    Err(err) => {
+                        eprintln!("warning: failed to build public fork height detail: {err:#}");
+                        return Ok(explorer_unavailable(cors_origin.as_deref()));
+                    }
+                };
+            match block {
+                Some(block) => json_http_response("200 OK", &block, cors_origin.as_deref()),
+                None => Ok(explorer_not_found(cors_origin.as_deref())),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/fork/blocks/") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let block_hash = &path["/api/v1/fork/blocks/".len()..];
+            if explorer_api::validate_hash(block_hash, "fork block hash").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let block = match explorer_api::fork_block_summary(
+                config.fork_chain_client.as_ref(),
+                block_hash,
+            )
+            .await
+            {
+                Ok(block) => block,
+                Err(err) => {
+                    eprintln!("warning: failed to build public fork block detail: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            match block {
+                Some(block) => json_http_response("200 OK", &block, cors_origin.as_deref()),
+                None => Ok(explorer_not_found(cors_origin.as_deref())),
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/sharechain/shares/") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let share_hash = &path["/api/v1/sharechain/shares/".len()..];
+            if explorer_api::validate_hash(share_hash, "share hash").is_err() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            let share = match explorer_api::share_summary(
+                &config.datadir,
+                config.snapshot_dir.as_deref(),
+                share_hash,
+            )
+            .await
+            {
+                Ok(share) => share,
+                Err(err) => {
+                    eprintln!("warning: failed to build public share detail: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
+            match share {
+                Some(share) => json_http_response("200 OK", &share, cors_origin.as_deref()),
+                None => Ok(explorer_not_found(cors_origin.as_deref())),
+            }
+        }
         ("GET", _) => Ok(http_response(
             "404 Not Found",
             "application/json",
@@ -1037,6 +1619,163 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             cors_origin.as_deref(),
         )),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedRequestTarget {
+    path: String,
+    query: BTreeMap<String, String>,
+}
+
+fn parse_request_target(raw: &str) -> Result<ParsedRequestTarget> {
+    if !raw.starts_with('/') || raw.contains('#') || raw.bytes().any(|byte| byte.is_ascii_control())
+    {
+        bail!("request target must use HTTP origin form");
+    }
+    let (path, raw_query) = raw.split_once('?').unwrap_or((raw, ""));
+    if path.is_empty() || path.contains('%') {
+        bail!("request path is invalid");
+    }
+    let mut query = BTreeMap::new();
+    if !raw_query.is_empty() {
+        for pair in raw_query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if key.is_empty()
+                || key.contains('%')
+                || value.contains('%')
+                || key.contains('+')
+                || value.contains('+')
+                || query.insert(key.to_string(), value.to_string()).is_some()
+            {
+                bail!("request query is invalid");
+            }
+        }
+    }
+    Ok(ParsedRequestTarget {
+        path: path.to_string(),
+        query,
+    })
+}
+
+fn explorer_pagination(query: &BTreeMap<String, String>) -> Result<(Option<String>, usize)> {
+    if query.keys().any(|key| key != "cursor" && key != "limit") {
+        bail!("unsupported explorer query parameter");
+    }
+    let cursor = query
+        .get("cursor")
+        .cloned()
+        .filter(|value| !value.is_empty());
+    if let Some(cursor) = cursor.as_deref() {
+        explorer_api::validate_hash(cursor, "explorer cursor")?;
+    }
+    let limit = query
+        .get("limit")
+        .map(|value| value.parse::<usize>().context("invalid explorer limit"))
+        .transpose()?
+        .unwrap_or(explorer_api::DEFAULT_PAGE_LIMIT);
+    explorer_api::validate_page_limit(limit)?;
+    Ok((cursor, limit))
+}
+
+fn explorer_numeric_pagination(query: &BTreeMap<String, String>) -> Result<(usize, usize)> {
+    if query.keys().any(|key| key != "cursor" && key != "limit") {
+        bail!("unsupported explorer query parameter");
+    }
+    let cursor = query
+        .get("cursor")
+        .map(|value| value.parse::<usize>().context("invalid explorer cursor"))
+        .transpose()?
+        .unwrap_or(0);
+    let limit = query
+        .get("limit")
+        .map(|value| value.parse::<usize>().context("invalid explorer limit"))
+        .transpose()?
+        .unwrap_or(explorer_api::DEFAULT_PAGE_LIMIT);
+    explorer_api::validate_numeric_page(cursor, limit)?;
+    Ok((cursor, limit))
+}
+
+fn bitcoin_history_cursor(query: &BTreeMap<String, String>) -> Result<Option<String>> {
+    if query.keys().any(|key| key != "cursor") {
+        bail!("unsupported Bitcoin history query parameter");
+    }
+    let cursor = query
+        .get("cursor")
+        .cloned()
+        .filter(|value| !value.is_empty());
+    if let Some(cursor) = cursor.as_deref() {
+        explorer_api::validate_hash(cursor, "Bitcoin history cursor")?;
+    }
+    Ok(cursor)
+}
+
+fn bitcoin_block_transaction_cursor(query: &BTreeMap<String, String>) -> Result<usize> {
+    if query.keys().any(|key| key != "cursor") {
+        bail!("unsupported Bitcoin block transaction query parameter");
+    }
+    let cursor = query
+        .get("cursor")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .context("invalid Bitcoin block cursor")
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if cursor > 10_000_000 {
+        bail!("Bitcoin block transaction cursor exceeds the supported range");
+    }
+    Ok(cursor)
+}
+
+async fn explorer_inherited_tip(config: &DashboardApiConfig) -> Option<u64> {
+    let client = config.fork_chain_client.as_ref()?;
+    client
+        .status()
+        .await
+        .ok()
+        .map(|status| status.inherited_tip_height)
+}
+
+fn json_http_response<T: Serialize>(
+    status: &str,
+    value: &T,
+    cors_origin: Option<&str>,
+) -> Result<Vec<u8>> {
+    let body = serde_json::to_vec_pretty(value).context("failed to encode API response")?;
+    Ok(http_response(
+        status,
+        "application/json",
+        &body,
+        cors_origin,
+    ))
+}
+
+fn bad_explorer_request(cors_origin: Option<&str>) -> Vec<u8> {
+    http_response(
+        "400 Bad Request",
+        "application/json",
+        br#"{"error":"invalid explorer request"}"#,
+        cors_origin,
+    )
+}
+
+fn explorer_not_found(cors_origin: Option<&str>) -> Vec<u8> {
+    http_response(
+        "404 Not Found",
+        "application/json",
+        br#"{"error":"explorer object not found"}"#,
+        cors_origin,
+    )
+}
+
+fn explorer_unavailable(cors_origin: Option<&str>) -> Vec<u8> {
+    http_response(
+        "503 Service Unavailable",
+        "application/json",
+        br#"{"error":"explorer data unavailable"}"#,
+        cors_origin,
+    )
 }
 
 fn checked_cors_origin(
@@ -1809,6 +2548,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_explorer_routes_are_anonymous_but_dashboard_stays_private() {
+        let datadir = temp_datadir("public_explorer_routes_are_anonymous");
+        let mut config = test_config(datadir.clone());
+        config.api_token = Some("secret".to_string());
+        config.public_explorer = true;
+
+        let response = handle_http_request(
+            "GET /api/v1/overview HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"apiVersion\": \"pohw-explorer-v1\""));
+        assert!(response.contains("\"registeredMinerCount\": 0"));
+        assert!(response.contains("\"bitcoinHistory\""));
+        assert!(response.contains("\"participantIndexRequired\": false"));
+        assert!(response.contains("\"safetyBoundaries\""));
+        assert!(!response.contains("idenaAddress"));
+        assert!(!response.contains("payoutScript"));
+
+        let response = handle_http_request(
+            "GET /dashboard.json HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 401 Unauthorized"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_explorer_route_requires_dashboard_token() {
+        let datadir = temp_datadir("private_explorer_route_requires_dashboard_token");
+        let mut config = test_config(datadir.clone());
+        config.api_token = Some("secret".to_string());
+
+        let response = handle_http_request(
+            "GET /api/v1/overview HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 401 Unauthorized"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explorer_routes_paginate_and_reject_invalid_inputs() {
+        let datadir = temp_datadir("explorer_share_page_is_paginated");
+        let config = test_config(datadir.clone());
+
+        let response = handle_http_request(
+            "GET /api/v1/sharechain/shares?limit=10 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"total\": 0"));
+        assert!(response.contains("\"items\": []"));
+
+        let response = handle_http_request(
+            "GET /api/v1/sharechain/shares?unknown=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 400 Bad Request"));
+
+        for target in [
+            "/api/v1/fork/blocks/not-a-hash",
+            "/api/v1/fork/transactions/not-a-hash",
+            "/api/v1/fork/addresses/not-an-address",
+            "/api/v1/bitcoin/transactions/not-a-hash",
+            "/api/v1/bitcoin/transactions/not-a-hash/outspends",
+            "/api/v1/bitcoin/blocks/not-a-hash/transactions",
+            "/api/v1/bitcoin/addresses/not-an-address",
+            "/api/v1/sharechain/shares/not-a-hash",
+        ] {
+            let response = handle_http_request(
+                &format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                &config,
+            )
+            .await
+            .unwrap();
+            assert!(String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 400 Bad Request"));
+        }
+
+        let hash = "ab".repeat(32);
+        let response = handle_http_request(
+            &format!(
+                "GET /api/v1/bitcoin/blocks/{hash}/transactions?cursor=invalid HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 400 Bad Request"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bitcoin_history_route_proxies_bounded_loopback_index_data() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let txid = "ab".repeat(32);
+        let expected_path = format!("GET /tx/{txid} HTTP/1.1");
+        let server_txid = txid.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with(&expected_path));
+            let body = format!(
+                r#"{{"txid":"{server_txid}","version":2,"locktime":0,"size":100,"weight":400,"fee":10,"vin":[],"vout":[],"status":{{"confirmed":true,"block_height":42,"block_hash":"{}"}}}}"#,
+                "cd".repeat(32)
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let datadir = temp_datadir("bitcoin_history_route_proxies_index_data");
+        let mut config = test_config(datadir.clone());
+        config.public_explorer = true;
+        config.bitcoin_index_client =
+            Some(BitcoinExplorerIndexClient::new(&format!("http://{addr}"), false).unwrap());
+        let response = handle_http_request(
+            &format!("GET /api/v1/bitcoin/transactions/{txid} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &config,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"scope\": \"bitcoin_mainnet_history\""));
+        assert!(response.contains("\"forkRelation\": \"fork_point_unavailable\""));
+        assert!(response.contains(&format!("\"txid\": \"{txid}\"")));
+        assert!(!response.contains("cookie"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bitcoin_history_nested_routes_proxy_block_transactions_and_outspends() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hash = "ab".repeat(32);
+        let block_path = format!("GET /block/{hash}/txs/0 HTTP/1.1");
+        let outspend_path = format!("GET /tx/{hash}/outspends HTTP/1.1");
+        let server = tokio::spawn(async move {
+            for expected in [block_path, outspend_path] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 4096];
+                let count = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                assert!(request.starts_with(&expected));
+                let body = "[]";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let datadir = temp_datadir("bitcoin_history_nested_routes");
+        let mut config = test_config(datadir.clone());
+        config.public_explorer = true;
+        config.bitcoin_index_client =
+            Some(BitcoinExplorerIndexClient::new(&format!("http://{addr}"), false).unwrap());
+        let block_response = handle_http_request(
+            &format!(
+                "GET /api/v1/bitcoin/blocks/{hash}/transactions HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        let outspend_response = handle_http_request(
+            &format!(
+                "GET /api/v1/bitcoin/transactions/{hash}/outspends HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let block_response = String::from_utf8(block_response).unwrap();
+        assert!(block_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(block_response.contains("\"blockHash\""));
+        assert!(block_response.contains("\"nextCursor\": null"));
+        let outspend_response = String::from_utf8(outspend_response).unwrap();
+        assert!(outspend_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(outspend_response.contains("\"items\": []"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
     async fn dashboard_json_route_rejects_duplicate_token_headers() {
         let datadir = temp_datadir("dashboard_json_route_rejects_duplicate_token_headers");
         let mut config = test_config(datadir.clone());
@@ -1923,6 +2879,9 @@ mod tests {
             bitcoin_rpc_auth: None,
             idena_rpc_url: None,
             idena_api_key_file: None,
+            public_explorer: false,
+            fork_chain_client: None,
+            bitcoin_index_client: None,
         }
     }
 }

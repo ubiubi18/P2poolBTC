@@ -24,6 +24,12 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 
 These screenshots use demo data only; they show the user flow, not live payout claims.
 
+### Combined explorer
+
+![P2poolBTC combined Bitcoin fork, sharechain, and Idena explorer](docs/assets/explorer-overview.png)
+
+### Participant dashboard
+
 ![P2poolBTC dashboard overview](docs/assets/dashboard-overview.png)
 
 <p align="center">
@@ -34,7 +40,13 @@ These screenshots use demo data only; they show the user flow, not live payout c
 
 ## Start Here
 
-If you want to help test, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the tester roles, the safety boundaries, and the shortest path to a first report bundle.
+If you want to help test, start with the
+[Community Experiment 0 Guide](COMMUNITY-README.md). It gives the explicit
+five-step path to reproduce the build, join the existing experiment, connect an
+Idena identity, produce a readiness report, and report problems safely.
+
+[Beta Testing P2poolBTC](BETA-TESTING.md) explains the tester roles and safety
+boundaries in more detail.
 
 Use [Experiment 0](EXPERIMENT-0.md) as the detailed operator runbook once you are ready to run a multi-node test.
 
@@ -60,7 +72,11 @@ Working prototype pieces:
 - Taproot FROST vault primitives, real local DKG/signing CLI commands, demos, and RPC-validated vault input checks,
 - AssemblyScript snapshot registry with Idena host-storage imports, record validation, and deterministic encoding,
 - read-only local dashboard API,
-- Vite/React dashboard focused on pledge status, hashrate share, Idena share, and block-found payout estimate,
+- versioned public explorer API for decoded fork transactions, scripts, addresses,
+  UTXOs, inherited Bitcoin history, sharechain shares, and aggregate Idena snapshots,
+- optional host-only Esplora index integration; pool participants do not run a
+  Bitcoin address index or enable Bitcoin Core `txindex`,
+- Vite/React combined explorer and participant dashboard,
 - Raspberry Pi systemd helpers for snapshots, gossip mesh, dashboard API, and dashboard UI.
 
 Not done yet:
@@ -95,6 +111,7 @@ docs/                     design artifacts
 | Mining adapter | `127.0.0.1:3333` | Local Stratum v1 frontend |
 | Dashboard UI | `127.0.0.1:5176` | Browser UI, tunnel from a workstation |
 | Dashboard API | `127.0.0.1:40407` | Read-only local status |
+| Bitcoin history index | `127.0.0.1:3002` | Optional host-only Esplora HTTP source |
 | Dashboard dev server | Vite | Local frontend development |
 | Idena RPC | `http://127.0.0.1:9009` | Local `idena-go` source |
 | Bitcoin RPC | `http://127.0.0.1:8332` | Local Bitcoin Core source |
@@ -103,9 +120,21 @@ docs/                     design artifacts
 
 Keep Bitcoin and Idena RPC on loopback. Expose gossip, dashboard, or Stratum only to trusted peers, with firewall rules. Non-loopback dashboard needs a token; non-loopback Stratum needs a protected password file.
 
+The combined explorer can be deployed locally or on a dedicated host. See
+[PoHW Network Explorer](docs/explorer.md) for the public API, privacy boundary,
+systemd/Caddy host profile, smoke tests, and rollback procedure.
+
+Only the dedicated explorer operator needs the Bitcoin history index. A miner,
+Pi, or observer can use the hosted versioned API and never downloads the full
+Bitcoin chain or address index. Fork consensus validation remains independent
+from the history index.
+
 ## Community Experiment
 
-Start with [Beta Testing P2poolBTC](BETA-TESTING.md) when multiple people help. It gives a shorter, more welcoming path for observers, gossip testers, Idena testers, and Bitcoin testers.
+Start with the [Community Experiment 0 Guide](COMMUNITY-README.md) when
+multiple people help. It gives the reproducible five-step join path and the
+safe issue-reporting workflow. [Beta Testing P2poolBTC](BETA-TESTING.md)
+describes the available tester roles.
 
 Use [Experiment 0](EXPERIMENT-0.md) for the complete no-value scope, env template, preflight, miner registration, snapshot voting, report bundles, deterministic report comparison, success criteria, and stop conditions for a decentralized dry run.
 
@@ -178,12 +207,13 @@ VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
 
 ## Core Commands
 
-Prepare a no-value fork/testnet activation manifest from local Bitcoin Core:
+To create a deliberately separate no-value fork/testnet, derive a new
+activation manifest from local Bitcoin Core:
 
 ```sh
 cargo run -p p2pool-node -- prepare-fork-activation \
-  --chain-name pohw-experiment-0 \
-  --launch-timestamp-utc 2026-07-05T00:00:00Z \
+  --chain-name my-separate-experiment \
+  --launch-timestamp-utc <future-rfc3339-time> \
   --rpc-cookie-file ~/.bitcoin/.cookie \
   --manifest-out ./fork-activation.json
 ```
@@ -214,11 +244,20 @@ rules; persists every accepted branch; selects cumulative work; and
 synchronizes fork blocks with configured peers. See
 [Experiment 0 Fork-Chain Node](docs/fork-chain-node.md).
 
-For Experiment 0, set `POHW_FORK_LAUNCH_TIMESTAMP_UTC` in `.pohw-experiment.env` and use the wrapper:
+The normal Experiment 0 participant path does not run that command. Initialize
+in the default `join-existing` mode and use the canonical tracked manifest:
 
 ```sh
-scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
+scripts/pohw-experiment-init.sh --miner-id alice
+cmp compatibility/experiment-0-activation.json \
+  .pohw-p2pool/fork-activation.json
 ```
+
+Its activation ID is
+`0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e`.
+The wrapper `pohw-experiment-prepare-fork-activation.sh` refuses to generate a
+manifest unless initialization used `--separate-experiment`. See
+[Experiment 0](EXPERIMENT-0.md) for peer checks and both network workflows.
 
 Prepare a miner pledge locally:
 
@@ -826,6 +865,12 @@ POHW_IDENA_SNAPSHOT_ID=<snapshot-day-or-id>
 POHW_IDENA_SNAPSHOT_PROOF_ROOT=<32-byte-root-hex>
 ```
 
+Keep `POHW_DASHBOARD_UI_BIND_HOST` on loopback when the participant dashboard
+is enabled. Its generated browser configuration contains the dashboard API
+token, so the runner refuses to expose participant mode on a non-loopback UI.
+Use SSH forwarding for remote participant access. A public explorer must set
+`POHW_DASHBOARD_UI_PARTICIPANT_ENABLED=false` and never embeds that token.
+
 Set `POHW_DASHBOARD_ALLOWED_ORIGINS` to the browser UI origin you actually use, for example `http://<pi-wlan-ip>:5176` if the UI is served from the Pi.
 
 `pohw-gossip-mesh-local-peer.service` is optional. It runs a second local gossip
@@ -902,6 +947,25 @@ ssh <pi-ssh-host> '/usr/bin/python3 /opt/p2pool/scripts/pohw-health-status.py --
 The legacy SSD timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
 
 On the SD-card runtime, the sanitized health state is stored at `/var/lib/pohw-p2pool/health/status.json`. `pohw-idena-workers-if-synced.timer` is an explicit opt-in that checks `bcn_syncing` every two minutes and starts only `idena-reward-indexer.service` and `idena-session-recorder.service` after the local node reaches the reported head with a valid clock. It never starts `idena.service`, so an operator pause remains in effect. Its secret-free status is `/var/lib/pohw/idena-workers/status.json`.
+
+For an SD-only Pi that consumes Bitcoin from the Hetzner host, install the
+persistent load guard:
+
+```sh
+sudo scripts/pohw-install-pi-load-guard.sh
+```
+
+It caps Idena at 2.5 CPU cores, starts 1 GB of compressed RAM swap without SD
+writes, keeps 1 GB of RAM available to the operating system through cgroup
+memory limits, disables Bitcoin restart timers, and blocks local Bitcoin Core
+unless `/etc/pohw/enable-local-bitcoin` is deliberately created. Re-enable a
+local Core only as an explicit maintenance action:
+
+```sh
+sudo touch /etc/pohw/enable-local-bitcoin
+sudo systemctl daemon-reload
+sudo systemctl enable --now bitcoind-mainnet.service
+```
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 

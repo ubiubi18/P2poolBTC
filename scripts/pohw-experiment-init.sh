@@ -18,8 +18,11 @@ Options:
   --bind-addr ADDR         Gossip bind address (default: 127.0.0.1:40406)
   --advertise-addr ADDR    Optional reachable gossip address to advertise
   --peer-addrs LIST        Comma-separated peer host:port list
+  --fork-peer-addrs LIST   Comma-separated existing fork peer host:port list
+  --bootstrap-first-seed   Coordinator-only: allow the canonical seed to start without a fork peer
   --register-peers         Add peer list during preflight
   --allow-public-peers     Allow public-routable gossip peers
+  --separate-experiment    Explicitly initialize a new network instead of joining Experiment 0
   --force                  Overwrite an existing env file
   -h, --help               Show this help
 EOF
@@ -35,8 +38,11 @@ OUTPUT_ROOT=""
 GOSSIP_BIND_ADDR="127.0.0.1:40406"
 ADVERTISE_ADDR=""
 PEER_ADDRS=""
+FORK_PEER_ADDRS=""
+BOOTSTRAP_FIRST_SEED="false"
 REGISTER_PEERS="false"
 ALLOW_PUBLIC_PEERS="false"
+NETWORK_MODE="join-existing"
 FORCE="false"
 
 while [[ $# -gt 0 ]]; do
@@ -81,12 +87,24 @@ while [[ $# -gt 0 ]]; do
       PEER_ADDRS="${2:?missing value for --peer-addrs}"
       shift 2
       ;;
+    --fork-peer-addrs)
+      FORK_PEER_ADDRS="${2:?missing value for --fork-peer-addrs}"
+      shift 2
+      ;;
+    --bootstrap-first-seed)
+      BOOTSTRAP_FIRST_SEED="true"
+      shift
+      ;;
     --register-peers)
       REGISTER_PEERS="true"
       shift
       ;;
     --allow-public-peers)
       ALLOW_PUBLIC_PEERS="true"
+      shift
+      ;;
+    --separate-experiment)
+      NETWORK_MODE="create-separate"
       shift
       ;;
     --force)
@@ -117,6 +135,19 @@ if [[ "$DASHBOARD_IDENA_ADDRESS" =~ [[:space:]] ]]; then
   echo "--idena-address must not contain whitespace." >&2
   exit 1
 fi
+if [[ "$NETWORK_MODE" == "create-separate" && -n "$FORK_PEER_ADDRS" ]]; then
+  echo "--fork-peer-addrs cannot be used while creating a separate experiment." >&2
+  exit 1
+fi
+if [[ "$NETWORK_MODE" == "create-separate" && "$BOOTSTRAP_FIRST_SEED" == "true" ]]; then
+  echo "--bootstrap-first-seed is reserved for the canonical Experiment 0 seed." >&2
+  exit 1
+fi
+if [[ "$BOOTSTRAP_FIRST_SEED" == "true" && -n "$FORK_PEER_ADDRS" ]]; then
+  echo "--bootstrap-first-seed cannot be combined with --fork-peer-addrs." >&2
+  echo "Remove the exception once the first independent fork peer is configured." >&2
+  exit 1
+fi
 if [[ ! -f "$WORKDIR/Cargo.toml" ]]; then
   echo "--workdir must point to the checked-out p2pool repository: $WORKDIR" >&2
   exit 1
@@ -126,6 +157,16 @@ WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 DATADIR="${DATADIR:-$WORKDIR/.pohw-p2pool}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-$DATADIR/snapshots}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$WORKDIR/output}"
+FORK_ACTIVATION_MANIFEST="$DATADIR/fork-activation.json"
+CANONICAL_ACTIVATION_MANIFEST="$WORKDIR/compatibility/experiment-0-activation.json"
+FORK_LAUNCH_TIMESTAMP_UTC=""
+if [[ "$NETWORK_MODE" == "join-existing" ]]; then
+  FORK_LAUNCH_TIMESTAMP_UTC="2026-07-13T00:52:48Z"
+  if [[ ! -f "$CANONICAL_ACTIVATION_MANIFEST" || -L "$CANONICAL_ACTIVATION_MANIFEST" ]]; then
+    echo "Canonical Experiment 0 activation manifest is missing or symlinked: $CANONICAL_ACTIVATION_MANIFEST" >&2
+    exit 1
+  fi
+fi
 
 stat_mode() {
   local path="$1"
@@ -254,6 +295,25 @@ ensure_local_dir "$DATADIR" "datadir"
 ensure_local_dir "$SNAPSHOT_DIR" "snapshot"
 ensure_local_dir "$OUTPUT_ROOT" "output"
 chmod 700 "$DATADIR" "$SNAPSHOT_DIR"
+if [[ "$NETWORK_MODE" == "join-existing" ]]; then
+  if [[ -L "$FORK_ACTIVATION_MANIFEST" ]]; then
+    echo "Refusing symlinked fork activation manifest: $FORK_ACTIVATION_MANIFEST" >&2
+    exit 1
+  fi
+  if [[ -e "$FORK_ACTIVATION_MANIFEST" && ! -f "$FORK_ACTIVATION_MANIFEST" ]]; then
+    echo "Fork activation manifest must be a regular file: $FORK_ACTIVATION_MANIFEST" >&2
+    exit 1
+  fi
+  if [[ -e "$FORK_ACTIVATION_MANIFEST" ]]; then
+    if ! cmp -s "$CANONICAL_ACTIVATION_MANIFEST" "$FORK_ACTIVATION_MANIFEST"; then
+      echo "Datadir contains a different fork activation manifest: $FORK_ACTIVATION_MANIFEST" >&2
+      echo "Use a separate datadir with --separate-experiment for another network." >&2
+      exit 1
+    fi
+  else
+    install -m 600 "$CANONICAL_ACTIVATION_MANIFEST" "$FORK_ACTIVATION_MANIFEST"
+  fi
+fi
 umask 077
 tmp_file="$(mktemp "${ENV_FILE}.tmp.XXXXXX")"
 trap 'rm -f "$tmp_file"' EXIT
@@ -263,6 +323,7 @@ trap 'rm -f "$tmp_file"' EXIT
   echo "# This file is local-only. Do not share it."
   echo
   write_env_line POHW_EXPERIMENT_NO_VALUE_ACK I_UNDERSTAND_NO_VALUE
+  write_env_line POHW_EXPERIMENT_NETWORK_MODE "$NETWORK_MODE"
   echo
   write_env_line POHW_WORKDIR "$WORKDIR"
   write_env_line POHW_DATADIR "$DATADIR"
@@ -270,14 +331,16 @@ trap 'rm -f "$tmp_file"' EXIT
   write_env_line POHW_EXPERIMENT_OUTPUT_ROOT "$OUTPUT_ROOT"
   echo
   write_env_line POHW_FORK_CHAIN_NAME "pohw-experiment-0"
-  write_env_line POHW_FORK_LAUNCH_TIMESTAMP_UTC ""
-  write_env_line POHW_FORK_ACTIVATION_MANIFEST "$DATADIR/fork-activation.json"
+  write_env_line POHW_FORK_LAUNCH_TIMESTAMP_UTC "$FORK_LAUNCH_TIMESTAMP_UTC"
+  write_env_line POHW_FORK_ACTIVATION_MANIFEST "$FORK_ACTIVATION_MANIFEST"
   write_env_line POHW_FORK_POST_FORK_POW_LIMIT_BITS "207fffff"
   write_env_line POHW_FORK_TARGET_SPACING_SECONDS "600"
   write_env_line POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS "1000000000000000"
   write_env_line POHW_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS "4096"
   write_env_line POHW_FORK_INHERITED_UTXO_SPENDING_ENABLED "false"
   write_env_line POHW_FORK_ALLOW_NON_MAINNET_RPC "false"
+  write_env_line POHW_FORK_PEER_ADDRS "$FORK_PEER_ADDRS"
+  write_env_line POHW_FORK_BOOTSTRAP_FIRST_SEED "$BOOTSTRAP_FIRST_SEED"
   echo
   write_env_line POHW_MINER_ID "$MINER_ID"
   write_env_line POHW_IDENA_ADDRESS "$DASHBOARD_IDENA_ADDRESS"
@@ -310,4 +373,8 @@ chmod 600 "$ENV_FILE"
 echo "Created $ENV_FILE"
 echo "Datadir: $DATADIR"
 echo "Snapshot dir: $SNAPSHOT_DIR"
+echo "Network mode: $NETWORK_MODE"
+if [[ "$NETWORK_MODE" == "join-existing" ]]; then
+  echo "Canonical activation manifest: $FORK_ACTIVATION_MANIFEST"
+fi
 echo "Next: scripts/pohw-experiment-preflight.sh $ENV_FILE"

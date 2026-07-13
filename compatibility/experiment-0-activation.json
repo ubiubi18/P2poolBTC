@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "activation_id": "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e",
+  "config": {
+    "chain_name": "pohw-experiment-0",
+    "launch_timestamp_utc": "2026-07-13T00:52:48Z",
+    "inherited_utxo_spending_enabled": false,
+    "post_fork_pow_limit_bits": 545259519,
+    "target_spacing_seconds": 600,
+    "difficulty_algorithm": "bootstrap_then_bitcoin_2016_v1",
+    "bootstrap_handoff_hashrate_hps": 1000000000000000
+  },
+  "fork_point": {
+    "inherited_tip_height": 957781,
+    "inherited_tip_hash": "00000000000000000001b6de2b5da141681f2b60813e4ee6bd171678cf5aa3da",
+    "first_fork_height": 957782,
+    "launch_timestamp_utc": "2026-07-13T00:52:48Z"
+  },
+  "launch_block": {
+    "height": 957782,
+    "block_hash": "000000000000000000020085a7608c31a61fb758c647f3a37d7532cc3229cf16",
+    "timestamp": "2026-07-13T00:52:48Z"
+  },
+  "replay_protection_required": true
+}

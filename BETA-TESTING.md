@@ -1,5 +1,9 @@
 # Beta Testing P2poolBTC
 
+For the current reproducible five-step join process and issue-reporting rules,
+use the [Community Experiment 0 Guide](COMMUNITY-README.md). This page explains
+the roles and goals behind that process.
+
 P2poolBTC is looking for careful early testers who want to help check whether a Bitcoin pool can use Idena human-work accounting without a central operator.
 
 You are not mining real BTC in this test. You are helping prove that independent nodes can see the same registrations, snapshots, sharechain messages, and payout accounting.
@@ -57,8 +61,8 @@ This shows the user journey and reward math with sample data only. It is for ori
 Ask the experiment coordinator for:
 
 - the agreed git commit,
-- `POHW_FORK_LAUNCH_TIMESTAMP_UTC`,
-- two or more peer addresses if available,
+- at least one current existing-network gossip peer,
+- at least one current existing-network fork peer if this round includes fork mining,
 - whether this round expects Idena snapshots, Bitcoin fork activation, or only gossip/report testing.
 
 Then run:
@@ -70,7 +74,7 @@ scripts/pohw-experiment-init.sh \
   --miner-id <your-name> \
   --bind-addr <node-lan-ip>:40406 \
   --advertise-addr <node-lan-ip>:40406 \
-  --peer-addrs <peer-a-lan-ip>:40406,<peer-b-lan-ip>:40406 \
+  --peer-addrs <current-experiment-0-gossip-seed>:40406 \
   --register-peers
 ```
 
@@ -78,8 +82,16 @@ Open `.pohw-experiment.env`, set:
 
 ```sh
 POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE
-POHW_FORK_LAUNCH_TIMESTAMP_UTC=<agreed-timestamp>
+POHW_EXPERIMENT_NETWORK_MODE=join-existing
+POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-13T00:52:48Z
+POHW_FORK_ACTIVATION_MANIFEST=/path/to/pohw-p2pool/fork-activation.json
+POHW_FORK_PEER_ADDRS=<current-experiment-0-fork-seed>:40409
 ```
+
+The init script copies `compatibility/experiment-0-activation.json` to the
+configured manifest path in its default `join-existing` mode. If a different
+file already exists there, initialization stops; follow the network selection
+instructions in [Experiment 0](EXPERIMENT-0.md) rather than overwriting it.
 
 Preflight your node:
 
@@ -132,17 +144,29 @@ scripts/pohw-experiment-publish-snapshot-vote.sh .pohw-experiment.env
 
 Your node still verifies snapshot roots locally. The vote is not a central accountant.
 
-## Optional: Bitcoin Fork Activation Check
+## Optional: Existing Fork Activation Check
 
-If your Bitcoin Core node is synced far enough for the agreed timestamp:
+Beta testers join the existing Experiment 0 fork by using its canonical
+manifest. Do not derive a new manifest for the normal participant path:
 
 ```sh
-scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
+python3 - compatibility/experiment-0-activation.json <<'PY'
+import json
+import sys
+
+expected = "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e"
+with open(sys.argv[1], encoding="utf-8") as handle:
+    actual = json.load(handle).get("activation_id")
+if actual != expected:
+    raise SystemExit(f"wrong Experiment 0 activation_id: {actual!r}")
+print("Experiment 0 activation manifest verified")
+PY
 ```
 
-Compare the complete schema-2 manifest with the group, especially
-`activation_id`, `first_fork_height`, `difficulty_algorithm`, and
-`bootstrap_handoff_hashrate_hps`.
+Copy that file to the `POHW_FORK_ACTIVATION_MANIFEST` path in your local config,
+configure current existing-network peers, and stop if none are reachable. The
+separate-network workflow in [Experiment 0](EXPERIMENT-0.md) is the only place
+that uses `pohw-experiment-prepare-fork-activation.sh`.
 
 ## What Success Looks Like
 

@@ -1,5 +1,7 @@
+mod bitcoin_explorer_index;
 mod bitcoin_rpc;
 mod dashboard_api;
+mod explorer_api;
 mod fork_chain;
 mod frost_signer_daemon;
 mod local_node;
@@ -263,6 +265,16 @@ enum Command {
         idena_rpc_url: String,
         #[arg(long, env = "IDENA_API_KEY_FILE")]
         idena_api_key_file: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_PUBLIC")]
+        public_explorer: bool,
+        #[arg(long, env = "POHW_EXPLORER_FORK_CHAIN_RPC_ADDR")]
+        explorer_fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long, env = "POHW_FORK_ACTIVATION_MANIFEST")]
+        explorer_fork_activation_manifest: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_BITCOIN_INDEX_URL")]
+        explorer_bitcoin_index_url: Option<String>,
+        #[arg(long, env = "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX")]
+        explorer_allow_remote_bitcoin_index: bool,
     },
     RunGossipMesh {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -1641,6 +1653,11 @@ async fn main() -> Result<()> {
             bitcoin_rpc_cookie_file,
             idena_rpc_url,
             idena_api_key_file,
+            public_explorer,
+            explorer_fork_chain_rpc_addr,
+            explorer_fork_activation_manifest,
+            explorer_bitcoin_index_url,
+            explorer_allow_remote_bitcoin_index,
         } => {
             let bitcoin_rpc_configured = enable_bitcoin_rpc
                 || bitcoin_rpc_user.is_some()
@@ -1660,6 +1677,32 @@ async fn main() -> Result<()> {
                 dashboard_api_token_file,
                 "dashboard API token",
             )?;
+            let fork_chain_client = match (
+                explorer_fork_chain_rpc_addr,
+                explorer_fork_activation_manifest,
+            ) {
+                (Some(addr), Some(manifest_path)) => {
+                    let manifest = fork_chain::read_activation_manifest(&manifest_path)?;
+                    Some(fork_chain::ForkChainClient::new(
+                        addr,
+                        manifest.activation_id,
+                        false,
+                    )?)
+                }
+                (None, None) => None,
+                _ => bail!(
+                    "--explorer-fork-chain-rpc-addr and --explorer-fork-activation-manifest must be supplied together"
+                ),
+            };
+            let bitcoin_index_client = explorer_bitcoin_index_url
+                .as_deref()
+                .map(|url| {
+                    bitcoin_explorer_index::BitcoinExplorerIndexClient::new(
+                        url,
+                        explorer_allow_remote_bitcoin_index,
+                    )
+                })
+                .transpose()?;
             dashboard_api::run_dashboard_api_server(dashboard_api::DashboardApiConfig {
                 datadir,
                 snapshot_dir,
@@ -1682,6 +1725,9 @@ async fn main() -> Result<()> {
                 bitcoin_rpc_auth,
                 idena_rpc_url: idena_api_key_file.as_ref().map(|_| idena_rpc_url),
                 idena_api_key_file,
+                public_explorer,
+                fork_chain_client,
+                bitcoin_index_client,
             })
             .await?;
         }
@@ -6059,9 +6105,25 @@ pub(crate) fn validate_protected_secret_file(path: &Path, label: &str) -> Result
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
+        let systemd_credential = std::env::var_os("CREDENTIALS_DIRECTORY")
+            .map(PathBuf::from)
+            .filter(|directory| path.parent() == Some(directory.as_path()))
+            .and_then(|directory| std::fs::symlink_metadata(directory).ok())
+            .filter(|directory_metadata| {
+                !directory_metadata.file_type().is_symlink()
+                    && directory_metadata.file_type().is_dir()
+            })
+            .is_some_and(|directory_metadata| {
+                systemd_credential_permissions_are_safe(
+                    metadata.uid(),
+                    mode,
+                    directory_metadata.uid(),
+                    directory_metadata.permissions().mode() & 0o777,
+                )
+            });
+        if mode & 0o077 != 0 && !systemd_credential {
             return Err(anyhow!(
                 "{label} file {} is too permissive ({mode:o}); run chmod 600 {}",
                 path.display(),
@@ -6070,6 +6132,16 @@ pub(crate) fn validate_protected_secret_file(path: &Path, label: &str) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn systemd_credential_permissions_are_safe(
+    file_uid: u32,
+    file_mode: u32,
+    directory_uid: u32,
+    directory_mode: u32,
+) -> bool {
+    file_uid == 0 && file_mode == 0o440 && directory_uid == 0 && directory_mode & 0o022 == 0
 }
 
 #[cfg(test)]
@@ -6958,6 +7030,20 @@ mod tests {
             "unexpected error: {err:#}"
         );
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn systemd_credential_mode_requires_root_ownership_and_safe_directory() {
+        assert!(systemd_credential_permissions_are_safe(0, 0o440, 0, 0o755));
+        assert!(!systemd_credential_permissions_are_safe(
+            1000, 0o440, 0, 0o755
+        ));
+        assert!(!systemd_credential_permissions_are_safe(0, 0o640, 0, 0o755));
+        assert!(!systemd_credential_permissions_are_safe(
+            0, 0o440, 1000, 0o755
+        ));
+        assert!(!systemd_credential_permissions_are_safe(0, 0o440, 0, 0o775));
     }
 
     #[cfg(unix)]

@@ -68,6 +68,24 @@ pub struct SharechainReplaySummary {
     pub last_message_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharechainShareSummary {
+    pub share_hash: String,
+    pub height: u64,
+    pub active: bool,
+    pub miner_id: String,
+    pub parent_share_hash: String,
+    pub bitcoin_template_hash: String,
+    pub work_hash: String,
+    pub target: String,
+    pub hashrate_score_delta: String,
+    pub cumulative_score: Option<String>,
+    pub idena_snapshot_id: String,
+    pub idena_snapshot_proof_root: String,
+    pub template_created_at_unix: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AccountingStateRootMaterial {
     version: &'static str,
@@ -294,6 +312,49 @@ impl SharechainReplayState {
 
     pub fn active_share_score_total(&self) -> Score {
         self.active_share_score_total
+    }
+
+    pub fn share_summaries(&self) -> Vec<SharechainShareSummary> {
+        let mut summaries = self
+            .shares
+            .iter()
+            .map(|(share_hash, node)| self.share_summary_for_node(share_hash, node))
+            .collect::<Vec<_>>();
+        summaries.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| left.share_hash.cmp(&right.share_hash))
+        });
+        summaries
+    }
+
+    pub fn share_summary(&self, share_hash: &str) -> Option<SharechainShareSummary> {
+        let normalized = share_hash.to_ascii_lowercase();
+        self.shares
+            .get(&normalized)
+            .map(|node| self.share_summary_for_node(&normalized, node))
+    }
+
+    fn share_summary_for_node(&self, share_hash: &str, node: &ShareNode) -> SharechainShareSummary {
+        SharechainShareSummary {
+            share_hash: share_hash.to_string(),
+            height: node.height,
+            active: self.active_share_hashes.contains(share_hash),
+            miner_id: node.share.miner_id.clone(),
+            parent_share_hash: node.parent_share_hash.clone(),
+            bitcoin_template_hash: node.share.bitcoin_template_hash.clone(),
+            work_hash: node.share.work_hash.clone(),
+            target: node.share.target.clone(),
+            hashrate_score_delta: node.share.hashrate_score_delta.to_string(),
+            cumulative_score: node.cumulative_score.map(|score| score.to_string()),
+            idena_snapshot_id: node.share.idena_snapshot_id.clone(),
+            idena_snapshot_proof_root: node.share.idena_snapshot_proof_root.clone(),
+            template_created_at_unix: self
+                .bitcoin_work_templates
+                .get(&node.share.bitcoin_template_hash)
+                .map(|template| template.created_at_unix),
+        }
     }
 
     pub fn claim_ledger(&self) -> &ClaimLedger {
@@ -1343,6 +1404,22 @@ mod tests {
         );
         assert_eq!(state.best_share_height(), Some(2));
         assert_eq!(state.hashrate_scores().get("miner-a"), Some(&2));
+
+        let shares = state.share_summaries();
+        assert_eq!(shares.len(), 3);
+        assert_eq!(shares[0].share_hash, child_a_hash);
+        assert_eq!(shares[0].height, 2);
+        assert!(shares[0].active);
+        assert_eq!(shares[0].hashrate_score_delta, "1");
+        assert_eq!(shares[0].cumulative_score.as_deref(), Some("2"));
+        assert!(shares[0].template_created_at_unix.is_some());
+        assert_eq!(
+            state
+                .share_summary(&shares[0].share_hash.to_ascii_uppercase())
+                .as_ref()
+                .map(|share| share.share_hash.as_str()),
+            Some(shares[0].share_hash.as_str())
+        );
     }
 
     #[test]

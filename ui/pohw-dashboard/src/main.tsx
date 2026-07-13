@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Bitcoin,
   Brain,
+  Blocks,
   CheckCircle2,
   CircleHelp,
   Clock3,
@@ -17,6 +18,8 @@ import {
   KeyRound,
   Network,
   Percent,
+  RefreshCw,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   Users,
@@ -28,6 +31,9 @@ type ServiceState = "connected" | "syncing" | "pending" | "warning";
 type TimeWindow = "24h" | "7d" | "epoch";
 type ProspectMode = "block-now" | "30d-ev";
 type SectionId = "overview" | "sharechain" | "idena" | "payouts" | "vault" | "next-step" | "audit-numbers";
+type AppView = "dashboard" | "explorer";
+type ExplorerTab = "overview" | "bitcoin" | "fork" | "sharechain" | "idena";
+type ExplorerLoadState = "loading" | "ready" | "unavailable";
 
 const SATS_PER_BTC = 100_000_000;
 
@@ -108,10 +114,383 @@ interface DashboardApiResponse {
   account: PoolSnapshot;
 }
 
+interface ForkChainStatus {
+  protocolVersion: number;
+  chainName: string;
+  activationId: string;
+  inheritedTipHeight: number;
+  inheritedTipHash: string;
+  tipHeight: number;
+  tipHash: string;
+  cumulativeWork: string;
+  storedBlockCount: number;
+  activeForkBlockCount: number;
+  postForkPowLimitBits: string;
+  targetSpacingSeconds: number;
+  difficultyAlgorithm: string;
+  difficultyPhase: string;
+  bootstrapHandoffHashrateHps: number;
+  estimatedHashrateHps: string;
+  blocksUntilBitcoinRetarget: number | null;
+  transactionConsensus: string;
+}
+
+interface ExplorerOverview {
+  apiVersion: string;
+  generatedAtUnix: number;
+  fork: {
+    state: string;
+    status: ForkChainStatus | null;
+  };
+  bitcoinHistory: {
+    state: string;
+    backend: string;
+    indexedTipHeight: number | null;
+    inheritedTipHeight: number | null;
+    inheritedHistoryReady: boolean;
+    hostOnly: boolean;
+    participantIndexRequired: boolean;
+  };
+  sharechain: {
+    appliedMessageCount: number;
+    registeredMinerCount: number;
+    bitcoinWorkTemplateCount: number;
+    storedShareCount: number;
+    activeShareCount: number;
+    inactiveShareCount: number;
+    activeShareScoreTotal: string;
+    bestShareTip: string | null;
+    bestShareHeight: number | null;
+    snapshotVoteRootCount: number;
+    payoutScheduleCount: number;
+    pendingWithdrawalCount: number;
+  };
+  idena: ExplorerIdenaOverview;
+  limitations: string[];
+  safetyBoundaries: string[];
+}
+
+interface ExplorerIdenaOverview {
+  state: string;
+  snapshotDay: string | null;
+  snapshotHeight: number | null;
+  scoreRoot: string | null;
+  identityRoot: string | null;
+  formulaVersion: number | null;
+  identityCount: number;
+  eligibleIdentityCount: number;
+  validationScoreTotal: string;
+  proposerScoreTotal: string;
+  committeeScoreTotal: string;
+  ignoredInvitationScoreTotal: string;
+  rewardSourceCoverage: string;
+}
+
+interface ForkBlockSummary {
+  blockHash: string;
+  previousBlockHash: string;
+  height: number;
+  active: boolean;
+  timestamp: number;
+  bits: string;
+  difficultyPhase: string;
+  cumulativeWork: string;
+  version: number;
+  nonce: number;
+  merkleRoot: string;
+  transactionCount: number;
+  sizeBytes: number;
+  weightWu: number;
+  coinbaseTxid: string;
+  coinbaseValueSats: number;
+  coinbaseOutputCount: number;
+  pohwCommitmentHash: string | null;
+}
+
+interface ExplorerForkBlockPage {
+  state: string;
+  tipHeight: number | null;
+  total: number;
+  items: ForkBlockSummary[];
+  nextCursor: string | null;
+}
+
+interface ForkPreviousOutput {
+  valueSats: number;
+  scriptPubkeyHex: string;
+  scriptPubkeyAsm: string;
+  scriptType: string;
+  address: string | null;
+  scriptHash: string;
+}
+
+interface ForkTransactionDetail {
+  txid: string;
+  wtxid: string;
+  blockHash: string;
+  height: number;
+  active: boolean;
+  transactionIndex: number;
+  coinbase: boolean;
+  version: number;
+  lockTime: number;
+  sizeBytes: number;
+  weightWu: number;
+  inputCount: number;
+  outputCount: number;
+  totalInputSats: number | null;
+  totalOutputSats: number;
+  feeSats: number | null;
+  inputs: Array<{
+    vin: number;
+    coinbase: boolean;
+    previousTxid: string | null;
+    previousVout: number | null;
+    scriptSigHex: string;
+    scriptSigAsm: string;
+    sequence: number;
+    witness: string[];
+    previousOutput: ForkPreviousOutput | null;
+  }>;
+  outputs: Array<ForkPreviousOutput & {
+    vout: number;
+    spentBy: { txid: string; vin: number; height: number } | null;
+  }>;
+}
+
+interface ForkTransactionRef {
+  txid: string;
+  blockHash: string;
+  height: number;
+  active: boolean;
+  transactionIndex: number;
+  coinbase: boolean;
+  totalOutputSats: number;
+  feeSats: number | null;
+}
+
+interface ForkTransactionPage {
+  blockHash: string;
+  total: number;
+  items: ForkTransactionRef[];
+  nextCursor: number | null;
+}
+
+interface ForkAddressSummary {
+  address: string;
+  transactionCount: number;
+  fundedOutputCount: number;
+  fundedTotalSats: number;
+  spentOutputCount: number;
+  spentTotalSats: number;
+  balanceSats: number;
+  firstSeenHeight: number | null;
+  lastSeenHeight: number | null;
+}
+
+interface ForkAddressTransactionPage {
+  address: string;
+  total: number;
+  items: ForkTransactionRef[];
+  nextCursor: number | null;
+}
+
+interface ForkUtxo {
+  txid: string;
+  vout: number;
+  valueSats: number;
+  scriptPubkeyHex: string;
+  scriptType: string;
+  height: number;
+  coinbase: boolean;
+}
+
+interface ForkUtxoPage {
+  address: string;
+  total: number;
+  items: ForkUtxo[];
+  nextCursor: number | null;
+}
+
+interface BitcoinIndexObject<T = Record<string, unknown>> {
+  scope: string;
+  forkRelation: string;
+  data: T;
+}
+
+interface BitcoinBlockData {
+  id: string;
+  height: number;
+  version: number;
+  timestamp: number;
+  bits: number;
+  nonce: number;
+  merkle_root: string;
+  tx_count: number;
+  size: number;
+  weight: number;
+  previousblockhash?: string;
+}
+
+interface BitcoinTransactionData {
+  txid: string;
+  version: number;
+  locktime: number;
+  size: number;
+  weight: number;
+  fee: number;
+  vin: Array<{
+    txid?: string;
+    vout?: number;
+    prevout?: {
+      scriptpubkey: string;
+      scriptpubkey_asm: string;
+      scriptpubkey_type: string;
+      scriptpubkey_address?: string;
+      value: number;
+    } | null;
+    scriptsig: string;
+    scriptsig_asm: string;
+    witness?: string[];
+    is_coinbase: boolean;
+    sequence: number;
+  }>;
+  vout: Array<{
+    scriptpubkey: string;
+    scriptpubkey_asm: string;
+    scriptpubkey_type: string;
+    scriptpubkey_address?: string;
+    value: number;
+  }>;
+  status: {
+    confirmed: boolean;
+    block_height?: number;
+    block_hash?: string;
+    block_time?: number;
+  };
+}
+
+interface BitcoinAddressData {
+  address: string;
+  chain_stats: {
+    tx_count: number;
+    funded_txo_count: number;
+    funded_txo_sum: number;
+    spent_txo_count: number;
+    spent_txo_sum: number;
+  };
+  mempool_stats: {
+    tx_count: number;
+    funded_txo_count: number;
+    funded_txo_sum: number;
+    spent_txo_count: number;
+    spent_txo_sum: number;
+  };
+}
+
+interface ExplorerBitcoinBlockPage {
+  scope: string;
+  items: Array<BitcoinIndexObject<BitcoinBlockData>>;
+}
+
+interface ExplorerBitcoinBlockTransactionPage {
+  scope: string;
+  blockHash: string;
+  startIndex: number;
+  totalInPage: number;
+  items: Array<BitcoinIndexObject<BitcoinTransactionData>>;
+  nextCursor: number | null;
+}
+
+interface BitcoinOutspend {
+  spent: boolean;
+  txid?: string;
+  vin?: number;
+  status?: BitcoinTransactionData["status"];
+}
+
+interface ExplorerBitcoinOutspendPage {
+  scope: string;
+  txid: string;
+  items: BitcoinOutspend[];
+}
+
+interface ExplorerBitcoinTransactionPage {
+  scope: string;
+  address: string;
+  totalInPage: number;
+  items: Array<BitcoinIndexObject<BitcoinTransactionData>>;
+  nextCursor: string | null;
+}
+
+interface BitcoinUtxo {
+  txid: string;
+  vout: number;
+  status: BitcoinTransactionData["status"];
+  value: number;
+}
+
+interface SharechainShareSummary {
+  shareHash: string;
+  height: number;
+  active: boolean;
+  minerId: string;
+  parentShareHash: string;
+  bitcoinTemplateHash: string;
+  workHash: string;
+  target: string;
+  hashrateScoreDelta: string;
+  cumulativeScore: string | null;
+  idenaSnapshotId: string;
+  idenaSnapshotProofRoot: string;
+  templateCreatedAtUnix: number | null;
+}
+
+interface ExplorerSharePage {
+  total: number;
+  items: SharechainShareSummary[];
+  nextCursor: string | null;
+}
+
+type ExplorerSearchResult =
+  | { kind: "block"; item: ForkBlockSummary; transactions: ForkTransactionPage | null }
+  | { kind: "fork-transaction"; item: ForkTransactionDetail }
+  | {
+      kind: "bitcoin-block";
+      item: BitcoinIndexObject<BitcoinBlockData>;
+      transactions: ExplorerBitcoinBlockTransactionPage | null;
+    }
+  | {
+      kind: "bitcoin-transaction";
+      item: BitcoinIndexObject<BitcoinTransactionData>;
+      outspends: ExplorerBitcoinOutspendPage | null;
+    }
+  | {
+      kind: "address";
+      address: string;
+      fork: ForkAddressSummary | null;
+      forkTransactions: ForkAddressTransactionPage | null;
+      forkUtxos: ForkUtxoPage | null;
+      bitcoin: BitcoinIndexObject<BitcoinAddressData> | null;
+      bitcoinTransactions: ExplorerBitcoinTransactionPage | null;
+      bitcoinUtxos: Array<BitcoinIndexObject<BitcoinUtxo>> | null;
+    }
+  | { kind: "share"; item: SharechainShareSummary };
+
+type ExplorerLoadMoreTarget =
+  | "fork-block-transactions"
+  | "bitcoin-block-transactions"
+  | "fork-address-transactions"
+  | "fork-address-utxos"
+  | "bitcoin-address-transactions";
+
 interface RuntimeDashboardConfig {
   apiToken?: string;
   apiUrl?: string;
   demo?: string;
+  explorerApiBase?: string;
+  defaultView?: AppView;
+  participantDashboard?: boolean;
 }
 
 declare global {
@@ -126,6 +505,9 @@ const dashboardEnv =
       VITE_POHW_DASHBOARD_API_TOKEN?: string;
       VITE_POHW_DASHBOARD_API_URL?: string;
       VITE_POHW_DASHBOARD_DEMO?: string;
+      VITE_POHW_EXPLORER_API_BASE?: string;
+      VITE_POHW_DASHBOARD_DEFAULT_VIEW?: string;
+      VITE_POHW_PARTICIPANT_DASHBOARD?: string;
     };
   }).env ?? {};
 const runtimeDashboardConfig = window.__POHW_DASHBOARD_CONFIG__ ?? {};
@@ -136,6 +518,26 @@ const dashboardApiToken =
 const dashboardDemoMode = ["1", "true", "yes"].includes(
   (runtimeDashboardConfig.demo ?? dashboardEnv.VITE_POHW_DASHBOARD_DEMO ?? "").toLowerCase()
 );
+const explorerApiBase = (
+  runtimeDashboardConfig.explorerApiBase ??
+  dashboardEnv.VITE_POHW_EXPLORER_API_BASE ??
+  "http://127.0.0.1:40407/api/v1"
+).replace(/\/$/, "");
+const configuredDefaultView: AppView =
+  runtimeDashboardConfig.defaultView === "explorer" || dashboardEnv.VITE_POHW_DASHBOARD_DEFAULT_VIEW === "explorer"
+    ? "explorer"
+    : "dashboard";
+const participantDashboardEnabled =
+  runtimeDashboardConfig.participantDashboard ??
+  !["0", "false", "no"].includes((dashboardEnv.VITE_POHW_PARTICIPANT_DASHBOARD ?? "true").toLowerCase());
+const explorerSharesDashboardOrigin = (() => {
+  try {
+    return new URL(explorerApiBase, globalThis.location.href).origin ===
+      new URL(dashboardApiUrl, globalThis.location.href).origin;
+  } catch {
+    return false;
+  }
+})();
 
 const fallbackServiceStatuses: ServiceStatus[] = [
   { label: "P2Pool", state: "connected", detail: "8 peers / tip 18,402" },
@@ -319,6 +721,57 @@ const demoDashboardData: DashboardApiResponse = {
 
 const initialDashboardData = dashboardDemoMode ? demoDashboardData : offlineDashboardData;
 
+const initialAppView: AppView =
+  window.location.hash === "#explorer" || !participantDashboardEnabled ? "explorer" : configuredDefaultView;
+const emptyForkPage: ExplorerForkBlockPage = {
+  state: "not_configured",
+  tipHeight: null,
+  total: 0,
+  items: [],
+  nextCursor: null
+};
+const emptySharePage: ExplorerSharePage = { total: 0, items: [], nextCursor: null };
+const emptyBitcoinBlockPage: ExplorerBitcoinBlockPage = { scope: "bitcoin_mainnet_history", items: [] };
+
+function explorerRequestHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (dashboardApiToken && explorerSharesDashboardOrigin) {
+    headers["X-PoHW-Dashboard-Token"] = dashboardApiToken;
+  }
+  return headers;
+}
+
+async function fetchExplorerJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${explorerApiBase}${path}`, {
+    cache: "no-store",
+    headers: explorerRequestHeaders()
+  });
+  if (!response.ok) {
+    throw new Error(`explorer API returned ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function fetchExplorerOptional<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${explorerApiBase}${path}`, {
+    cache: "no-store",
+    headers: explorerRequestHeaders()
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`explorer API returned ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function tryExplorerOptional<T>(path: string): Promise<T | null> {
+  try {
+    return await fetchExplorerOptional<T>(path);
+  } catch {
+    return null;
+  }
+}
+
 const DashboardDataContext = React.createContext<DashboardApiResponse>(initialDashboardData);
 
 function useDashboardData() {
@@ -327,14 +780,23 @@ function useDashboardData() {
 
 function App() {
   const [dashboardData, setDashboardData] = useState<DashboardApiResponse>(initialDashboardData);
+  const [activeView, setActiveView] = useState<AppView>(initialAppView);
   const [auditOpen, setAuditOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionId>("overview");
   const [window, setWindow] = useState<TimeWindow>("7d");
+  const [explorerOverview, setExplorerOverview] = useState<ExplorerOverview | null>(null);
+  const [forkBlocks, setForkBlocks] = useState<ExplorerForkBlockPage>(emptyForkPage);
+  const [bitcoinBlocks, setBitcoinBlocks] = useState<ExplorerBitcoinBlockPage>(emptyBitcoinBlockPage);
+  const [shares, setShares] = useState<ExplorerSharePage>(emptySharePage);
+  const [explorerLoadState, setExplorerLoadState] = useState<ExplorerLoadState>("loading");
+  const [loadingMoreFork, setLoadingMoreFork] = useState(false);
+  const [loadingMoreShares, setLoadingMoreShares] = useState(false);
   const prospectMode: ProspectMode = "block-now";
   const account = dashboardData.account;
   const participation = useMemo(() => getParticipationStatus(account), [account]);
 
   useEffect(() => {
+    if (!participantDashboardEnabled) return;
     let cancelled = false;
     async function loadDashboardData() {
       try {
@@ -373,6 +835,67 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadOverview() {
+      try {
+        const overview = await fetchExplorerJson<ExplorerOverview>("/overview");
+        if (!cancelled) {
+          setExplorerOverview(overview);
+          setExplorerLoadState("ready");
+        }
+      } catch {
+        if (!cancelled) {
+          setExplorerLoadState("unavailable");
+        }
+      }
+    }
+
+    async function loadPages() {
+      try {
+        const [forkPage, sharePage, bitcoinPage] = await Promise.all([
+          fetchExplorerJson<ExplorerForkBlockPage>("/fork/blocks?limit=25"),
+          fetchExplorerJson<ExplorerSharePage>("/sharechain/shares?limit=25"),
+          tryExplorerOptional<ExplorerBitcoinBlockPage>("/bitcoin/blocks")
+        ]);
+        if (!cancelled) {
+          setForkBlocks(forkPage);
+          setShares(sharePage);
+          setBitcoinBlocks(bitcoinPage ?? emptyBitcoinBlockPage);
+        }
+      } catch {
+        if (!cancelled) {
+          setExplorerLoadState("unavailable");
+        }
+      }
+    }
+
+    void loadOverview();
+    void loadPages();
+    const interval = globalThis.setInterval(loadOverview, 15_000);
+    return () => {
+      cancelled = true;
+      globalThis.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      setActiveView(
+        globalThis.location.hash === "#explorer" || !participantDashboardEnabled ? "explorer" : "dashboard"
+      );
+    };
+    globalThis.addEventListener("hashchange", handleHashChange);
+    return () => globalThis.removeEventListener("hashchange", handleHashChange);
+  }, []);
+
+  const changeView = (view: AppView) => {
+    if (view === "dashboard" && !participantDashboardEnabled) return;
+    setActiveView(view);
+    globalThis.history.replaceState(null, "", view === "explorer" ? "#explorer" : "#dashboard");
+  };
+
   const navigateToSection = (sectionId: SectionId, revealAudit = false) => {
     setActiveSection(sectionId);
     if (revealAudit) {
@@ -386,7 +909,59 @@ function App() {
   };
 
   const startPledge = () => {
+    changeView("dashboard");
     navigateToSection("next-step");
+  };
+
+  const refreshExplorer = async () => {
+    setExplorerLoadState("loading");
+    try {
+      const [overview, forkPage, sharePage, bitcoinPage] = await Promise.all([
+        fetchExplorerJson<ExplorerOverview>("/overview"),
+        fetchExplorerJson<ExplorerForkBlockPage>("/fork/blocks?limit=25"),
+        fetchExplorerJson<ExplorerSharePage>("/sharechain/shares?limit=25"),
+        tryExplorerOptional<ExplorerBitcoinBlockPage>("/bitcoin/blocks")
+      ]);
+      setExplorerOverview(overview);
+      setForkBlocks(forkPage);
+      setShares(sharePage);
+      setBitcoinBlocks(bitcoinPage ?? emptyBitcoinBlockPage);
+      setExplorerLoadState("ready");
+    } catch {
+      setExplorerLoadState("unavailable");
+    }
+  };
+
+  const loadMoreForkBlocks = async () => {
+    if (!forkBlocks.nextCursor || loadingMoreFork) return;
+    setLoadingMoreFork(true);
+    try {
+      const page = await fetchExplorerJson<ExplorerForkBlockPage>(
+        `/fork/blocks?limit=25&cursor=${forkBlocks.nextCursor}`
+      );
+      setForkBlocks((current) => ({
+        ...page,
+        items: [...current.items, ...page.items]
+      }));
+    } finally {
+      setLoadingMoreFork(false);
+    }
+  };
+
+  const loadMoreShares = async () => {
+    if (!shares.nextCursor || loadingMoreShares) return;
+    setLoadingMoreShares(true);
+    try {
+      const page = await fetchExplorerJson<ExplorerSharePage>(
+        `/sharechain/shares?limit=25&cursor=${shares.nextCursor}`
+      );
+      setShares((current) => ({
+        ...page,
+        items: [...current.items, ...page.items]
+      }));
+    } finally {
+      setLoadingMoreShares(false);
+    }
   };
 
   const blockNowView = useMemo(() => getRewardView(account, "block-now"), [account]);
@@ -396,53 +971,1178 @@ function App() {
   return (
     <DashboardDataContext.Provider value={dashboardData}>
       <main className="app-shell">
-        <Navigation activeSection={activeSection} onNavigate={navigateToSection} />
+        <Navigation
+          activeSection={activeSection}
+          activeView={activeView}
+          onNavigate={navigateToSection}
+          onViewChange={changeView}
+          participantDashboardEnabled={participantDashboardEnabled}
+        />
         <section className="workspace">
-          <TopBar />
-          <div className="dashboard-grid">
-            <section className="main-column">
-              <DashboardIntro
-                onStartPledge={startPledge}
-                participation={participation}
-              />
-
-              {dashboardData.source !== "local-p2pool-node" ? (
-                <SourceNotice source={dashboardData.source} />
-              ) : null}
-
-              <JoinSummary participation={participation} totals={totals} view={blockNowView} />
-
-              <JourneyStrip participation={participation} view={blockNowView} />
-
-              <section className="focus-grid">
-                <RewardForecast
+          <TopBar activeView={activeView} explorerOverview={explorerOverview} explorerState={explorerLoadState} />
+          {activeView === "dashboard" ? (
+            <div className="dashboard-grid">
+              <section className="main-column">
+                <DashboardIntro
+                  onStartPledge={startPledge}
                   participation={participation}
-                  prospectMode={prospectMode}
-                  view={forecastView}
                 />
-                <ContributionSplit totals={totals} />
+
+                {dashboardData.source !== "local-p2pool-node" ? (
+                  <SourceNotice source={dashboardData.source} />
+                ) : null}
+
+                <JoinSummary participation={participation} totals={totals} view={blockNowView} />
+
+                <JourneyStrip participation={participation} view={blockNowView} />
+
+                <section className="focus-grid">
+                  <RewardForecast
+                    participation={participation}
+                    prospectMode={prospectMode}
+                    view={forecastView}
+                  />
+                  <ContributionSplit totals={totals} />
+                </section>
+
+                <PoolNote />
+
+                <DetailsPanel
+                  auditOpen={auditOpen}
+                  onAuditOpenChange={setAuditOpen}
+                  onWindowChange={setWindow}
+                  participation={participation}
+                  view={forecastView}
+                  window={window}
+                />
               </section>
 
-              <PoolNote />
-
-              <DetailsPanel
-                auditOpen={auditOpen}
-                onAuditOpenChange={setAuditOpen}
-                onWindowChange={setWindow}
+              <NextStepPanel
                 participation={participation}
-                view={forecastView}
-                window={window}
+                view={blockNowView}
               />
-            </section>
-
-            <NextStepPanel
-              participation={participation}
-              view={blockNowView}
+            </div>
+          ) : (
+            <ExplorerWorkspace
+              bitcoinBlocks={bitcoinBlocks}
+              forkBlocks={forkBlocks}
+              loadingMoreFork={loadingMoreFork}
+              loadingMoreShares={loadingMoreShares}
+              loadState={explorerLoadState}
+              onLoadMoreFork={loadMoreForkBlocks}
+              onLoadMoreShares={loadMoreShares}
+              onRefresh={refreshExplorer}
+              overview={explorerOverview}
+              shares={shares}
             />
-          </div>
+          )}
         </section>
       </main>
     </DashboardDataContext.Provider>
+  );
+}
+
+function ExplorerWorkspace({
+  bitcoinBlocks,
+  forkBlocks,
+  loadingMoreFork,
+  loadingMoreShares,
+  loadState,
+  onLoadMoreFork,
+  onLoadMoreShares,
+  onRefresh,
+  overview,
+  shares
+}: {
+  bitcoinBlocks: ExplorerBitcoinBlockPage;
+  forkBlocks: ExplorerForkBlockPage;
+  loadingMoreFork: boolean;
+  loadingMoreShares: boolean;
+  loadState: ExplorerLoadState;
+  onLoadMoreFork: () => Promise<void>;
+  onLoadMoreShares: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+  overview: ExplorerOverview | null;
+  shares: ExplorerSharePage;
+}) {
+  const [tab, setTab] = useState<ExplorerTab>("overview");
+  const [query, setQuery] = useState("");
+  const [searchResult, setSearchResult] = useState<ExplorerSearchResult | null>(null);
+  const [searchState, setSearchState] = useState<"idle" | "searching" | "invalid" | "not-found" | "error">("idle");
+
+  const showForkBlock = async (item: ForkBlockSummary) => {
+    setQuery(item.blockHash);
+    setSearchState("searching");
+    const transactions = await tryExplorerOptional<ForkTransactionPage>(
+      `/fork/blocks/${item.blockHash}/transactions?limit=100`
+    );
+    setSearchResult({ kind: "block", item, transactions });
+    setSearchState("idle");
+  };
+
+  const showBitcoinBlock = async (item: BitcoinIndexObject<BitcoinBlockData>) => {
+    setQuery(item.data.id);
+    setSearchState("searching");
+    const transactions = await tryExplorerOptional<ExplorerBitcoinBlockTransactionPage>(
+      `/bitcoin/blocks/${item.data.id}/transactions`
+    );
+    setSearchResult({ kind: "bitcoin-block", item, transactions });
+    setSearchState("idle");
+  };
+
+  const showBitcoinTransaction = async (item: BitcoinIndexObject<BitcoinTransactionData>) => {
+    setQuery(item.data.txid);
+    setSearchState("searching");
+    const outspends = await tryExplorerOptional<ExplorerBitcoinOutspendPage>(
+      `/bitcoin/transactions/${item.data.txid}/outspends`
+    );
+    setSearchResult({ kind: "bitcoin-transaction", item, outspends });
+    setSearchState("idle");
+  };
+
+  const loadMoreSearchDetail = async (target: ExplorerLoadMoreTarget) => {
+    const current = searchResult;
+    if (target === "fork-block-transactions" && current?.kind === "block" && current.transactions?.nextCursor != null) {
+      const page = await tryExplorerOptional<ForkTransactionPage>(
+        `/fork/blocks/${current.item.blockHash}/transactions?cursor=${current.transactions.nextCursor}&limit=100`
+      );
+      if (page) {
+        setSearchResult((active) => active?.kind === "block" && active.item.blockHash === current.item.blockHash
+          ? { ...active, transactions: { ...page, items: [...(active.transactions?.items ?? []), ...page.items] } }
+          : active);
+      }
+      return;
+    }
+    if (target === "bitcoin-block-transactions" && current?.kind === "bitcoin-block" && current.transactions?.nextCursor != null) {
+      const page = await tryExplorerOptional<ExplorerBitcoinBlockTransactionPage>(
+        `/bitcoin/blocks/${current.item.data.id}/transactions?cursor=${current.transactions.nextCursor}`
+      );
+      if (page) {
+        setSearchResult((active) => active?.kind === "bitcoin-block" && active.item.data.id === current.item.data.id
+          ? { ...active, transactions: { ...page, startIndex: 0, items: [...(active.transactions?.items ?? []), ...page.items] } }
+          : active);
+      }
+      return;
+    }
+    if (current?.kind !== "address") return;
+    if (target === "fork-address-transactions" && current.forkTransactions?.nextCursor != null) {
+      const page = await tryExplorerOptional<ForkAddressTransactionPage>(
+        `/fork/addresses/${current.address}/transactions?cursor=${current.forkTransactions.nextCursor}&limit=100`
+      );
+      if (page) {
+        setSearchResult((active) => active?.kind === "address" && active.address === current.address
+          ? { ...active, forkTransactions: { ...page, items: [...(active.forkTransactions?.items ?? []), ...page.items] } }
+          : active);
+      }
+      return;
+    }
+    if (target === "fork-address-utxos" && current.forkUtxos?.nextCursor != null) {
+      const page = await tryExplorerOptional<ForkUtxoPage>(
+        `/fork/addresses/${current.address}/utxos?cursor=${current.forkUtxos.nextCursor}&limit=100`
+      );
+      if (page) {
+        setSearchResult((active) => active?.kind === "address" && active.address === current.address
+          ? { ...active, forkUtxos: { ...page, items: [...(active.forkUtxos?.items ?? []), ...page.items] } }
+          : active);
+      }
+      return;
+    }
+    if (target === "bitcoin-address-transactions" && current.bitcoinTransactions?.nextCursor) {
+      const page = await tryExplorerOptional<ExplorerBitcoinTransactionPage>(
+        `/bitcoin/addresses/${current.address}/transactions?cursor=${current.bitcoinTransactions.nextCursor}`
+      );
+      if (page) {
+        setSearchResult((active) => active?.kind === "address" && active.address === current.address
+          ? { ...active, bitcoinTransactions: { ...page, items: [...(active.bitcoinTransactions?.items ?? []), ...page.items] } }
+          : active);
+      }
+    }
+  };
+
+  const search = async (searchQuery: string) => {
+    const rawQuery = searchQuery.trim();
+    setQuery(rawQuery);
+    const normalized = rawQuery.toLowerCase();
+    const isHeight = /^[0-9]+$/.test(normalized);
+    const isHash = /^[0-9a-f]{64}$/.test(normalized);
+    const isAddress = /^(?:[13][1-9A-HJ-NP-Za-km-z]{25,34}|bc1[ac-hj-np-z02-9]{11,87})$/.test(rawQuery);
+    setSearchResult(null);
+    if (!isHeight && !isHash && !isAddress) {
+      setSearchState("invalid");
+      return;
+    }
+    setSearchState("searching");
+    try {
+      if (isAddress) {
+        const [fork, forkTransactions, forkUtxos, bitcoin, bitcoinTransactions, bitcoinUtxos] = await Promise.all([
+          tryExplorerOptional<ForkAddressSummary>(`/fork/addresses/${rawQuery}`),
+          tryExplorerOptional<ForkAddressTransactionPage>(`/fork/addresses/${rawQuery}/transactions?limit=100`),
+          tryExplorerOptional<ForkUtxoPage>(`/fork/addresses/${rawQuery}/utxos?limit=100`),
+          tryExplorerOptional<BitcoinIndexObject<BitcoinAddressData>>(`/bitcoin/addresses/${rawQuery}`),
+          tryExplorerOptional<ExplorerBitcoinTransactionPage>(`/bitcoin/addresses/${rawQuery}/transactions`),
+          tryExplorerOptional<Array<BitcoinIndexObject<BitcoinUtxo>>>(`/bitcoin/addresses/${rawQuery}/utxos`)
+        ]);
+        if (fork || bitcoin) {
+          setSearchResult({
+            kind: "address",
+            address: rawQuery,
+            fork,
+            forkTransactions,
+            forkUtxos,
+            bitcoin,
+            bitcoinTransactions,
+            bitcoinUtxos
+          });
+          setSearchState("idle");
+        } else {
+          setSearchState("not-found");
+        }
+        return;
+      }
+      if (isHeight) {
+        const block = await tryExplorerOptional<ForkBlockSummary>(`/fork/heights/${normalized}`);
+        if (block) {
+          await showForkBlock(block);
+        } else {
+          const bitcoinBlock = await tryExplorerOptional<BitcoinIndexObject<BitcoinBlockData>>(
+            `/bitcoin/heights/${normalized}`
+          );
+          if (bitcoinBlock) {
+            await showBitcoinBlock(bitcoinBlock);
+          } else {
+            setSearchState("not-found");
+          }
+        }
+        return;
+      }
+      const block = await tryExplorerOptional<ForkBlockSummary>(`/fork/blocks/${normalized}`);
+      if (block) {
+        await showForkBlock(block);
+        return;
+      }
+      const forkTransaction = await tryExplorerOptional<ForkTransactionDetail>(
+        `/fork/transactions/${normalized}`
+      );
+      if (forkTransaction) {
+        setSearchResult({ kind: "fork-transaction", item: forkTransaction });
+        setSearchState("idle");
+        return;
+      }
+      const share = await tryExplorerOptional<SharechainShareSummary>(`/sharechain/shares/${normalized}`);
+      if (share) {
+        setSearchResult({ kind: "share", item: share });
+        setSearchState("idle");
+        return;
+      }
+      const bitcoinTransaction = await tryExplorerOptional<BitcoinIndexObject<BitcoinTransactionData>>(
+        `/bitcoin/transactions/${normalized}`
+      );
+      if (bitcoinTransaction) {
+        await showBitcoinTransaction(bitcoinTransaction);
+        return;
+      }
+      const bitcoinBlock = await tryExplorerOptional<BitcoinIndexObject<BitcoinBlockData>>(
+        `/bitcoin/blocks/${normalized}`
+      );
+      if (bitcoinBlock) {
+        await showBitcoinBlock(bitcoinBlock);
+        return;
+      }
+      setSearchState("not-found");
+    } catch {
+      setSearchState("error");
+    }
+  };
+
+  const submitSearch = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void search(query);
+  };
+
+  const forkStatus = overview?.fork.status ?? null;
+  const idena = overview?.idena ?? null;
+
+  return (
+    <div className="explorer-workspace">
+      <header className="explorer-header">
+        <div>
+          <span className="eyebrow">PoHW testnet</span>
+          <h1>Network Explorer</h1>
+          <p>Fork transactions, inherited Bitcoin history, sharechain and Idena state</p>
+        </div>
+        <div className="explorer-actions">
+          <form className="explorer-search" onSubmit={submitSearch}>
+            <Search aria-hidden="true" size={17} />
+            <input
+              aria-label="Search by height, block hash, transaction ID, share hash or Bitcoin address"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Height, hash, txid or address"
+              spellCheck={false}
+              value={query}
+            />
+            <button aria-label="Search explorer" title="Search" type="submit">
+              <Search size={17} />
+            </button>
+          </form>
+          <button
+            aria-label="Refresh explorer"
+            className="icon-action"
+            disabled={loadState === "loading"}
+            onClick={() => void onRefresh()}
+            title="Refresh"
+            type="button"
+          >
+            <RefreshCw className={loadState === "loading" ? "spin" : undefined} size={17} />
+          </button>
+        </div>
+      </header>
+
+      {loadState === "unavailable" ? (
+        <section className="explorer-alert error">
+          <AlertTriangle size={17} />
+          <strong>Explorer API unavailable</strong>
+        </section>
+      ) : null}
+
+      {searchState !== "idle" || searchResult ? (
+        <ExplorerSearchPanel
+          onInspect={(value) => void search(value)}
+          onLoadMore={(target) => void loadMoreSearchDetail(target)}
+          result={searchResult}
+          state={searchState}
+        />
+      ) : null}
+
+      <div className="explorer-tabs" role="tablist" aria-label="Explorer data">
+        {([
+          ["overview", "Overview", Activity],
+          ["bitcoin", "Bitcoin history", Bitcoin],
+          ["fork", "Fork blocks", Blocks],
+          ["sharechain", "Sharechain", GitBranch],
+          ["idena", "Idena", ShieldCheck]
+        ] as const).map(([value, label, Icon]) => (
+          <button
+            aria-selected={tab === value}
+            className={tab === value ? "selected" : undefined}
+            key={value}
+            onClick={() => setTab(value)}
+            role="tab"
+            type="button"
+          >
+            <Icon size={16} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+
+      {tab === "overview" ? (
+        <ExplorerOverviewView forkStatus={forkStatus} overview={overview} />
+      ) : null}
+      {tab === "bitcoin" ? (
+        <BitcoinHistoryView
+          blocks={bitcoinBlocks}
+          onInspect={(item) => void showBitcoinBlock(item)}
+          overview={overview?.bitcoinHistory ?? null}
+        />
+      ) : null}
+      {tab === "fork" ? (
+        <ForkBlocksView
+          loadingMore={loadingMoreFork}
+          onInspect={(item) => void showForkBlock(item)}
+          onLoadMore={onLoadMoreFork}
+          page={forkBlocks}
+        />
+      ) : null}
+      {tab === "sharechain" ? (
+        <SharechainExplorerView
+          loadingMore={loadingMoreShares}
+          onInspect={(item) => {
+            setQuery(item.shareHash);
+            setSearchResult({ kind: "share", item });
+            setSearchState("idle");
+          }}
+          onLoadMore={onLoadMoreShares}
+          page={shares}
+        />
+      ) : null}
+      {tab === "idena" ? <IdenaExplorerView idena={idena} /> : null}
+    </div>
+  );
+}
+
+function ExplorerOverviewView({
+  forkStatus,
+  overview
+}: {
+  forkStatus: ForkChainStatus | null;
+  overview: ExplorerOverview | null;
+}) {
+  const sharechain = overview?.sharechain;
+  const idena = overview?.idena;
+  const metrics = [
+    ["Fork height", forkStatus ? formatInt(forkStatus.tipHeight) : "Not connected", Blocks],
+    ["Bitcoin index", overview?.bitcoinHistory?.indexedTipHeight == null ? "Not ready" : formatInt(overview.bitcoinHistory.indexedTipHeight), Database],
+    ["Active shares", sharechain ? formatInt(sharechain.activeShareCount) : "Unavailable", GitBranch],
+    ["Pool miners", sharechain ? formatInt(sharechain.registeredMinerCount) : "Unavailable", Users],
+    ["Eligible identities", idena ? formatInt(idena.eligibleIdentityCount) : "Unavailable", ShieldCheck]
+  ] as const;
+  return (
+    <section className="explorer-view" aria-label="Combined chain overview">
+      <div className="explorer-metrics">
+        {metrics.map(([label, value, Icon]) => (
+          <div className="explorer-metric" key={label}>
+            <Icon size={18} />
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+
+      <section className="cross-layer-band">
+        <div className="cross-layer-step">
+          <Bitcoin size={18} />
+          <span>Fork tip</span>
+          <strong>{forkStatus ? shortHash(forkStatus.tipHash) : "Unavailable"}</strong>
+        </div>
+        <span className="cross-layer-arrow" aria-hidden="true">&rarr;</span>
+        <div className="cross-layer-step">
+          <GitBranch size={18} />
+          <span>Share tip</span>
+          <strong>{shortHash(sharechain?.bestShareTip)}</strong>
+        </div>
+        <span className="cross-layer-arrow" aria-hidden="true">&rarr;</span>
+        <div className="cross-layer-step">
+          <ShieldCheck size={18} />
+          <span>Idena score root</span>
+          <strong>{shortHash(idena?.scoreRoot)}</strong>
+        </div>
+        <span className="cross-layer-arrow" aria-hidden="true">&rarr;</span>
+        <div className="cross-layer-step">
+          <Wallet size={18} />
+          <span>Payout schedules</span>
+          <strong>{formatInt(sharechain?.payoutScheduleCount ?? 0)}</strong>
+        </div>
+      </section>
+
+      <div className="explorer-summary-grid">
+        <section className="explorer-summary-section">
+          <div className="explorer-section-heading">
+            <h2>Bitcoin history</h2>
+            <ExplorerStateBadge state={overview?.bitcoinHistory?.state ?? "not_configured"} />
+          </div>
+          <ExplorerDefinitionList
+            rows={[
+              ["Backend", overview?.bitcoinHistory?.backend ?? "Not configured"],
+              ["Indexed tip", overview?.bitcoinHistory?.indexedTipHeight == null ? "Unavailable" : formatInt(overview.bitcoinHistory.indexedTipHeight)],
+              ["Fork parent", overview?.bitcoinHistory?.inheritedTipHeight == null ? "Unavailable" : formatInt(overview.bitcoinHistory.inheritedTipHeight)],
+              ["Inherited history", overview?.bitcoinHistory?.inheritedHistoryReady ? "Ready" : "Not ready"],
+              ["Participant requirement", overview?.bitcoinHistory?.participantIndexRequired ? "Full index" : "API only"]
+            ]}
+          />
+        </section>
+        <section className="explorer-summary-section">
+          <div className="explorer-section-heading">
+            <h2>Fork consensus</h2>
+            <ExplorerStateBadge state={overview?.fork.state ?? "unavailable"} />
+          </div>
+          <ExplorerDefinitionList
+            rows={[
+              ["Chain", forkStatus?.chainName ?? "Not configured"],
+              ["Difficulty phase", forkStatus?.difficultyPhase ?? "Unavailable"],
+              ["Estimated hashrate", formatHashrate(forkStatus?.estimatedHashrateHps)],
+              ["Active blocks", formatInt(forkStatus?.activeForkBlockCount ?? 0)],
+              ["Target spacing", forkStatus ? `${formatInt(forkStatus.targetSpacingSeconds)} s` : "Unavailable"],
+              ["Transaction scope", forkStatus?.transactionConsensus ?? "Unavailable"]
+            ]}
+          />
+        </section>
+        <section className="explorer-summary-section">
+          <div className="explorer-section-heading">
+            <h2>Sharechain</h2>
+            <ExplorerStateBadge state={sharechain ? "connected" : "unavailable"} />
+          </div>
+          <ExplorerDefinitionList
+            rows={[
+              ["Best height", sharechain?.bestShareHeight == null ? "No shares" : formatInt(sharechain.bestShareHeight)],
+              ["Stored shares", formatInt(sharechain?.storedShareCount ?? 0)],
+              ["Inactive shares", formatInt(sharechain?.inactiveShareCount ?? 0)],
+              ["Templates", formatInt(sharechain?.bitcoinWorkTemplateCount ?? 0)],
+              ["Snapshot vote roots", formatInt(sharechain?.snapshotVoteRootCount ?? 0)],
+              ["Active score", formatIntegerString(sharechain?.activeShareScoreTotal ?? "0")]
+            ]}
+          />
+        </section>
+        <section className="explorer-summary-section">
+          <div className="explorer-section-heading">
+            <h2>Idena snapshot</h2>
+            <ExplorerStateBadge state={idena?.state ?? "unavailable"} />
+          </div>
+          <ExplorerDefinitionList
+            rows={[
+              ["Snapshot day", idena?.snapshotDay ?? "Unavailable"],
+              ["Height", idena?.snapshotHeight == null ? "Unavailable" : formatInt(idena.snapshotHeight)],
+              ["Identities", formatInt(idena?.identityCount ?? 0)],
+              ["Eligible", formatInt(idena?.eligibleIdentityCount ?? 0)],
+              ["Formula", idena?.formulaVersion == null ? "Unavailable" : `v${idena.formulaVersion}`],
+              ["Reward coverage", formatCoverage(idena?.rewardSourceCoverage)]
+            ]}
+          />
+        </section>
+      </div>
+
+      {overview?.limitations.map((limitation) => (
+        <div className="explorer-limitation" key={limitation}>
+          <AlertTriangle size={15} />
+          <span>{limitation}</span>
+        </div>
+      ))}
+      {overview?.safetyBoundaries.map((boundary) => (
+        <div className="explorer-boundary" key={boundary}>
+          <ShieldCheck size={15} />
+          <span>{boundary}</span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function BitcoinHistoryView({
+  blocks,
+  onInspect,
+  overview
+}: {
+  blocks: ExplorerBitcoinBlockPage;
+  onInspect: (item: BitcoinIndexObject<BitcoinBlockData>) => void;
+  overview: ExplorerOverview["bitcoinHistory"] | null;
+}) {
+  return (
+    <section className="explorer-view">
+      <div className="explorer-section-heading">
+        <div>
+          <h2>Bitcoin history index</h2>
+          <span>Hosted once for the network</span>
+        </div>
+        <ExplorerStateBadge state={overview?.state ?? "not_configured"} />
+      </div>
+      <div className="explorer-summary-grid compact">
+        <section className="explorer-summary-section">
+          <ExplorerDefinitionList
+            rows={[
+              ["Indexed tip", overview?.indexedTipHeight == null ? "Unavailable" : formatInt(overview.indexedTipHeight)],
+              ["Fork parent", overview?.inheritedTipHeight == null ? "Unavailable" : formatInt(overview.inheritedTipHeight)],
+              ["Inherited history", overview?.inheritedHistoryReady ? "Ready" : "Syncing or unavailable"],
+              ["Participant index", overview?.participantIndexRequired ? "Required" : "Not required"]
+            ]}
+          />
+        </section>
+      </div>
+      {blocks.items.length === 0 ? (
+        <ExplorerEmptyState icon={Database} label="Bitcoin history index is not ready" />
+      ) : (
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead>
+              <tr>
+                <th>Height</th>
+                <th>Branch relation</th>
+                <th>Block</th>
+                <th>Time</th>
+                <th>Transactions</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              {blocks.items.map((block) => (
+                <tr key={block.data.id}>
+                  <td>{formatInt(block.data.height)}</td>
+                  <td><ExplorerStateBadge state={block.forkRelation} /></td>
+                  <td>
+                    <button className="hash-button" onClick={() => onInspect(block)} type="button">
+                      {shortHash(block.data.id)}
+                    </button>
+                  </td>
+                  <td>{formatUnixTime(block.data.timestamp)}</td>
+                  <td>{formatInt(block.data.tx_count)}</td>
+                  <td>{formatInt(block.data.size)} bytes</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ForkBlocksView({
+  loadingMore,
+  onInspect,
+  onLoadMore,
+  page
+}: {
+  loadingMore: boolean;
+  onInspect: (item: ForkBlockSummary) => void;
+  onLoadMore: () => Promise<void>;
+  page: ExplorerForkBlockPage;
+}) {
+  return (
+    <section className="explorer-view">
+      <div className="explorer-section-heading">
+        <div>
+          <h2>Fork blocks</h2>
+          <span>{formatInt(page.total)} stored</span>
+        </div>
+        <ExplorerStateBadge state={page.state} />
+      </div>
+      {page.items.length === 0 ? (
+        <ExplorerEmptyState icon={Blocks} label={page.state === "not_configured" ? "Fork RPC not configured" : "No fork blocks yet"} />
+      ) : (
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead>
+              <tr>
+                <th>Height</th>
+                <th>Status</th>
+                <th>Block</th>
+                <th>Time</th>
+                <th>Phase</th>
+                <th>Bits</th>
+                <th>PoHW commitment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {page.items.map((block) => (
+                <tr key={block.blockHash}>
+                  <td>{formatInt(block.height)}</td>
+                  <td><ExplorerStateBadge state={block.active ? "active" : "orphan"} /></td>
+                  <td><button className="hash-button" onClick={() => onInspect(block)} type="button">{shortHash(block.blockHash)}</button></td>
+                  <td>{formatUnixTime(block.timestamp)}</td>
+                  <td>{formatStateLabel(block.difficultyPhase)}</td>
+                  <td><code>{block.bits}</code></td>
+                  <td><code>{shortHash(block.pohwCommitmentHash)}</code></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {page.nextCursor ? (
+        <button className="load-more" disabled={loadingMore} onClick={() => void onLoadMore()} type="button">
+          {loadingMore ? <RefreshCw className="spin" size={15} /> : <Database size={15} />}
+          <span>{loadingMore ? "Loading" : "Load more"}</span>
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function SharechainExplorerView({
+  loadingMore,
+  onInspect,
+  onLoadMore,
+  page
+}: {
+  loadingMore: boolean;
+  onInspect: (item: SharechainShareSummary) => void;
+  onLoadMore: () => Promise<void>;
+  page: ExplorerSharePage;
+}) {
+  return (
+    <section className="explorer-view">
+      <div className="explorer-section-heading">
+        <div>
+          <h2>Sharechain</h2>
+          <span>{formatInt(page.total)} stored</span>
+        </div>
+        <ExplorerStateBadge state="connected" />
+      </div>
+      {page.items.length === 0 ? (
+        <ExplorerEmptyState icon={GitBranch} label="No shares yet" />
+      ) : (
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead>
+              <tr>
+                <th>Height</th>
+                <th>Status</th>
+                <th>Share</th>
+                <th>Miner</th>
+                <th>Score</th>
+                <th>Template</th>
+                <th>Snapshot</th>
+              </tr>
+            </thead>
+            <tbody>
+              {page.items.map((share) => (
+                <tr key={share.shareHash}>
+                  <td>{formatInt(share.height)}</td>
+                  <td><ExplorerStateBadge state={share.active ? "active" : "inactive"} /></td>
+                  <td><button className="hash-button" onClick={() => onInspect(share)} type="button">{shortHash(share.shareHash)}</button></td>
+                  <td>{share.minerId}</td>
+                  <td>{formatIntegerString(share.hashrateScoreDelta)}</td>
+                  <td><code>{shortHash(share.bitcoinTemplateHash)}</code></td>
+                  <td>{share.idenaSnapshotId}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {page.nextCursor ? (
+        <button className="load-more" disabled={loadingMore} onClick={() => void onLoadMore()} type="button">
+          {loadingMore ? <RefreshCw className="spin" size={15} /> : <Database size={15} />}
+          <span>{loadingMore ? "Loading" : "Load more"}</span>
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function IdenaExplorerView({ idena }: { idena: ExplorerIdenaOverview | null }) {
+  return (
+    <section className="explorer-view">
+      <div className="explorer-section-heading">
+        <div>
+          <h2>Idena snapshot</h2>
+          <span>{idena?.snapshotDay ?? "No verified snapshot"}</span>
+        </div>
+        <ExplorerStateBadge state={idena?.state ?? "unavailable"} />
+      </div>
+      <div className="idena-explorer-grid">
+        <ExplorerDefinitionList
+          rows={[
+            ["Snapshot height", idena?.snapshotHeight == null ? "Unavailable" : formatInt(idena.snapshotHeight)],
+            ["Score root", shortHash(idena?.scoreRoot)],
+            ["Identity root", shortHash(idena?.identityRoot)],
+            ["Formula version", idena?.formulaVersion == null ? "Unavailable" : `v${idena.formulaVersion}`],
+            ["All identities", formatInt(idena?.identityCount ?? 0)],
+            ["Eligible identities", formatInt(idena?.eligibleIdentityCount ?? 0)]
+          ]}
+        />
+        <ExplorerDefinitionList
+          rows={[
+            ["Validation score", formatIntegerString(idena?.validationScoreTotal ?? "0")],
+            ["Proposer score", formatIntegerString(idena?.proposerScoreTotal ?? "0")],
+            ["Committee score", formatIntegerString(idena?.committeeScoreTotal ?? "0")],
+            ["Invitation score ignored", formatIntegerString(idena?.ignoredInvitationScoreTotal ?? "0")],
+            ["Reward coverage", formatCoverage(idena?.rewardSourceCoverage)],
+            ["Address exposure", "Aggregate only"]
+          ]}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ExplorerSearchPanel({
+  onInspect,
+  onLoadMore,
+  result,
+  state
+}: {
+  onInspect: (value: string) => void;
+  onLoadMore: (target: ExplorerLoadMoreTarget) => void;
+  result: ExplorerSearchResult | null;
+  state: "idle" | "searching" | "invalid" | "not-found" | "error";
+}) {
+  if (!result) {
+    const messages = {
+      idle: "",
+      searching: "Searching",
+      invalid: "Enter a height, 64-character hash, transaction ID or Bitcoin address",
+      "not-found": "No matching block, transaction, share or address",
+      error: "Search unavailable"
+    } as const;
+    return (
+      <section className={`explorer-alert ${state === "error" || state === "invalid" ? "error" : ""}`}>
+        {state === "searching" ? <RefreshCw className="spin" size={17} /> : <Search size={17} />}
+        <strong>{messages[state]}</strong>
+      </section>
+    );
+  }
+  if (result.kind === "block") {
+    const block = result.item;
+    return (
+      <section className="explorer-detail">
+        <div className="explorer-section-heading">
+          <div><h2>Fork block {formatInt(block.height)}</h2><code>{block.blockHash}</code></div>
+          <ExplorerStateBadge state={block.active ? "active" : "orphan"} />
+        </div>
+        <ExplorerDefinitionList rows={[
+          ["Previous block", block.previousBlockHash],
+          ["Timestamp", formatUnixTime(block.timestamp, true)],
+          ["Difficulty", `${formatStateLabel(block.difficultyPhase)} / ${block.bits}`],
+          ["Cumulative work", block.cumulativeWork],
+          ["Transactions", formatInt(block.transactionCount)],
+          ["Coinbase txid", block.coinbaseTxid],
+          ["Coinbase", `${formatSats(block.coinbaseValueSats)} sats / ${block.coinbaseOutputCount} outputs`],
+          ["PoHW commitment", block.pohwCommitmentHash ?? "Not present"],
+          ["Size", `${formatInt(block.sizeBytes)} bytes / ${formatInt(block.weightWu)} WU`],
+          ["Merkle root", block.merkleRoot]
+        ]} longValues />
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Transactions</h3>
+          <span>{formatInt(result.transactions?.total ?? block.transactionCount)} total</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Transaction</th><th>Type</th><th>Output</th><th>Fee</th></tr></thead>
+            <tbody>
+              {(result.transactions?.items ?? []).map((transaction) => (
+                <tr key={transaction.txid}>
+                  <td>{formatInt(transaction.transactionIndex)}</td>
+                  <td><button className="hash-button" onClick={() => onInspect(transaction.txid)} type="button">{shortHash(transaction.txid)}</button></td>
+                  <td>{transaction.coinbase ? "Coinbase" : "Standard"}</td>
+                  <td>{formatSats(transaction.totalOutputSats)} sats</td>
+                  <td>{transaction.feeSats == null ? "N/A" : `${formatSats(transaction.feeSats)} sats`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {result.transactions?.nextCursor != null ? (
+          <button className="load-more" onClick={() => onLoadMore("fork-block-transactions")} type="button">
+            <Database size={15} /><span>Load more transactions</span>
+          </button>
+        ) : null}
+      </section>
+    );
+  }
+  if (result.kind === "fork-transaction") {
+    const transaction = result.item;
+    return (
+      <section className="explorer-detail">
+        <div className="explorer-section-heading">
+          <div><h2>Fork transaction</h2><code>{transaction.txid}</code></div>
+          <ExplorerStateBadge state={transaction.active ? "active" : "orphan"} />
+        </div>
+        <ExplorerDefinitionList rows={[
+          ["Block", `${formatInt(transaction.height)} / ${transaction.blockHash}`],
+          ["Type", transaction.coinbase ? "Coinbase" : "Standard transaction"],
+          ["Version / locktime", `${transaction.version} / ${transaction.lockTime}`],
+          ["Inputs / outputs", `${formatInt(transaction.inputCount)} / ${formatInt(transaction.outputCount)}`],
+          ["Input value", transaction.totalInputSats == null ? "Not applicable" : `${formatSats(transaction.totalInputSats)} sats`],
+          ["Output value", `${formatSats(transaction.totalOutputSats)} sats`],
+          ["Fee", transaction.feeSats == null ? "Not applicable" : `${formatSats(transaction.feeSats)} sats`],
+          ["Size", `${formatInt(transaction.sizeBytes)} bytes / ${formatInt(transaction.weightWu)} WU`],
+          ["Witness txid", transaction.wtxid]
+        ]} longValues />
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Inputs</h3>
+          <span>{formatInt(transaction.inputs.length)} inputs</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Previous output</th><th>Value</th><th>Address or script</th><th>Witness</th></tr></thead>
+            <tbody>
+              {transaction.inputs.map((input) => (
+                <tr key={`${transaction.txid}:vin:${input.vin}`}>
+                  <td>{input.vin}</td>
+                  <td>{input.coinbase ? "Coinbase" : <button className="hash-button" onClick={() => { if (input.previousTxid) onInspect(input.previousTxid); }} type="button">{shortHash(input.previousTxid)}:{input.previousVout}</button>}</td>
+                  <td>{input.previousOutput ? `${formatSats(input.previousOutput.valueSats)} sats` : "N/A"}</td>
+                  <td><code>{input.previousOutput?.address ?? input.previousOutput?.scriptHash ?? shortHash(input.scriptSigHex)}</code></td>
+                  <td>{formatInt(input.witness.length)} items</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Outputs</h3>
+          <span>{formatInt(transaction.outputs.length)} outputs</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Value</th><th>Type</th><th>Address or script hash</th><th>State</th></tr></thead>
+            <tbody>
+              {transaction.outputs.map((output) => (
+                <tr key={`${transaction.txid}:${output.vout}`}>
+                  <td>{output.vout}</td>
+                  <td>{formatSats(output.valueSats)} sats</td>
+                  <td>{formatStateLabel(output.scriptType)}</td>
+                  <td><code>{output.address ?? output.scriptHash}</code></td>
+                  <td><ExplorerStateBadge state={output.spentBy ? "spent" : "unspent"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+  if (result.kind === "bitcoin-block") {
+    const block = result.item;
+    return (
+      <section className="explorer-detail">
+        <div className="explorer-section-heading">
+          <div><h2>Bitcoin history block {formatInt(block.data.height)}</h2><code>{block.data.id}</code></div>
+          <ExplorerStateBadge state={block.forkRelation} />
+        </div>
+        <ExplorerDefinitionList rows={[
+          ["Previous block", block.data.previousblockhash ?? "Genesis"],
+          ["Timestamp", formatUnixTime(block.data.timestamp, true)],
+          ["Transactions", formatInt(block.data.tx_count)],
+          ["Version / nonce", `${block.data.version} / ${block.data.nonce}`],
+          ["Size", `${formatInt(block.data.size)} bytes / ${formatInt(block.data.weight)} WU`],
+          ["Merkle root", block.data.merkle_root]
+        ]} longValues />
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Transactions</h3>
+          <span>{formatInt(block.data.tx_count)} total</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Transaction</th><th>Inputs</th><th>Outputs</th><th>Fee</th></tr></thead>
+            <tbody>
+              {(result.transactions?.items ?? []).map((transaction, offset) => (
+                <tr key={transaction.data.txid}>
+                  <td>{formatInt((result.transactions?.startIndex ?? 0) + offset)}</td>
+                  <td><button className="hash-button" onClick={() => onInspect(transaction.data.txid)} type="button">{shortHash(transaction.data.txid)}</button></td>
+                  <td>{formatInt(transaction.data.vin.length)}</td>
+                  <td>{formatInt(transaction.data.vout.length)}</td>
+                  <td>{formatSats(transaction.data.fee)} sats</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {result.transactions?.nextCursor != null ? (
+          <button className="load-more" onClick={() => onLoadMore("bitcoin-block-transactions")} type="button">
+            <Database size={15} /><span>Load more transactions</span>
+          </button>
+        ) : null}
+      </section>
+    );
+  }
+  if (result.kind === "bitcoin-transaction") {
+    const transaction = result.item;
+    return (
+      <section className="explorer-detail">
+        <div className="explorer-section-heading">
+          <div><h2>Bitcoin history transaction</h2><code>{transaction.data.txid}</code></div>
+          <ExplorerStateBadge state={transaction.forkRelation} />
+        </div>
+        <ExplorerDefinitionList rows={[
+          ["Confirmation", transaction.data.status.confirmed ? `Height ${formatInt(transaction.data.status.block_height ?? 0)}` : "Unconfirmed"],
+          ["Block", transaction.data.status.block_hash ?? "Not confirmed"],
+          ["Version / locktime", `${transaction.data.version} / ${transaction.data.locktime}`],
+          ["Inputs / outputs", `${formatInt(transaction.data.vin.length)} / ${formatInt(transaction.data.vout.length)}`],
+          ["Fee", `${formatSats(transaction.data.fee)} sats`],
+          ["Size", `${formatInt(transaction.data.size)} bytes / ${formatInt(transaction.data.weight)} WU`]
+        ]} longValues />
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Inputs</h3>
+          <span>{formatInt(transaction.data.vin.length)} inputs</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Previous output</th><th>Value</th><th>Address or script</th><th>Witness</th></tr></thead>
+            <tbody>
+              {transaction.data.vin.map((input, index) => (
+                <tr key={`${transaction.data.txid}:vin:${index}`}>
+                  <td>{index}</td>
+                  <td>{input.is_coinbase ? "Coinbase" : <button className="hash-button" onClick={() => { if (input.txid) onInspect(input.txid); }} type="button">{shortHash(input.txid)}:{input.vout}</button>}</td>
+                  <td>{input.prevout ? `${formatSats(input.prevout.value)} sats` : "N/A"}</td>
+                  <td><code>{input.prevout?.scriptpubkey_address ?? shortHash(input.prevout?.scriptpubkey ?? input.scriptsig)}</code></td>
+                  <td>{formatInt(input.witness?.length ?? 0)} items</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Outputs</h3>
+          <span>{formatInt(transaction.data.vout.length)} outputs</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Index</th><th>Value</th><th>Type</th><th>Address or script</th><th>State</th></tr></thead>
+            <tbody>
+              {transaction.data.vout.map((output, index) => (
+                <tr key={`${transaction.data.txid}:${index}`}>
+                  <td>{index}</td>
+                  <td>{formatSats(output.value)} sats</td>
+                  <td>{formatStateLabel(output.scriptpubkey_type)}</td>
+                  <td><code>{output.scriptpubkey_address ?? shortHash(output.scriptpubkey)}</code></td>
+                  <td><ExplorerStateBadge state={result.outspends ? (result.outspends.items[index]?.spent ? "spent" : "unspent") : "unknown"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+  if (result.kind === "address") {
+    const bitcoinStats = result.bitcoin?.data.chain_stats;
+    return (
+      <section className="explorer-detail">
+        <div className="explorer-section-heading">
+          <div><h2>Bitcoin address</h2><code>{result.address}</code></div>
+          <ExplorerStateBadge state={result.fork ? "fork_activity" : result.bitcoin?.forkRelation ?? "not_found"} />
+        </div>
+        <div className="idena-explorer-grid">
+          <ExplorerDefinitionList rows={[
+            ["Fork transactions", formatInt(result.fork?.transactionCount ?? 0)],
+            ["Fork funded outputs", formatInt(result.fork?.fundedOutputCount ?? 0)],
+            ["Fork spent outputs", formatInt(result.fork?.spentOutputCount ?? 0)],
+            ["Fork balance", `${formatSats(result.fork?.balanceSats ?? 0)} sats`],
+            ["Fork first height", result.fork?.firstSeenHeight == null ? "No activity" : formatInt(result.fork.firstSeenHeight)],
+            ["Fork last height", result.fork?.lastSeenHeight == null ? "No activity" : formatInt(result.fork.lastSeenHeight)]
+          ]} />
+          <ExplorerDefinitionList rows={[
+            ["Bitcoin history transactions", formatInt(bitcoinStats?.tx_count ?? 0)],
+            ["Bitcoin history funded", `${formatSats(bitcoinStats?.funded_txo_sum ?? 0)} sats`],
+            ["Bitcoin history spent", `${formatSats(bitcoinStats?.spent_txo_sum ?? 0)} sats`],
+            ["Current mainnet balance", `${formatSats((bitcoinStats?.funded_txo_sum ?? 0) - (bitcoinStats?.spent_txo_sum ?? 0))} sats`],
+            ["Fork spendability", "Inherited outputs locked"],
+            ["Participant index", "Not required"]
+          ]} />
+        </div>
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Fork transactions</h3>
+          <span>{formatInt(result.forkTransactions?.total ?? 0)} total</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Height</th><th>Transaction</th><th>Type</th><th>Output</th><th>Fee</th></tr></thead>
+            <tbody>
+              {(result.forkTransactions?.items ?? []).map((transaction) => (
+                <tr key={`fork:${transaction.txid}`}>
+                  <td>{formatInt(transaction.height)}</td>
+                  <td><button className="hash-button" onClick={() => onInspect(transaction.txid)} type="button">{shortHash(transaction.txid)}</button></td>
+                  <td>{transaction.coinbase ? "Coinbase" : "Standard"}</td>
+                  <td>{formatSats(transaction.totalOutputSats)} sats</td>
+                  <td>{transaction.feeSats == null ? "N/A" : `${formatSats(transaction.feeSats)} sats`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {result.forkTransactions?.nextCursor != null ? (
+          <button className="load-more" onClick={() => onLoadMore("fork-address-transactions")} type="button">
+            <Database size={15} /><span>Load more fork transactions</span>
+          </button>
+        ) : null}
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Fork UTXOs</h3>
+          <span>{formatInt(result.forkUtxos?.total ?? 0)} total</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Height</th><th>Outpoint</th><th>Value</th><th>Type</th><th>Source</th></tr></thead>
+            <tbody>
+              {(result.forkUtxos?.items ?? []).map((utxo) => (
+                <tr key={`fork:${utxo.txid}:${utxo.vout}`}>
+                  <td>{formatInt(utxo.height)}</td>
+                  <td><button className="hash-button" onClick={() => onInspect(utxo.txid)} type="button">{shortHash(utxo.txid)}:{utxo.vout}</button></td>
+                  <td>{formatSats(utxo.valueSats)} sats</td>
+                  <td>{formatStateLabel(utxo.scriptType)}</td>
+                  <td>{utxo.coinbase ? "Coinbase" : "Transaction"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {result.forkUtxos?.nextCursor != null ? (
+          <button className="load-more" onClick={() => onLoadMore("fork-address-utxos")} type="button">
+            <Database size={15} /><span>Load more fork UTXOs</span>
+          </button>
+        ) : null}
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Bitcoin history transactions</h3>
+          <span>{formatInt(result.bitcoinTransactions?.items.length ?? 0)} loaded</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Status</th><th>Transaction</th><th>Inputs</th><th>Outputs</th><th>Fee</th></tr></thead>
+            <tbody>
+              {(result.bitcoinTransactions?.items ?? []).map((transaction) => (
+                <tr key={`bitcoin:${transaction.data.txid}`}>
+                  <td><ExplorerStateBadge state={transaction.forkRelation} /></td>
+                  <td><button className="hash-button" onClick={() => onInspect(transaction.data.txid)} type="button">{shortHash(transaction.data.txid)}</button></td>
+                  <td>{formatInt(transaction.data.vin.length)}</td>
+                  <td>{formatInt(transaction.data.vout.length)}</td>
+                  <td>{formatSats(transaction.data.fee)} sats</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {result.bitcoinTransactions?.nextCursor ? (
+          <button className="load-more" onClick={() => onLoadMore("bitcoin-address-transactions")} type="button">
+            <Database size={15} /><span>Load more Bitcoin transactions</span>
+          </button>
+        ) : null}
+        <div className="explorer-section-heading subsection-heading">
+          <h3>Current Bitcoin mainnet UTXOs</h3>
+          <span>Read-only history view</span>
+        </div>
+        <div className="explorer-table-wrap">
+          <table className="explorer-table">
+            <thead><tr><th>Height</th><th>Outpoint</th><th>Value</th><th>Relation</th><th>Fork spendability</th></tr></thead>
+            <tbody>
+              {(result.bitcoinUtxos ?? []).map((utxo) => (
+                <tr key={`bitcoin:${utxo.data.txid}:${utxo.data.vout}`}>
+                  <td>{utxo.data.status.block_height == null ? "Mempool" : formatInt(utxo.data.status.block_height)}</td>
+                  <td><button className="hash-button" onClick={() => onInspect(utxo.data.txid)} type="button">{shortHash(utxo.data.txid)}:{utxo.data.vout}</button></td>
+                  <td>{formatSats(utxo.data.value)} sats</td>
+                  <td><ExplorerStateBadge state={utxo.forkRelation} /></td>
+                  <td>Locked</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+  const share = result.item;
+  return (
+    <section className="explorer-detail">
+      <div className="explorer-section-heading">
+        <div><h2>Share {formatInt(share.height)}</h2><code>{share.shareHash}</code></div>
+        <ExplorerStateBadge state={share.active ? "active" : "inactive"} />
+      </div>
+      <ExplorerDefinitionList rows={[
+        ["Miner", share.minerId],
+        ["Parent share", share.parentShareHash],
+        ["Bitcoin template", share.bitcoinTemplateHash],
+        ["Work hash", share.workHash],
+        ["Target", share.target],
+        ["Score delta", formatIntegerString(share.hashrateScoreDelta)],
+        ["Cumulative score", formatIntegerString(share.cumulativeScore ?? "0")],
+        ["Idena snapshot", share.idenaSnapshotId],
+        ["Snapshot proof root", share.idenaSnapshotProofRoot]
+      ]} longValues />
+    </section>
+  );
+}
+
+function ExplorerDefinitionList({ rows, longValues = false }: { rows: [string, string][]; longValues?: boolean }) {
+  return (
+    <dl className={longValues ? "explorer-definition-list long-values" : "explorer-definition-list"}>
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function ExplorerStateBadge({ state }: { state: string }) {
+  const normalized = state.replaceAll("_", "-");
+  return <span className={`explorer-state ${normalized}`}>{formatStateLabel(state)}</span>;
+}
+
+function ExplorerEmptyState({ icon: Icon, label }: { icon: typeof Activity; label: string }) {
+  return (
+    <div className="explorer-empty">
+      <Icon size={22} />
+      <strong>{label}</strong>
+    </div>
   );
 }
 
@@ -629,10 +2329,16 @@ function JourneyStrip({ participation, view }: { participation: ParticipationSta
 
 function Navigation({
   activeSection,
-  onNavigate
+  activeView,
+  onNavigate,
+  onViewChange,
+  participantDashboardEnabled
 }: {
   activeSection: SectionId;
+  activeView: AppView;
   onNavigate: (sectionId: SectionId, revealAudit?: boolean) => void;
+  onViewChange: (view: AppView) => void;
+  participantDashboardEnabled: boolean;
 }) {
   const items: {
     icon: typeof Activity;
@@ -651,34 +2357,79 @@ function Navigation({
         <div className="brand-mark">
           <Brain size={18} />
         </div>
-        <span>PoHW Pool</span>
+        <span>PoHW Network</span>
       </div>
       <nav>
-        {items.map((item) => (
+        <button
+          aria-current={activeView === "explorer" ? "page" : undefined}
+          aria-label="Open network explorer"
+          className={activeView === "explorer" ? "nav-item active" : "nav-item"}
+          onClick={() => onViewChange("explorer")}
+          title="Explorer"
+          type="button"
+        >
+          <Blocks size={17} />
+          <span>Explorer</span>
+        </button>
+        {participantDashboardEnabled ? items.map((item) => (
           <button
-            aria-current={activeSection === item.sectionId ? "page" : undefined}
+            aria-current={activeView === "dashboard" && activeSection === item.sectionId ? "page" : undefined}
             aria-label={`Go to ${item.label}`}
-            className={activeSection === item.sectionId ? "nav-item active" : "nav-item"}
+            className={activeView === "dashboard" && activeSection === item.sectionId ? "nav-item active" : "nav-item"}
             key={item.label}
-            onClick={() => onNavigate(item.sectionId, item.revealAudit)}
+            onClick={() => {
+              onViewChange("dashboard");
+              onNavigate(item.sectionId, item.revealAudit);
+            }}
             title={item.label}
             type="button"
           >
             <item.icon size={17} />
             <span>{item.label}</span>
           </button>
-        ))}
+        )) : null}
       </nav>
       <div className="nav-footer">
         <HardDrive size={16} />
-        <span>Local-first node UI</span>
+        <span>Hosted + local</span>
       </div>
     </aside>
   );
 }
 
-function TopBar() {
+function TopBar({
+  activeView,
+  explorerOverview,
+  explorerState
+}: {
+  activeView: AppView;
+  explorerOverview: ExplorerOverview | null;
+  explorerState: ExplorerLoadState;
+}) {
   const { serviceStatuses } = useDashboardData();
+  const explorerStatuses: ServiceStatus[] = [
+    {
+      label: "Fork",
+      state: explorerOverview?.fork.state === "connected" ? "connected" : "warning",
+      detail: explorerOverview?.fork.status ? `height ${formatInt(explorerOverview.fork.status.tipHeight)}` : "unavailable"
+    },
+    {
+      label: "Sharechain",
+      state: explorerOverview ? "connected" : "warning",
+      detail: explorerOverview ? `${formatInt(explorerOverview.sharechain.activeShareCount)} active` : "unavailable"
+    },
+    {
+      label: "Idena",
+      state: explorerOverview?.idena.state === "verified_snapshot" ? "connected" : "pending",
+      detail: explorerOverview?.idena.snapshotHeight == null ? "no snapshot" : `height ${formatInt(explorerOverview.idena.snapshotHeight)}`
+    },
+    {
+      label: "API",
+      state: explorerState === "ready" ? "connected" : explorerState === "loading" ? "syncing" : "warning",
+      detail: explorerState
+    }
+  ];
+  const statuses = activeView === "explorer" ? explorerStatuses : serviceStatuses;
   return (
     <header className="top-bar">
       <div className="network-title">
@@ -686,7 +2437,7 @@ function TopBar() {
         <span>proof of human work pool</span>
       </div>
       <div className="service-row">
-        {serviceStatuses.map((status) => (
+        {statuses.map((status) => (
           <div className="service-pill" key={status.label}>
             <span className={`state-dot ${status.state}`} />
             <span className="service-label">{status.label}</span>
@@ -1507,6 +3258,54 @@ function getRewardView(account: PoolSnapshot, prospectMode: ProspectMode): Rewar
     netSats,
     vaultSats
   };
+}
+
+function shortHash(value?: string | null) {
+  if (!value) return "Not available";
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 10)}...${value.slice(-8)}`;
+}
+
+function formatIntegerString(value: string) {
+  try {
+    return new Intl.NumberFormat("en-US").format(BigInt(value));
+  } catch {
+    return value;
+  }
+}
+
+function formatUnixTime(value: number, includeDate = false) {
+  if (!Number.isFinite(value) || value <= 0) return "Unavailable";
+  return new Intl.DateTimeFormat("en-GB", {
+    dateStyle: includeDate ? "medium" : undefined,
+    timeStyle: includeDate ? "medium" : "short",
+    timeZone: "UTC"
+  }).format(new Date(value * 1000));
+}
+
+function formatHashrate(value?: string | null) {
+  if (!value) return "Unavailable";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return `${value} H/s`;
+  if (numeric >= 1e18) return `${(numeric / 1e18).toFixed(2)} EH/s`;
+  if (numeric >= 1e15) return `${(numeric / 1e15).toFixed(2)} PH/s`;
+  if (numeric >= 1e12) return `${(numeric / 1e12).toFixed(2)} TH/s`;
+  if (numeric >= 1e9) return `${(numeric / 1e9).toFixed(2)} GH/s`;
+  if (numeric >= 1e6) return `${(numeric / 1e6).toFixed(2)} MH/s`;
+  return `${formatInt(Math.round(numeric))} H/s`;
+}
+
+function formatStateLabel(value?: string | null) {
+  if (!value) return "Unavailable";
+  return value
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatCoverage(value?: string | null) {
+  if (value === "verified_snapshot_partial_sources") return "Verified snapshot / partial sources";
+  return formatStateLabel(value);
 }
 
 function formatInt(value: number) {

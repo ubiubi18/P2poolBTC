@@ -12,6 +12,7 @@ MINING_ADAPTER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-mining-adapter.sh"
 FORK_CHAIN_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-fork-chain-node.sh"
 GOSSIP_MESH_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-gossip-mesh.sh"
 DASHBOARD_UI_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-ui.sh"
+DASHBOARD_API_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-api.sh"
 LOCAL_GOSSIP_PEER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-local-gossip-peer.sh"
 
 
@@ -334,11 +335,14 @@ class RunWrapperValidationTest(unittest.TestCase):
             root = Path(temp)
             args_out = root / "args.txt"
             manifest = root / "fork-activation.json"
-            manifest.write_text("{}\n", encoding="utf-8")
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
             env = dict(os.environ)
             env.update(
                 {
                     "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_EXPERIMENT_NETWORK_MODE": "join-existing",
                     "POHW_FORK_CHAIN_DATADIR": str(root / "fork-chain"),
                     "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
                     "POHW_FORK_P2P_BIND_ADDR": "127.0.0.1:40409",
@@ -363,6 +367,139 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn("--activation-manifest", args)
         self.assertIn("127.0.0.1:41409", args)
         self.assertIn("127.0.0.1:42409", args)
+
+    def test_fork_chain_runner_rejects_peerless_ordinary_joiner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-fork-peerless-joiner-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            env = dict(os.environ)
+            env.pop("POHW_FORK_PEER_ADDRS", None)
+            env.pop("POHW_FORK_BOOTSTRAP_FIRST_SEED", None)
+            env.update(
+                {
+                    "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_EXPERIMENT_NETWORK_MODE": "join-existing",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(FORK_CHAIN_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires at least one POHW_FORK_PEER_ADDRS entry", result.stderr)
+        self.assertFalse(args_out.exists())
+
+    def test_fork_chain_runner_allows_explicit_canonical_first_seed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-fork-first-seed-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            env = dict(os.environ)
+            env.pop("POHW_FORK_PEER_ADDRS", None)
+            env.update(
+                {
+                    "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_EXPERIMENT_NETWORK_MODE": "join-existing",
+                    "POHW_FORK_BOOTSTRAP_FIRST_SEED": "true",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(FORK_CHAIN_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-fork-chain-node", args)
+        self.assertNotIn("--peer-addr", args)
+
+    def test_fork_chain_runner_rejects_stale_first_seed_exception(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-fork-stale-first-seed-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_EXPERIMENT_NETWORK_MODE": "join-existing",
+                    "POHW_FORK_BOOTSTRAP_FIRST_SEED": "true",
+                    "POHW_FORK_PEER_ADDRS": "127.0.0.1:41409",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(FORK_CHAIN_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exception must be removed once fork peers are configured", result.stderr)
+        self.assertFalse(args_out.exists())
+
+    def test_fork_chain_runner_rejects_other_activation_in_join_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-fork-join-guard-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_text('{"activation_id":"different-network"}\n', encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_EXPERIMENT_NETWORK_MODE": "join-existing",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(FORK_CHAIN_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing noncanonical activation manifest", result.stderr)
+        self.assertFalse(args_out.exists())
 
     def test_gossip_mesh_admits_templates_against_local_fork_node(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-gossip-fork-admission-") as temp:
@@ -442,6 +579,103 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn('apiUrl: "http://127.0.0.1:40407/dashboard.json"', rendered)
         self.assertIn('apiToken: "secret-dashboard-token"', rendered)
 
+    def test_dashboard_api_prefers_systemd_credential_token(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-credential-") as temp:
+            root = Path(temp)
+            credential_dir = root / "credentials"
+            credential_dir.mkdir()
+            credential_token = credential_dir / "dashboard-api.token"
+            credential_token.write_text("credential-token\n", encoding="utf-8")
+            args_out = root / "args.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_WORKDIR": str(root),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_DASHBOARD_API_TOKEN_FILE": "/private/source/token",
+                    "CREDENTIALS_DIRECTORY": str(credential_dir),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_API_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(credential_token), args)
+        self.assertNotIn("/private/source/token", args)
+
+    def test_dashboard_api_forwards_only_the_loopback_index_url(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-index-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_WORKDIR": str(root),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_EXPLORER_BITCOIN_INDEX_URL": "http://127.0.0.1:3002",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_API_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--explorer-bitcoin-index-url", args)
+        self.assertIn("http://127.0.0.1:3002", args)
+        self.assertNotIn("cookie", args.lower())
+
+    def test_dashboard_api_forwards_explicit_remote_index_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-remote-index-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_WORKDIR": str(root),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_EXPLORER_BITCOIN_INDEX_URL": "https://blockstream.info/api",
+                    "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX": "true",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_API_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--explorer-allow-remote-bitcoin-index", args)
+        self.assertIn("https://blockstream.info/api", args)
+
     def test_dashboard_ui_runner_refuses_non_loopback_by_default(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-non-loopback-") as temp:
             root = Path(temp)
@@ -466,6 +700,77 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to bind dashboard UI to non-loopback host", result.stderr)
+
+    def test_dashboard_ui_never_exposes_participant_token_on_non_loopback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-token-exposure-") as temp:
+            root = Path(temp)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DASHBOARD_UI_DIR": str(root / "ui"),
+                    "POHW_DASHBOARD_UI_BIND_HOST": "0.0.0.0",
+                    "POHW_DASHBOARD_UI_ALLOW_NON_LOOPBACK": "true",
+                    "POHW_DASHBOARD_UI_PARTICIPANT_ENABLED": "true",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_UI_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("browser config contains the dashboard token", result.stderr)
+
+    def test_public_explorer_ui_never_embeds_dashboard_token(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-explorer-ui-wrapper-") as temp:
+            root = Path(temp)
+            ui_dir = root / "ui"
+            dist_dir = ui_dir / "dist"
+            dist_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text(
+                '<!doctype html>\n<div id="root"></div>\n<script type="module" src="/assets/index.js"></script>\n',
+                encoding="utf-8",
+            )
+            token_file = root / "dashboard.token"
+            token_file.write_text("must-not-be-public\n", encoding="utf-8")
+            out = root / "http.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DASHBOARD_UI_DIR": str(ui_dir),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_DASHBOARD_API_TOKEN_FILE": str(token_file),
+                    "POHW_DASHBOARD_UI_DEFAULT_VIEW": "explorer",
+                    "POHW_DASHBOARD_UI_PARTICIPANT_ENABLED": "false",
+                    "POHW_EXPLORER_UI_API_BASE": "/api/v1",
+                    "POHW_DASHBOARD_UI_HTTP_SERVER_BIN": str(
+                        self.write_fake_http_server(root)
+                    ),
+                    "POHW_FAKE_HTTP_OUT": str(out),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_UI_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            rendered = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('explorerApiBase: "/api/v1"', rendered)
+        self.assertIn('defaultView: "explorer"', rendered)
+        self.assertIn("participantDashboard: false", rendered)
+        self.assertIn('apiToken: ""', rendered)
+        self.assertNotIn("must-not-be-public", rendered)
 
     def test_dashboard_ui_runner_requires_built_static_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-missing-deps-") as temp:

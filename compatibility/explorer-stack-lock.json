@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "bitcoinHistoryIndexer": {
+    "name": "Blockstream electrs",
+    "repository": "https://github.com/Blockstream/electrs.git",
+    "commit": "02ce059d018687f12e101b72b0ccc6ab8bc1dcfb",
+    "cargoLockSha256": "7f2a870ced77c26c7628ea3e8510dcff5a53602beef935407cc8b39b7e0ae934",
+    "requiredRuntimeFlags": ["--jsonrpc-import", "--lightmode"]
+  }
+}

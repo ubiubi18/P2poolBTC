@@ -3,9 +3,11 @@ use crate::{
     p2p_node::ConnectionLimiter,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::hashes::{sha256, Hash as BitcoinHash};
 use bitcoin::pow::{CompactTarget, Target, Work};
-use bitcoin::{Block, BlockHash, Weight};
+use bitcoin::{Address, Block, BlockHash, Network, OutPoint, Transaction, TxOut, Txid, Weight};
 use chrono::Utc;
 use crypto_bigint::{Encoding, U256 as CryptoU256, U512 as CryptoU512};
 use fs2::FileExt;
@@ -19,7 +21,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::future::pending;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -79,6 +81,173 @@ pub(crate) struct ForkChainStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkBlockSummary {
+    pub block_hash: String,
+    pub previous_block_hash: String,
+    pub height: u64,
+    pub active: bool,
+    pub timestamp: u32,
+    pub bits: String,
+    pub difficulty_phase: String,
+    pub cumulative_work: String,
+    pub version: i32,
+    pub nonce: u32,
+    pub merkle_root: String,
+    pub transaction_count: usize,
+    pub size_bytes: usize,
+    pub weight_wu: u64,
+    pub coinbase_txid: String,
+    pub coinbase_value_sats: u64,
+    pub coinbase_output_count: usize,
+    pub pohw_commitment_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkBlockPage {
+    pub tip_height: u64,
+    pub total: usize,
+    pub items: Vec<ForkBlockSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkTransactionRef {
+    pub txid: String,
+    pub block_hash: String,
+    pub height: u64,
+    pub active: bool,
+    pub transaction_index: usize,
+    pub coinbase: bool,
+    pub total_output_sats: u64,
+    pub fee_sats: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkPreviousOutput {
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+    pub script_pubkey_asm: String,
+    pub script_type: String,
+    pub address: Option<String>,
+    pub script_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkTransactionInput {
+    pub vin: usize,
+    pub coinbase: bool,
+    pub previous_txid: Option<String>,
+    pub previous_vout: Option<u32>,
+    pub script_sig_hex: String,
+    pub script_sig_asm: String,
+    pub sequence: u32,
+    pub witness: Vec<String>,
+    pub previous_output: Option<ForkPreviousOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkOutputSpend {
+    pub txid: String,
+    pub vin: usize,
+    pub height: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkTransactionOutput {
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+    pub script_pubkey_asm: String,
+    pub script_type: String,
+    pub address: Option<String>,
+    pub script_hash: String,
+    pub spent_by: Option<ForkOutputSpend>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkTransactionDetail {
+    pub txid: String,
+    pub wtxid: String,
+    pub block_hash: String,
+    pub height: u64,
+    pub active: bool,
+    pub transaction_index: usize,
+    pub coinbase: bool,
+    pub version: i32,
+    pub lock_time: u32,
+    pub size_bytes: usize,
+    pub weight_wu: u64,
+    pub input_count: usize,
+    pub output_count: usize,
+    pub total_input_sats: Option<u64>,
+    pub total_output_sats: u64,
+    pub fee_sats: Option<u64>,
+    pub inputs: Vec<ForkTransactionInput>,
+    pub outputs: Vec<ForkTransactionOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkTransactionPage {
+    pub block_hash: String,
+    pub total: usize,
+    pub items: Vec<ForkTransactionRef>,
+    pub next_cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkAddressSummary {
+    pub address: String,
+    pub transaction_count: usize,
+    pub funded_output_count: usize,
+    pub funded_total_sats: u64,
+    pub spent_output_count: usize,
+    pub spent_total_sats: u64,
+    pub balance_sats: u64,
+    pub first_seen_height: Option<u64>,
+    pub last_seen_height: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkAddressTransactionPage {
+    pub address: String,
+    pub total: usize,
+    pub items: Vec<ForkTransactionRef>,
+    pub next_cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkUtxo {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+    pub script_type: String,
+    pub height: u64,
+    pub coinbase: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkUtxoPage {
+    pub address: String,
+    pub total: usize,
+    pub items: Vec<ForkUtxo>,
+    pub next_cursor: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ForkBlockAcceptance {
     pub accepted: bool,
     pub became_active_tip: bool,
@@ -111,6 +280,13 @@ struct BlockNode {
     height: u64,
     cumulative_work: Work,
     difficulty_phase: DifficultyPhase,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedForkOutput {
+    output: TxOut,
+    height: u64,
+    coinbase: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +495,365 @@ impl ForkChainStore {
             .map(|node| node.block_hex.clone())
     }
 
+    pub(crate) fn block_page(&self, cursor: Option<&str>, limit: usize) -> Result<ForkBlockPage> {
+        if !(1..=100).contains(&limit) {
+            bail!("fork block page limit must be between 1 and 100");
+        }
+        let mut blocks = self.blocks.iter().collect::<Vec<_>>();
+        blocks.sort_by(|(left_hash, left), (right_hash, right)| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| left_hash.to_string().cmp(&right_hash.to_string()))
+        });
+        let start = match cursor {
+            Some(cursor) => {
+                let cursor = BlockHash::from_str(cursor)
+                    .context("fork block cursor is not a valid block hash")?;
+                blocks
+                    .iter()
+                    .position(|(hash, _)| **hash == cursor)
+                    .map(|position| position + 1)
+                    .context("fork block cursor is not present in local replay")?
+            }
+            None => 0,
+        };
+        let end = start.saturating_add(limit).min(blocks.len());
+        let items = blocks[start..end]
+            .iter()
+            .map(|(hash, node)| self.block_summary_for_node(**hash, node))
+            .collect::<Vec<_>>();
+        let next_cursor = (end < blocks.len())
+            .then(|| items.last().map(|item| item.block_hash.clone()))
+            .flatten();
+        Ok(ForkBlockPage {
+            tip_height: self.status().tip_height,
+            total: blocks.len(),
+            items,
+            next_cursor,
+        })
+    }
+
+    pub(crate) fn block_summary(&self, block_hash: &str) -> Result<Option<ForkBlockSummary>> {
+        let hash = BlockHash::from_str(block_hash).context("invalid fork block hash")?;
+        Ok(self
+            .blocks
+            .get(&hash)
+            .map(|node| self.block_summary_for_node(hash, node)))
+    }
+
+    pub(crate) fn block_transactions(
+        &self,
+        block_hash: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<Option<ForkTransactionPage>> {
+        validate_numeric_page(cursor, limit)?;
+        let hash = BlockHash::from_str(block_hash).context("invalid fork block hash")?;
+        let Some(node) = self.blocks.get(&hash) else {
+            return Ok(None);
+        };
+        let active = self.active_by_height.get(&node.height) == Some(&hash);
+        let outputs = self.active_output_index()?;
+        let total = node.block.txdata.len();
+        let end = cursor.saturating_add(limit).min(total);
+        let items = if cursor >= total {
+            Vec::new()
+        } else {
+            node.block.txdata[cursor..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, tx)| {
+                    transaction_ref(tx, hash, node.height, active, cursor + offset, &outputs)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        Ok(Some(ForkTransactionPage {
+            block_hash: hash.to_string(),
+            total,
+            items,
+            next_cursor: (end < total).then_some(end),
+        }))
+    }
+
+    pub(crate) fn transaction_detail(&self, txid: &str) -> Result<Option<ForkTransactionDetail>> {
+        let txid = Txid::from_str(txid).context("invalid fork transaction id")?;
+        let outputs = self.active_output_index()?;
+        let spends = self.active_spend_index();
+        let mut matches = self
+            .blocks
+            .iter()
+            .flat_map(|(block_hash, node)| {
+                node.block
+                    .txdata
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, tx)| tx.compute_txid() == txid)
+                    .map(move |(index, tx)| (*block_hash, node, index, tx))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(
+            |(left_hash, left, left_index, _), (right_hash, right, right_index, _)| {
+                let left_active = self.active_by_height.get(&left.height) == Some(left_hash);
+                let right_active = self.active_by_height.get(&right.height) == Some(right_hash);
+                right_active
+                    .cmp(&left_active)
+                    .then_with(|| right.height.cmp(&left.height))
+                    .then_with(|| left_index.cmp(right_index))
+                    .then_with(|| left_hash.to_string().cmp(&right_hash.to_string()))
+            },
+        );
+        let Some((block_hash, node, transaction_index, tx)) = matches.into_iter().next() else {
+            return Ok(None);
+        };
+        let active = self.active_by_height.get(&node.height) == Some(&block_hash);
+        Ok(Some(transaction_detail(
+            tx,
+            block_hash,
+            node.height,
+            active,
+            transaction_index,
+            &outputs,
+            &spends,
+        )?))
+    }
+
+    pub(crate) fn address_summary(&self, address: &str) -> Result<ForkAddressSummary> {
+        let address = normalize_mainnet_address(address)?;
+        let outputs = self.active_output_index()?;
+        let spends = self.active_spend_index();
+        let mut transactions = BTreeSet::new();
+        let mut funded_output_count = 0usize;
+        let mut funded_total_sats = 0u64;
+        let mut spent_output_count = 0usize;
+        let mut spent_total_sats = 0u64;
+        let mut first_seen_height = None;
+        let mut last_seen_height = None;
+        for (outpoint, indexed) in &outputs {
+            if output_address(&indexed.output).as_deref() != Some(address.as_str()) {
+                continue;
+            }
+            transactions.insert(outpoint.txid);
+            funded_output_count = funded_output_count.saturating_add(1);
+            funded_total_sats = funded_total_sats
+                .checked_add(indexed.output.value.to_sat())
+                .context("fork address funded total overflow")?;
+            update_height_range(
+                &mut first_seen_height,
+                &mut last_seen_height,
+                indexed.height,
+            );
+            if let Some(spend) = spends.get(outpoint) {
+                transactions
+                    .insert(Txid::from_str(&spend.txid).expect("indexed spend txid is valid"));
+                spent_output_count = spent_output_count.saturating_add(1);
+                spent_total_sats = spent_total_sats
+                    .checked_add(indexed.output.value.to_sat())
+                    .context("fork address spent total overflow")?;
+                update_height_range(&mut first_seen_height, &mut last_seen_height, spend.height);
+            }
+        }
+        Ok(ForkAddressSummary {
+            address,
+            transaction_count: transactions.len(),
+            funded_output_count,
+            funded_total_sats,
+            spent_output_count,
+            spent_total_sats,
+            balance_sats: funded_total_sats
+                .checked_sub(spent_total_sats)
+                .context("fork address balance underflow")?,
+            first_seen_height,
+            last_seen_height,
+        })
+    }
+
+    pub(crate) fn address_transactions(
+        &self,
+        address: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ForkAddressTransactionPage> {
+        validate_numeric_page(cursor, limit)?;
+        let address = normalize_mainnet_address(address)?;
+        let outputs = self.active_output_index()?;
+        let mut items = Vec::new();
+        for (height, block_hash) in self.active_by_height.iter().rev() {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for (transaction_index, tx) in node.block.txdata.iter().enumerate().rev() {
+                let related_output = tx
+                    .output
+                    .iter()
+                    .any(|output| output_address(output).as_deref() == Some(address.as_str()));
+                let related_input = tx.input.iter().any(|input| {
+                    outputs
+                        .get(&input.previous_output)
+                        .and_then(|indexed| output_address(&indexed.output))
+                        .as_deref()
+                        == Some(address.as_str())
+                });
+                if related_output || related_input {
+                    items.push(transaction_ref(
+                        tx,
+                        *block_hash,
+                        *height,
+                        true,
+                        transaction_index,
+                        &outputs,
+                    )?);
+                }
+            }
+        }
+        let total = items.len();
+        let end = cursor.saturating_add(limit).min(total);
+        let page_items = if cursor >= total {
+            Vec::new()
+        } else {
+            items[cursor..end].to_vec()
+        };
+        Ok(ForkAddressTransactionPage {
+            address,
+            total,
+            items: page_items,
+            next_cursor: (end < total).then_some(end),
+        })
+    }
+
+    pub(crate) fn address_utxos(
+        &self,
+        address: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ForkUtxoPage> {
+        validate_numeric_page(cursor, limit)?;
+        let address = normalize_mainnet_address(address)?;
+        let outputs = self.active_output_index()?;
+        let spends = self.active_spend_index();
+        let mut items = outputs
+            .iter()
+            .filter(|(outpoint, indexed)| {
+                !spends.contains_key(outpoint)
+                    && output_address(&indexed.output).as_deref() == Some(address.as_str())
+            })
+            .map(|(outpoint, indexed)| ForkUtxo {
+                txid: outpoint.txid.to_string(),
+                vout: outpoint.vout,
+                value_sats: indexed.output.value.to_sat(),
+                script_pubkey_hex: hex::encode(indexed.output.script_pubkey.as_bytes()),
+                script_type: script_type(&indexed.output),
+                height: indexed.height,
+                coinbase: indexed.coinbase,
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| left.txid.cmp(&right.txid))
+                .then_with(|| left.vout.cmp(&right.vout))
+        });
+        let total = items.len();
+        let end = cursor.saturating_add(limit).min(total);
+        let page_items = if cursor >= total {
+            Vec::new()
+        } else {
+            items[cursor..end].to_vec()
+        };
+        Ok(ForkUtxoPage {
+            address,
+            total,
+            items: page_items,
+            next_cursor: (end < total).then_some(end),
+        })
+    }
+
+    fn active_output_index(&self) -> Result<BTreeMap<OutPoint, IndexedForkOutput>> {
+        let mut outputs = BTreeMap::new();
+        for (height, block_hash) in &self.active_by_height {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for tx in &node.block.txdata {
+                let txid = tx.compute_txid();
+                for (vout, output) in tx.output.iter().enumerate() {
+                    let vout =
+                        u32::try_from(vout).context("fork transaction output index exceeds u32")?;
+                    outputs.insert(
+                        OutPoint { txid, vout },
+                        IndexedForkOutput {
+                            output: output.clone(),
+                            height: *height,
+                            coinbase: tx.is_coinbase(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(outputs)
+    }
+
+    fn active_spend_index(&self) -> BTreeMap<OutPoint, ForkOutputSpend> {
+        let mut spends = BTreeMap::new();
+        for (height, block_hash) in &self.active_by_height {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for tx in &node.block.txdata {
+                if tx.is_coinbase() {
+                    continue;
+                }
+                for (vin, input) in tx.input.iter().enumerate() {
+                    spends.insert(
+                        input.previous_output,
+                        ForkOutputSpend {
+                            txid: tx.compute_txid().to_string(),
+                            vin,
+                            height: *height,
+                        },
+                    );
+                }
+            }
+        }
+        spends
+    }
+
+    fn block_summary_for_node(&self, hash: BlockHash, node: &BlockNode) -> ForkBlockSummary {
+        let coinbase = node
+            .block
+            .txdata
+            .first()
+            .expect("validated fork blocks always contain a coinbase");
+        ForkBlockSummary {
+            block_hash: hash.to_string(),
+            previous_block_hash: node.block.header.prev_blockhash.to_string(),
+            height: node.height,
+            active: self.active_by_height.get(&node.height) == Some(&hash),
+            timestamp: node.block.header.time,
+            bits: format!("{:08x}", node.block.header.bits.to_consensus()),
+            difficulty_phase: node.difficulty_phase.as_str().to_string(),
+            cumulative_work: format!("{:064x}", node.cumulative_work),
+            version: node.block.header.version.to_consensus(),
+            nonce: node.block.header.nonce,
+            merkle_root: node.block.header.merkle_root.to_string(),
+            transaction_count: node.block.txdata.len(),
+            size_bytes: node.block_hex.len() / 2,
+            weight_wu: node.block.weight().to_wu(),
+            coinbase_txid: coinbase.compute_txid().to_string(),
+            coinbase_value_sats: coinbase
+                .output
+                .iter()
+                .map(|output| output.value.to_sat())
+                .sum(),
+            coinbase_output_count: coinbase.output.len(),
+            pohw_commitment_hash: pohw_commitment_hash(&node.block),
+        }
+    }
+
     pub(crate) fn validate_work_template(
         &self,
         template: &BitcoinWorkTemplate,
@@ -375,7 +910,8 @@ impl ForkChainStore {
 
     fn replay_block_log(&mut self) -> Result<()> {
         let path = self.block_log_path();
-        let file = open_private_file(&path, true)?;
+        let mut file = open_private_file(&path, true)?;
+        repair_truncated_block_log_tail(&mut file, &path)?;
         let mut reader = BufReader::new(file);
         let mut index = 0usize;
         while let Some(line) = read_bounded_line(&mut reader, MAX_BLOCK_LOG_LINE_BYTES)? {
@@ -812,7 +1348,7 @@ impl ForkChainClient {
             .context("fork-chain work-template validation response has invalid shape")
     }
 
-    async fn active_block_hash(&self, height: u64) -> Result<Option<String>> {
+    pub(crate) async fn active_block_hash(&self, height: u64) -> Result<Option<String>> {
         let value = self
             .request(ForkWireMethod::ActiveBlockHash { height })
             .await?;
@@ -824,6 +1360,97 @@ impl ForkChainClient {
         serde_json::from_value(value).context("fork-chain block response has invalid shape")
     }
 
+    pub(crate) async fn block_page(
+        &self,
+        cursor: Option<String>,
+        limit: u16,
+    ) -> Result<ForkBlockPage> {
+        let value = self
+            .request(ForkWireMethod::BlockPage { cursor, limit })
+            .await?;
+        serde_json::from_value(value).context("fork-chain block page response has invalid shape")
+    }
+
+    pub(crate) async fn block_summary(
+        &self,
+        block_hash: String,
+    ) -> Result<Option<ForkBlockSummary>> {
+        let value = self
+            .request(ForkWireMethod::BlockSummary { block_hash })
+            .await?;
+        serde_json::from_value(value).context("fork-chain block summary response has invalid shape")
+    }
+
+    pub(crate) async fn block_transactions(
+        &self,
+        block_hash: String,
+        cursor: usize,
+        limit: u16,
+    ) -> Result<Option<ForkTransactionPage>> {
+        let value = self
+            .request(ForkWireMethod::BlockTransactions {
+                block_hash,
+                cursor,
+                limit,
+            })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain block transaction page response has invalid shape")
+    }
+
+    pub(crate) async fn transaction_detail(
+        &self,
+        txid: String,
+    ) -> Result<Option<ForkTransactionDetail>> {
+        let value = self
+            .request(ForkWireMethod::TransactionDetail { txid })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain transaction detail response has invalid shape")
+    }
+
+    pub(crate) async fn address_summary(&self, address: String) -> Result<ForkAddressSummary> {
+        let value = self
+            .request(ForkWireMethod::AddressSummary { address })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain address summary response has invalid shape")
+    }
+
+    pub(crate) async fn address_transactions(
+        &self,
+        address: String,
+        cursor: usize,
+        limit: u16,
+    ) -> Result<ForkAddressTransactionPage> {
+        let value = self
+            .request(ForkWireMethod::AddressTransactions {
+                address,
+                cursor,
+                limit,
+            })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain address transaction page response has invalid shape")
+    }
+
+    pub(crate) async fn address_utxos(
+        &self,
+        address: String,
+        cursor: usize,
+        limit: u16,
+    ) -> Result<ForkUtxoPage> {
+        let value = self
+            .request(ForkWireMethod::AddressUtxos {
+                address,
+                cursor,
+                limit,
+            })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain address UTXO page response has invalid shape")
+    }
+
     async fn request(&self, method: ForkWireMethod) -> Result<Value> {
         let request = ForkWireRequest {
             protocol_version: FORK_PROTOCOL_VERSION,
@@ -832,15 +1459,18 @@ impl ForkChainClient {
         };
         let payload =
             serde_json::to_vec(&request).context("failed to encode fork-chain request")?;
-        let mut stream = timeout(
+        let response = timeout(
             Duration::from_secs(DEFAULT_NETWORK_TIMEOUT_SECONDS),
-            TcpStream::connect(self.addr),
+            async {
+                let mut stream = TcpStream::connect(self.addr).await.with_context(|| {
+                    format!("failed to connect to fork-chain RPC at {}", self.addr)
+                })?;
+                write_frame(&mut stream, &payload).await?;
+                read_frame(&mut stream).await
+            },
         )
         .await
-        .context("fork-chain RPC connect timed out")?
-        .with_context(|| format!("failed to connect to fork-chain RPC at {}", self.addr))?;
-        write_frame(&mut stream, &payload).await?;
-        let response = read_frame(&mut stream).await?;
+        .context("fork-chain request timed out")??;
         let response: ForkWireResponse =
             serde_json::from_slice(&response).context("fork-chain response is invalid JSON")?;
         if response.ok {
@@ -872,10 +1502,46 @@ struct ForkWireRequest {
 enum ForkWireMethod {
     Status,
     MiningTemplate,
-    ValidateWorkTemplate { template: BitcoinWorkTemplate },
-    SubmitBlock { block_hex: String },
-    ActiveBlockHash { height: u64 },
-    ActiveBlock { height: u64 },
+    ValidateWorkTemplate {
+        template: BitcoinWorkTemplate,
+    },
+    SubmitBlock {
+        block_hex: String,
+    },
+    ActiveBlockHash {
+        height: u64,
+    },
+    ActiveBlock {
+        height: u64,
+    },
+    BlockPage {
+        cursor: Option<String>,
+        limit: u16,
+    },
+    BlockSummary {
+        block_hash: String,
+    },
+    BlockTransactions {
+        block_hash: String,
+        cursor: usize,
+        limit: u16,
+    },
+    TransactionDetail {
+        txid: String,
+    },
+    AddressSummary {
+        address: String,
+    },
+    AddressTransactions {
+        address: String,
+        cursor: usize,
+        limit: u16,
+    },
+    AddressUtxos {
+        address: String,
+        cursor: usize,
+        limit: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1008,9 +1674,18 @@ async fn serve_listener(
         };
         let store = Arc::clone(&store);
         let peers = Arc::clone(&peers);
+        let allow_submit_blocks = allow_templates
+            || peers
+                .iter()
+                .any(|configured_peer| configured_peer.ip() == peer_addr.ip());
         tokio::spawn(async move {
             let _connection_guard = connection_guard;
-            if let Err(err) = handle_connection(stream, store, peers, allow_templates).await {
+            if let Ok(Err(err)) = timeout(
+                Duration::from_secs(DEFAULT_NETWORK_TIMEOUT_SECONDS),
+                handle_connection(stream, store, peers, allow_templates, allow_submit_blocks),
+            )
+            .await
+            {
                 eprintln!("fork-chain connection failed: {err:#}");
             }
         });
@@ -1022,6 +1697,7 @@ async fn handle_connection(
     store: Arc<RwLock<ForkChainStore>>,
     peers: Arc<Vec<SocketAddr>>,
     allow_templates: bool,
+    allow_submit_blocks: bool,
 ) -> Result<()> {
     let payload = read_frame(&mut stream).await?;
     let request: ForkWireRequest = match serde_json::from_slice(&payload) {
@@ -1031,7 +1707,8 @@ async fn handle_connection(
             return write_wire_response(&mut stream, &response).await;
         }
     };
-    let response = handle_wire_request(&request, &store, allow_templates).await;
+    let response =
+        handle_wire_request(&request, &store, allow_templates, allow_submit_blocks).await;
     let accepted_block = match (&request.method, &response) {
         (ForkWireMethod::SubmitBlock { block_hex }, Ok(response)) if response.ok => response
             .result
@@ -1055,6 +1732,7 @@ async fn handle_wire_request(
     request: &ForkWireRequest,
     store: &Arc<RwLock<ForkChainStore>>,
     allow_templates: bool,
+    allow_submit_blocks: bool,
 ) -> Result<ForkWireResponse> {
     if request.protocol_version != FORK_PROTOCOL_VERSION {
         return Ok(ForkWireResponse::error(
@@ -1090,16 +1768,75 @@ async fn handle_wire_request(
             "method_not_allowed",
             "work-template validation is available only on loopback control RPC",
         )),
-        ForkWireMethod::SubmitBlock { block_hex } => {
+        ForkWireMethod::SubmitBlock { block_hex } if allow_submit_blocks => {
             let result = store.write().await.submit_block(block_hex)?;
             ForkWireResponse::success(result)
         }
+        ForkWireMethod::SubmitBlock { .. } => Ok(ForkWireResponse::error(
+            "peer_not_configured",
+            "block submission is limited to loopback control RPC and configured peer IPs",
+        )),
         ForkWireMethod::ActiveBlockHash { height } => {
             ForkWireResponse::success(store.read().await.active_block_hash(*height))
         }
         ForkWireMethod::ActiveBlock { height } => {
             ForkWireResponse::success(store.read().await.active_block_hex(*height))
         }
+        ForkWireMethod::BlockPage { cursor, limit } if allow_templates => {
+            ForkWireResponse::success(
+                store
+                    .read()
+                    .await
+                    .block_page(cursor.as_deref(), usize::from(*limit))?,
+            )
+        }
+        ForkWireMethod::BlockSummary { block_hash } if allow_templates => {
+            ForkWireResponse::success(store.read().await.block_summary(block_hash)?)
+        }
+        ForkWireMethod::BlockTransactions {
+            block_hash,
+            cursor,
+            limit,
+        } if allow_templates => ForkWireResponse::success(store.read().await.block_transactions(
+            block_hash,
+            *cursor,
+            usize::from(*limit),
+        )?),
+        ForkWireMethod::TransactionDetail { txid } if allow_templates => {
+            ForkWireResponse::success(store.read().await.transaction_detail(txid)?)
+        }
+        ForkWireMethod::AddressSummary { address } if allow_templates => {
+            ForkWireResponse::success(store.read().await.address_summary(address)?)
+        }
+        ForkWireMethod::AddressTransactions {
+            address,
+            cursor,
+            limit,
+        } if allow_templates => ForkWireResponse::success(
+            store
+                .read()
+                .await
+                .address_transactions(address, *cursor, usize::from(*limit))?,
+        ),
+        ForkWireMethod::AddressUtxos {
+            address,
+            cursor,
+            limit,
+        } if allow_templates => ForkWireResponse::success(store.read().await.address_utxos(
+            address,
+            *cursor,
+            usize::from(*limit),
+        )?),
+        ForkWireMethod::BlockPage { .. }
+        | ForkWireMethod::BlockSummary { .. }
+        | ForkWireMethod::BlockTransactions { .. }
+        | ForkWireMethod::TransactionDetail { .. }
+        | ForkWireMethod::AddressSummary { .. }
+        | ForkWireMethod::AddressTransactions { .. }
+        | ForkWireMethod::AddressUtxos { .. } => Ok(ForkWireResponse::error(
+            "method_not_allowed",
+            "explorer queries are available only on loopback control RPC",
+        )),
     }
 }
 
@@ -1232,6 +1969,214 @@ fn decode_block(block_hex: &str) -> Result<Block> {
         bail!("fork block encoding is not canonical");
     }
     Ok(block)
+}
+
+fn pohw_commitment_hash(block: &Block) -> Option<String> {
+    const POHW1_PAYLOAD_LEN: usize = 5 + 32;
+    let coinbase = block.txdata.first()?;
+    coinbase.output.iter().find_map(|output| {
+        let script = output.script_pubkey.as_bytes();
+        if script.len() != POHW1_PAYLOAD_LEN + 2
+            || script[0] != 0x6a
+            || usize::from(script[1]) != POHW1_PAYLOAD_LEN
+            || &script[2..7] != b"POHW1"
+        {
+            return None;
+        }
+        Some(hex::encode(&script[7..]))
+    })
+}
+
+fn validate_numeric_page(cursor: usize, limit: usize) -> Result<()> {
+    if !(1..=100).contains(&limit) {
+        bail!("fork explorer page limit must be between 1 and 100");
+    }
+    if cursor > 10_000_000 {
+        bail!("fork explorer cursor exceeds the supported range");
+    }
+    Ok(())
+}
+
+fn transaction_ref(
+    tx: &Transaction,
+    block_hash: BlockHash,
+    height: u64,
+    active: bool,
+    transaction_index: usize,
+    outputs: &BTreeMap<OutPoint, IndexedForkOutput>,
+) -> Result<ForkTransactionRef> {
+    let (_, total_output_sats, fee_sats) = transaction_amounts(tx, outputs)?;
+    Ok(ForkTransactionRef {
+        txid: tx.compute_txid().to_string(),
+        block_hash: block_hash.to_string(),
+        height,
+        active,
+        transaction_index,
+        coinbase: tx.is_coinbase(),
+        total_output_sats,
+        fee_sats,
+    })
+}
+
+fn transaction_detail(
+    tx: &Transaction,
+    block_hash: BlockHash,
+    height: u64,
+    active: bool,
+    transaction_index: usize,
+    outputs: &BTreeMap<OutPoint, IndexedForkOutput>,
+    spends: &BTreeMap<OutPoint, ForkOutputSpend>,
+) -> Result<ForkTransactionDetail> {
+    let (total_input_sats, total_output_sats, fee_sats) = transaction_amounts(tx, outputs)?;
+    let inputs = tx
+        .input
+        .iter()
+        .enumerate()
+        .map(|(vin, input)| {
+            let coinbase = tx.is_coinbase();
+            ForkTransactionInput {
+                vin,
+                coinbase,
+                previous_txid: (!coinbase).then(|| input.previous_output.txid.to_string()),
+                previous_vout: (!coinbase).then_some(input.previous_output.vout),
+                script_sig_hex: hex::encode(input.script_sig.as_bytes()),
+                script_sig_asm: input.script_sig.to_asm_string(),
+                sequence: input.sequence.0,
+                witness: input.witness.iter().map(hex::encode).collect(),
+                previous_output: (!coinbase)
+                    .then(|| outputs.get(&input.previous_output))
+                    .flatten()
+                    .map(|indexed| previous_output(&indexed.output)),
+            }
+        })
+        .collect();
+    let txid = tx.compute_txid();
+    let outputs = tx
+        .output
+        .iter()
+        .enumerate()
+        .map(|(vout, output)| {
+            let vout = u32::try_from(vout).expect("Bitcoin transaction output count fits u32");
+            ForkTransactionOutput {
+                vout,
+                value_sats: output.value.to_sat(),
+                script_pubkey_hex: hex::encode(output.script_pubkey.as_bytes()),
+                script_pubkey_asm: output.script_pubkey.to_asm_string(),
+                script_type: script_type(output),
+                address: output_address(output),
+                script_hash: output_script_hash(output),
+                spent_by: active
+                    .then(|| spends.get(&OutPoint { txid, vout }).cloned())
+                    .flatten(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(ForkTransactionDetail {
+        txid: txid.to_string(),
+        wtxid: tx.compute_wtxid().to_string(),
+        block_hash: block_hash.to_string(),
+        height,
+        active,
+        transaction_index,
+        coinbase: tx.is_coinbase(),
+        version: tx.version.0,
+        lock_time: tx.lock_time.to_consensus_u32(),
+        size_bytes: serialize(tx).len(),
+        weight_wu: tx.weight().to_wu(),
+        input_count: tx.input.len(),
+        output_count: tx.output.len(),
+        total_input_sats,
+        total_output_sats,
+        fee_sats,
+        inputs,
+        outputs,
+    })
+}
+
+fn transaction_amounts(
+    tx: &Transaction,
+    outputs: &BTreeMap<OutPoint, IndexedForkOutput>,
+) -> Result<(Option<u64>, u64, Option<u64>)> {
+    let total_output_sats = tx.output.iter().try_fold(0u64, |total, output| {
+        total
+            .checked_add(output.value.to_sat())
+            .context("fork transaction output total overflow")
+    })?;
+    if tx.is_coinbase() {
+        return Ok((None, total_output_sats, None));
+    }
+    let mut total_input_sats = 0u64;
+    for input in &tx.input {
+        let Some(previous) = outputs.get(&input.previous_output) else {
+            return Ok((None, total_output_sats, None));
+        };
+        total_input_sats = total_input_sats
+            .checked_add(previous.output.value.to_sat())
+            .context("fork transaction input total overflow")?;
+    }
+    let fee_sats = total_input_sats.checked_sub(total_output_sats);
+    Ok((Some(total_input_sats), total_output_sats, fee_sats))
+}
+
+fn previous_output(output: &TxOut) -> ForkPreviousOutput {
+    ForkPreviousOutput {
+        value_sats: output.value.to_sat(),
+        script_pubkey_hex: hex::encode(output.script_pubkey.as_bytes()),
+        script_pubkey_asm: output.script_pubkey.to_asm_string(),
+        script_type: script_type(output),
+        address: output_address(output),
+        script_hash: output_script_hash(output),
+    }
+}
+
+fn output_address(output: &TxOut) -> Option<String> {
+    Address::from_script(&output.script_pubkey, Network::Bitcoin)
+        .ok()
+        .map(|address| address.to_string())
+}
+
+fn normalize_mainnet_address(raw: &str) -> Result<String> {
+    if raw.len() > 128 || raw.trim() != raw {
+        bail!("fork explorer address is malformed");
+    }
+    let address = Address::<NetworkUnchecked>::from_str(raw)
+        .context("fork explorer address is not a Bitcoin address")?
+        .require_network(Network::Bitcoin)
+        .context("fork explorer address is not a Bitcoin mainnet address")?;
+    Ok(address.to_string())
+}
+
+fn script_type(output: &TxOut) -> String {
+    let script = &output.script_pubkey;
+    let kind = if script.is_p2pkh() {
+        "p2pkh"
+    } else if script.is_p2sh() {
+        "p2sh"
+    } else if script.is_p2wpkh() {
+        "v0_p2wpkh"
+    } else if script.is_p2wsh() {
+        "v0_p2wsh"
+    } else if script.is_p2tr() {
+        "v1_p2tr"
+    } else if script.is_p2pk() {
+        "p2pk"
+    } else if script.is_op_return() {
+        "op_return"
+    } else if script.is_witness_program() {
+        "witness_unknown"
+    } else {
+        "nonstandard"
+    };
+    kind.to_string()
+}
+
+fn output_script_hash(output: &TxOut) -> String {
+    sha256::Hash::hash(output.script_pubkey.as_bytes()).to_string()
+}
+
+fn update_height_range(first: &mut Option<u64>, last: &mut Option<u64>, height: u64) {
+    *first = Some(first.map_or(height, |current| current.min(height)));
+    *last = Some(last.map_or(height, |current| current.max(height)));
 }
 
 fn decode_header_prefix(header_prefix_hex: &str) -> Result<bitcoin::block::Header> {
@@ -1540,6 +2485,98 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> Result<Opt
     }
 }
 
+fn repair_truncated_block_log_tail(file: &mut File, path: &Path) -> Result<()> {
+    const SCAN_CHUNK_BYTES: u64 = 64 * 1024;
+
+    let length = file.metadata()?.len();
+    if length == 0 {
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::End(-1))?;
+    let mut final_byte = [0u8; 1];
+    file.read_exact(&mut final_byte)?;
+    if final_byte[0] == b'\n' {
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+
+    let mut search_end = length;
+    let mut truncate_to = 0u64;
+    while search_end > 0 {
+        let search_start = search_end.saturating_sub(SCAN_CHUNK_BYTES);
+        let chunk_length = usize::try_from(search_end - search_start)
+            .context("fork block log tail scan length overflow")?;
+        let mut chunk = vec![0u8; chunk_length];
+        file.seek(SeekFrom::Start(search_start))?;
+        file.read_exact(&mut chunk)?;
+        if let Some(position) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            truncate_to = search_start
+                .checked_add(u64::try_from(position + 1)?)
+                .context("fork block log recovery offset overflow")?;
+            break;
+        }
+        search_end = search_start;
+    }
+
+    let tail_length = length
+        .checked_sub(truncate_to)
+        .context("fork block log recovery length underflow")?;
+    if tail_length > u64::try_from(MAX_BLOCK_LOG_LINE_BYTES)? {
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+    let mut tail = vec![0u8; usize::try_from(tail_length)?];
+    file.seek(SeekFrom::Start(truncate_to))?;
+    file.read_exact(&mut tail)?;
+    match serde_json::from_slice::<ForkBlockRecord>(&tail) {
+        Ok(_) => {
+            // A crash after the record write but before the newline leaves a complete
+            // record, but the delimiter must be restored before the next append.
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(b"\n").with_context(|| {
+                format!(
+                    "failed to restore fork block log delimiter {}",
+                    path.display()
+                )
+            })?;
+            file.sync_all().with_context(|| {
+                format!(
+                    "failed to sync restored fork block log delimiter {}",
+                    path.display()
+                )
+            })?;
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+            file.seek(SeekFrom::Start(0))?;
+            return Ok(());
+        }
+        Err(error) if error.classify() == serde_json::error::Category::Eof => {}
+        Err(_) => {
+            // Non-EOF corruption remains in place so normal replay fails closed.
+            file.seek(SeekFrom::Start(0))?;
+            return Ok(());
+        }
+    }
+
+    file.set_len(truncate_to).with_context(|| {
+        format!(
+            "failed to remove incomplete fork block log tail {}",
+            path.display()
+        )
+    })?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync recovered fork block log {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    file.seek(SeekFrom::Start(0))?;
+    eprintln!("warning: removed an incomplete final fork block log record after restart");
+    Ok(())
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open directory {} for sync", path.display()))?
@@ -1559,7 +2596,9 @@ mod tests {
     use bitcoin::block::{Header, Version as BlockVersion};
     use bitcoin::hashes::Hash;
     use bitcoin::transaction::Version as TransactionVersion;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin::{
+        Amount, OutPoint, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    };
     use chrono::{TimeZone, Utc};
     use pohw_core::fork::{ForkConfig, ForkPoint, MainnetBlockRef};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1653,7 +2692,7 @@ mod tests {
                 merkle_root: tx.compute_txid().to_raw_hash().into(),
                 time,
                 bits: CompactTarget::from_consensus(bits),
-                nonce: 0,
+                nonce: test_nonce_seed(time, bits),
             },
             txdata: vec![tx],
         };
@@ -1662,6 +2701,14 @@ mod tests {
             block.header.nonce = block.header.nonce.wrapping_add(1);
         }
         block
+    }
+
+    fn test_nonce_seed(time: u32, bits: u32) -> u32 {
+        time.rotate_left(13) ^ bits.rotate_right(7)
+    }
+
+    fn reset_test_nonce(block: &mut Block) {
+        block.header.nonce = test_nonce_seed(block.header.time, block.header.bits.to_consensus());
     }
 
     #[test]
@@ -1682,9 +2729,199 @@ mod tests {
             assert_eq!(template.height, 957_776);
             assert_eq!(template.previous_block_hash, first.block_hash().to_string());
             assert!(template.transactions.is_empty());
+
+            let page = store.block_page(None, 25).unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].block_hash, first.block_hash().to_string());
+            assert_eq!(page.items[0].height, 957_775);
+            assert!(page.items[0].active);
+            assert_eq!(page.items[0].transaction_count, 1);
+            assert_eq!(page.items[0].coinbase_value_sats, 0);
+            assert!(page.items[0].pohw_commitment_hash.is_none());
+            assert!(page.next_cursor.is_none());
+            assert_eq!(
+                store
+                    .block_summary(&first.block_hash().to_string())
+                    .unwrap()
+                    .map(|block| block.block_hash),
+                Some(first.block_hash().to_string())
+            );
         }
         let reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
         assert_eq!(reopened.status().tip_hash, first.block_hash().to_string());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_repairs_only_an_incomplete_final_block_record() {
+        let dir = test_dir("pohw-fork-chain-truncated-tail");
+        let manifest_path = write_manifest(&dir);
+        let chain_dir = dir.join("chain");
+        let inherited = BlockHash::from_str(&manifest().fork_point.inherited_tip_hash).unwrap();
+        let first = mine_block(inherited, 957_775, 1_783_900_801, 0);
+        {
+            let mut store = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+            store.submit_block(&hex::encode(serialize(&first))).unwrap();
+        }
+
+        let log_path = chain_dir.join("fork-blocks.ndjson");
+        let durable_length = fs::metadata(&log_path).unwrap().len();
+        {
+            let mut log = OpenOptions::new().append(true).open(&log_path).unwrap();
+            log.write_all(br#"{"schema_version":1"#).unwrap();
+            log.sync_all().unwrap();
+        }
+
+        let reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+        assert_eq!(reopened.status().tip_hash, first.block_hash().to_string());
+        assert_eq!(fs::metadata(&log_path).unwrap().len(), durable_length);
+        assert!(fs::read(&log_path).unwrap().ends_with(b"\n"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_restores_the_delimiter_after_a_complete_final_record() {
+        let dir = test_dir("pohw-fork-chain-complete-tail");
+        let manifest_path = write_manifest(&dir);
+        let chain_dir = dir.join("chain");
+        let inherited = BlockHash::from_str(&manifest().fork_point.inherited_tip_hash).unwrap();
+        let first = mine_block(inherited, 957_775, 1_783_900_801, 0);
+        {
+            let mut store = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+            store.submit_block(&hex::encode(serialize(&first))).unwrap();
+        }
+
+        let log_path = chain_dir.join("fork-blocks.ndjson");
+        let length_with_newline = fs::metadata(&log_path).unwrap().len();
+        OpenOptions::new()
+            .write(true)
+            .open(&log_path)
+            .unwrap()
+            .set_len(length_with_newline - 1)
+            .unwrap();
+
+        let second = {
+            let mut reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+            assert_eq!(reopened.status().tip_hash, first.block_hash().to_string());
+            assert_eq!(fs::metadata(&log_path).unwrap().len(), length_with_newline);
+            assert!(fs::read(&log_path).unwrap().ends_with(b"\n"));
+            let template = reopened.mining_template(1_783_900_802).unwrap();
+            let bits = u32::from_str_radix(&template.bits, 16).unwrap();
+            let second = mine_block_with_bits(
+                first.block_hash(),
+                template.height,
+                template.curtime,
+                0,
+                bits,
+            );
+            reopened
+                .submit_block(&hex::encode(serialize(&second)))
+                .unwrap();
+            second
+        };
+
+        let reopened_again = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
+        assert_eq!(
+            reopened_again.status().tip_hash,
+            second.block_hash().to_string()
+        );
+        assert_eq!(fs::read_to_string(&log_path).unwrap().lines().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_fails_closed_on_complete_malformed_record() {
+        let dir = test_dir("pohw-fork-chain-malformed-tail");
+        let manifest_path = write_manifest(&dir);
+        let chain_dir = dir.join("chain");
+        fs::create_dir_all(&chain_dir).unwrap();
+        let log_path = chain_dir.join("fork-blocks.ndjson");
+        fs::write(&log_path, b"not-json\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let error = ForkChainStore::open(&chain_dir, &manifest_path)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("invalid JSON"));
+        assert_eq!(fs::read(&log_path).unwrap(), b"not-json\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn block_summary_detects_pohw1_commitment_without_exposing_coinbase_hex() {
+        let inherited = BlockHash::from_str(&manifest().fork_point.inherited_tip_hash).unwrap();
+        let mut block = mine_block(inherited, 957_775, 1_783_900_801, 0);
+        let commitment_hash = "ab".repeat(32);
+        let mut script = vec![0x6a, 37];
+        script.extend_from_slice(b"POHW1");
+        script.extend_from_slice(&hex::decode(&commitment_hash).unwrap());
+        block.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(script);
+        assert_eq!(pohw_commitment_hash(&block), Some(commitment_hash));
+    }
+
+    #[test]
+    fn fork_explorer_decodes_transactions_addresses_and_utxos() {
+        let dir = test_dir("pohw-fork-transaction-explorer");
+        let manifest = manifest();
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let mut store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
+        let inherited = BlockHash::from_str(&manifest.fork_point.inherited_tip_hash).unwrap();
+        let mut block = mine_block(
+            inherited,
+            manifest.fork_point.first_fork_height,
+            1_783_900_801,
+            123,
+        );
+        block.txdata[0].output[0].script_pubkey =
+            ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([7u8; 20]));
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        reset_test_nonce(&mut block);
+        let target = Target::from_compact(block.header.bits);
+        while !target.is_met_by(block.block_hash()) {
+            block.header.nonce = block.header.nonce.wrapping_add(1);
+        }
+        store
+            .submit_block_at_time(
+                &hex::encode(serialize(&block)),
+                u64::MAX - MAX_FUTURE_BLOCK_SECONDS,
+            )
+            .unwrap();
+
+        let txid = block.txdata[0].compute_txid().to_string();
+        let page = store
+            .block_transactions(&block.block_hash().to_string(), 0, 25)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].txid, txid);
+        assert!(page.items[0].coinbase);
+
+        let detail = store.transaction_detail(&txid).unwrap().unwrap();
+        assert!(detail.active);
+        assert!(detail.coinbase);
+        assert_eq!(detail.total_output_sats, 123);
+        assert_eq!(detail.outputs[0].script_type, "p2pkh");
+        assert!(detail.outputs[0].spent_by.is_none());
+        let address = detail.outputs[0].address.clone().unwrap();
+
+        let summary = store.address_summary(&address).unwrap();
+        assert_eq!(summary.transaction_count, 1);
+        assert_eq!(summary.funded_output_count, 1);
+        assert_eq!(summary.balance_sats, 123);
+        let transactions = store.address_transactions(&address, 0, 25).unwrap();
+        assert_eq!(transactions.total, 1);
+        assert_eq!(transactions.items[0].txid, txid);
+        let utxos = store.address_utxos(&address, 0, 25).unwrap();
+        assert_eq!(utxos.total, 1);
+        assert_eq!(utxos.items[0].value_sats, 123);
+        assert!(store.address_summary("not-an-address").is_err());
+
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1985,7 +3222,7 @@ mod tests {
 
         let mut wrong_bits = mine_block(inherited, 957_775, 1_783_900_801, 0);
         wrong_bits.header.bits = CompactTarget::from_consensus(0x207f_fffe);
-        wrong_bits.header.nonce = 0;
+        reset_test_nonce(&mut wrong_bits);
         while !wrong_bits
             .header
             .target()
@@ -2005,7 +3242,7 @@ mod tests {
             .push(multiple_transactions.txdata[0].clone());
         multiple_transactions.header.merkle_root =
             multiple_transactions.compute_merkle_root().unwrap();
-        multiple_transactions.header.nonce = 0;
+        reset_test_nonce(&mut multiple_transactions);
         while !multiple_transactions
             .header
             .target()
@@ -2176,6 +3413,71 @@ mod tests {
         assert_eq!(next.height, initial.height + 1);
         assert_eq!(next.previous_block_hash, block.block_hash().to_string());
         task.abort();
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unconfigured_p2p_peer_cannot_submit_low_difficulty_blocks() {
+        let dir = test_dir("pohw-fork-chain-submit-gate");
+        let manifest = manifest();
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let store = Arc::new(RwLock::new(
+            ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap(),
+        ));
+        let inherited = BlockHash::from_str(&manifest.fork_point.inherited_tip_hash).unwrap();
+        let block = mine_block(inherited, 957_775, 1_783_900_801, 0);
+        let request = ForkWireRequest {
+            protocol_version: FORK_PROTOCOL_VERSION,
+            activation_id: manifest.activation_id,
+            method: ForkWireMethod::SubmitBlock {
+                block_hex: hex::encode(serialize(&block)),
+            },
+        };
+
+        let denied = handle_wire_request(&request, &store, false, false)
+            .await
+            .unwrap();
+        assert!(!denied.ok);
+        assert_eq!(denied.error_code.as_deref(), Some("peer_not_configured"));
+        assert_eq!(store.read().await.status().active_fork_block_count, 0);
+
+        let accepted = handle_wire_request(&request, &store, false, true)
+            .await
+            .unwrap();
+        assert!(accepted.ok);
+        assert_eq!(store.read().await.status().active_fork_block_count, 1);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn p2p_clients_cannot_run_explorer_scans() {
+        let dir = test_dir("pohw-fork-chain-explorer-gate");
+        let manifest = manifest();
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let store = Arc::new(RwLock::new(
+            ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap(),
+        ));
+        let request = ForkWireRequest {
+            protocol_version: FORK_PROTOCOL_VERSION,
+            activation_id: manifest.activation_id,
+            method: ForkWireMethod::BlockPage {
+                cursor: None,
+                limit: 25,
+            },
+        };
+
+        let denied = handle_wire_request(&request, &store, false, true)
+            .await
+            .unwrap();
+        assert!(!denied.ok);
+        assert_eq!(denied.error_code.as_deref(), Some("method_not_allowed"));
+
+        let allowed = handle_wire_request(&request, &store, true, true)
+            .await
+            .unwrap();
+        assert!(allowed.ok);
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
