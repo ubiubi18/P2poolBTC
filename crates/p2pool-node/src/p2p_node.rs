@@ -1,4 +1,5 @@
 use crate::bitcoin_rpc::{self, BitcoinRpcClient};
+use crate::fork_chain::ForkChainClient;
 use crate::local_node;
 use crate::peer_policy::{PeerDecision, PeerPolicy, PeerPolicyConfig};
 use anyhow::{bail, Context, Result};
@@ -72,7 +73,8 @@ pub struct GossipPeerLoopConfig {
 
 #[derive(Debug, Clone)]
 pub struct WorkTemplateAdmissionConfig {
-    pub bitcoin_rpc_client: BitcoinRpcClient,
+    pub bitcoin_rpc_client: Option<BitcoinRpcClient>,
+    pub fork_chain_client: Option<ForkChainClient>,
     pub validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy,
 }
 
@@ -531,6 +533,13 @@ fn validate_gossip_peer_loop_config(config: &GossipPeerLoopConfig) -> Result<()>
         MAX_SERVER_TIMEOUT_SECONDS as i64,
     )?;
     validate_gossip_time_window("max_age_seconds", config.max_age_seconds, 86_400 * 30)?;
+    if let Some(admission) = &config.work_template_admission {
+        let source_count = usize::from(admission.bitcoin_rpc_client.is_some())
+            + usize::from(admission.fork_chain_client.is_some());
+        if source_count != 1 {
+            bail!("work-template admission requires exactly one local validation source");
+        }
+    }
     Ok(())
 }
 
@@ -1533,15 +1542,24 @@ async fn admit_bitcoin_work_template(
         .get(&miner_id)
         .ok_or_else(|| anyhow::anyhow!("template miner is not registered in local replay"))?;
     template.verify_mining_signature(&registration.mining_pubkey_hex)?;
-    if historical {
+    if let Some(client) = admission.fork_chain_client.as_ref() {
+        client
+            .validate_work_template(&template)
+            .await
+            .context("fork-chain RPC rejected work template")?;
+    } else if historical {
         admission
             .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC admission source is not configured")?
             .validate_historical_bitcoin_work_template(&template)
             .await
             .context("Bitcoin RPC rejected historical work template")?;
     } else {
         admission
             .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC admission source is not configured")?
             .validate_bitcoin_work_template(&template, admission.validation_policy.clone())
             .await
             .context("Bitcoin RPC rejected work template")?;
@@ -2507,7 +2525,7 @@ impl GossipReadError {
 }
 
 #[derive(Debug, Clone)]
-struct ConnectionLimiter {
+pub(crate) struct ConnectionLimiter {
     max_connections: usize,
     max_connections_per_ip: usize,
     state: Arc<StdMutex<ConnectionLimiterState>>,
@@ -2520,13 +2538,13 @@ struct ConnectionLimiterState {
 }
 
 #[derive(Debug)]
-struct ConnectionGuard {
+pub(crate) struct ConnectionGuard {
     ip: IpAddr,
     state: Arc<StdMutex<ConnectionLimiterState>>,
 }
 
 impl ConnectionLimiter {
-    fn new(max_connections: usize, max_connections_per_ip: usize) -> Self {
+    pub(crate) fn new(max_connections: usize, max_connections_per_ip: usize) -> Self {
         Self {
             max_connections,
             max_connections_per_ip,
@@ -2534,7 +2552,7 @@ impl ConnectionLimiter {
         }
     }
 
-    fn try_acquire(&self, ip: IpAddr) -> Option<ConnectionGuard> {
+    pub(crate) fn try_acquire(&self, ip: IpAddr) -> Option<ConnectionGuard> {
         let mut state = self.state.lock().ok()?;
         let ip_count = state.by_ip.get(&ip).copied().unwrap_or(0);
         if state.total >= self.max_connections || ip_count >= self.max_connections_per_ip {
@@ -3267,7 +3285,8 @@ mod tests {
         let (server_addr, server_handle) = spawn_test_gossip_server(server_datadir.clone()).await;
         let (rpc_url, rpc_handle) = spawn_mock_bitcoin_rpc().await;
         let admission = WorkTemplateAdmissionConfig {
-            bitcoin_rpc_client: BitcoinRpcClient::new(rpc_url, None).unwrap(),
+            bitcoin_rpc_client: Some(BitcoinRpcClient::new(rpc_url, None).unwrap()),
+            fork_chain_client: None,
             validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
                 allow_mutable_time: false,
                 max_time_drift_seconds: 7_200,

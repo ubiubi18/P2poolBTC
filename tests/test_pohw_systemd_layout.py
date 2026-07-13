@@ -35,6 +35,34 @@ class SystemdLayoutTests(unittest.TestCase):
         self.assertIn("ReadOnlyPaths=\n", unit)
         self.assertIn("/mnt/bitcoin-wd/bitcoin/bitcoin-core-mainnet", unit)
 
+    def test_fork_chain_service_is_confined_and_restarted(self) -> None:
+        unit = (SYSTEMD / "pohw-fork-chain-node.service").read_text(encoding="utf-8")
+        self.assertIn("ExecStart=/opt/p2pool/scripts/pohw-run-fork-chain-node.sh", unit)
+        self.assertIn("Restart=always", unit)
+        self.assertIn("NoNewPrivileges=true", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("CapabilityBoundingSet=\n", unit)
+        self.assertIn("ReadOnlyPaths=/opt/p2pool /etc/pohw", unit)
+        self.assertIn("ReadWritePaths=/var/lib/pohw-p2pool", unit)
+        self.assertNotIn("bitcoind-mainnet.service", unit)
+
+    def test_mining_adapter_variants_start_after_fork_chain(self) -> None:
+        variants = {
+            "pohw-mining-adapter.service": (
+                "/mnt/ssd/p2pool/scripts/pohw-run-mining-adapter.sh",
+                "/mnt/ssd/pohw-p2pool",
+            ),
+            "pohw-mining-adapter-sdcard.service": (
+                "/opt/p2pool/scripts/pohw-run-mining-adapter.sh",
+                "/var/lib/pohw-p2pool",
+            ),
+        }
+        for name, (exec_start, write_path) in variants.items():
+            unit = (SYSTEMD / name).read_text(encoding="utf-8")
+            self.assertIn("After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service", unit)
+            self.assertIn(f"ExecStart={exec_start}", unit)
+            self.assertIn(f"ReadWritePaths={write_path}", unit)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,21 +45,32 @@ fi
 
 if [[ "$ADMIT_PEER_WORK_TEMPLATES" == "true" ]]; then
   args+=(--admit-peer-work-templates)
-  export BITCOIN_RPC_URL="${POHW_BITCOIN_RPC_URL:-${BITCOIN_RPC_URL:-http://127.0.0.1:8332}}"
-  if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
-    export BITCOIN_RPC_COOKIE_FILE="$POHW_BITCOIN_RPC_COOKIE_FILE"
-  fi
-  if [[ -n "${POHW_EXPECTED_HEADER_MERKLE_ROOT_HEX:-}" ]]; then
-    args+=(--expected-header-merkle-root-hex "$POHW_EXPECTED_HEADER_MERKLE_ROOT_HEX")
-  fi
-  if [[ "${POHW_ALLOW_UNVERIFIED_MERKLE_ROOT:-false}" == "true" ]]; then
-    args+=(--allow-unverified-merkle-root)
-  fi
-  if [[ "${POHW_ALLOW_MUTABLE_TIME:-false}" == "true" ]]; then
-    args+=(--allow-mutable-time)
-  fi
-  if [[ -n "${POHW_MAX_TEMPLATE_TIME_DRIFT_SECONDS:-}" ]]; then
-    args+=(--max-template-time-drift-seconds "$POHW_MAX_TEMPLATE_TIME_DRIFT_SECONDS")
+  if [[ -n "${POHW_STRATUM_FORK_CHAIN_RPC_ADDR:-}" || -n "${POHW_FORK_ACTIVATION_MANIFEST:-}" ]]; then
+    if [[ -z "${POHW_STRATUM_FORK_CHAIN_RPC_ADDR:-}" || -z "${POHW_FORK_ACTIVATION_MANIFEST:-}" ]]; then
+      echo "POHW_STRATUM_FORK_CHAIN_RPC_ADDR and POHW_FORK_ACTIVATION_MANIFEST must be set together." >&2
+      exit 1
+    fi
+    args+=(
+      --fork-chain-rpc-addr "$POHW_STRATUM_FORK_CHAIN_RPC_ADDR"
+      --fork-chain-activation-manifest "$POHW_FORK_ACTIVATION_MANIFEST"
+    )
+  else
+    export BITCOIN_RPC_URL="${POHW_BITCOIN_RPC_URL:-${BITCOIN_RPC_URL:-http://127.0.0.1:8332}}"
+    if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
+      export BITCOIN_RPC_COOKIE_FILE="$POHW_BITCOIN_RPC_COOKIE_FILE"
+    fi
+    if [[ -n "${POHW_EXPECTED_HEADER_MERKLE_ROOT_HEX:-}" ]]; then
+      args+=(--expected-header-merkle-root-hex "$POHW_EXPECTED_HEADER_MERKLE_ROOT_HEX")
+    fi
+    if [[ "${POHW_ALLOW_UNVERIFIED_MERKLE_ROOT:-false}" == "true" ]]; then
+      args+=(--allow-unverified-merkle-root)
+    fi
+    if [[ "${POHW_ALLOW_MUTABLE_TIME:-false}" == "true" ]]; then
+      args+=(--allow-mutable-time)
+    fi
+    if [[ -n "${POHW_MAX_TEMPLATE_TIME_DRIFT_SECONDS:-}" ]]; then
+      args+=(--max-template-time-drift-seconds "$POHW_MAX_TEMPLATE_TIME_DRIFT_SECONDS")
+    fi
   fi
 fi
 

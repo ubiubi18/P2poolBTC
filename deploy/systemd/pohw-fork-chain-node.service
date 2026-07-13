@@ -1,18 +1,17 @@
 [Unit]
-Description=PoHW P2Pool local Stratum mining adapter
-Wants=network-online.target pohw-gossip-mesh.service
-After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service
-RequiresMountsFor=/mnt/ssd
+Description=PoHW Experiment 0 fork-chain consensus node
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/mnt/ssd/p2pool
+WorkingDirectory=/opt/p2pool
 EnvironmentFile=-/etc/pohw/p2pool.env
-ExecStart=/mnt/ssd/p2pool/scripts/pohw-run-mining-adapter.sh
+ExecStart=/opt/p2pool/scripts/pohw-run-fork-chain-node.sh
 Restart=always
-RestartSec=10
+RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -23,17 +22,21 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictRealtime=true
+MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 UMask=0077
-ReadOnlyPaths=/mnt/ssd/p2pool /etc/pohw
-ReadWritePaths=/mnt/ssd/pohw-p2pool
+ReadOnlyPaths=/opt/p2pool /etc/pohw
+ReadWritePaths=/var/lib/pohw-p2pool
 
 [Install]
 WantedBy=multi-user.target

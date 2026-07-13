@@ -6,6 +6,9 @@ If you are joining as a beta tester for the first time, start with [Beta Testing
 
 Experiment 0 is a no-value, replay-only test of the decentralized P2Pool layer. It is not Bitcoin mainnet mining, not a token launch, not a bridge, and not a deposit system.
 
+The optional fork phase runs the repository's coinbase-only Experiment 0 chain.
+It is still no-value and does not alter or submit blocks to Bitcoin mainnet.
+
 ## Why This Test Matters
 
 P2poolBTC tests whether independent participants can verify the same Bitcoin-hashrate work, Idena human-work accounting, payout schedule, and vault-claim state without trusting one central pool server.
@@ -173,6 +176,20 @@ scripts/pohw-run-gossip-mesh.sh
 
 For LAN experiments, expose only gossip TCP `40406` to known peers. Keep Bitcoin RPC and Idena RPC on loopback.
 
+## Start The Optional Fork Chain
+
+After every node has the same activation manifest, start the fork consensus node:
+
+```sh
+scripts/pohw-run-fork-chain-node.sh
+```
+
+Configure a separate fork P2P port and at least one peer. Keep control RPC
+`127.0.0.1:40408` on loopback. Verify that all nodes report the same activation
+ID and, after mining begins, the same cumulative-work tip. Full consensus rules,
+Stratum configuration, smoke tests, and rollback are documented in
+[`docs/fork-chain-node.md`](docs/fork-chain-node.md).
+
 ## Prepare A Miner Registration
 
 Each participant prepares their own keys and unsigned Idena ownership challenge:
@@ -263,8 +280,8 @@ Stop and fix before expanding if:
 
 ## What Is Still Not Public-Ready
 
-- no full fork-chain consensus node yet,
-- no live fork block-template feed for the Stratum adapter yet,
+- no general post-fork transaction/script or UTXO consensus yet,
+- no inherited UTXO spending or adaptive post-fork DAA yet,
 - no long-running networked FROST signer daemon yet,
 - no real BTC payout flow,
 - no complete official-indexer-backed Idena reward replay for every category,

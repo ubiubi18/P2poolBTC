@@ -13,6 +13,17 @@ EXTRANONCE2_SIZE="${POHW_STRATUM_EXTRANONCE2_SIZE:-4}"
 MAX_LINE_BYTES="${POHW_STRATUM_MAX_LINE_BYTES:-16384}"
 IDLE_TIMEOUT_SECONDS="${POHW_STRATUM_IDLE_TIMEOUT_SECONDS:-900}"
 JOB_REFRESH_INTERVAL_SECONDS="${POHW_STRATUM_JOB_REFRESH_INTERVAL_SECONDS:-5}"
+FORK_CHAIN_RPC_ADDR="${POHW_STRATUM_FORK_CHAIN_RPC_ADDR:-}"
+FORK_CHAIN_ACTIVATION_MANIFEST="${POHW_FORK_ACTIVATION_MANIFEST:-}"
+FORK_CHAIN_MODE=false
+
+if [[ -n "$FORK_CHAIN_RPC_ADDR" || -n "$FORK_CHAIN_ACTIVATION_MANIFEST" ]]; then
+  if [[ -z "$FORK_CHAIN_RPC_ADDR" || -z "$FORK_CHAIN_ACTIVATION_MANIFEST" ]]; then
+    echo "POHW_STRATUM_FORK_CHAIN_RPC_ADDR and POHW_FORK_ACTIVATION_MANIFEST must be set together." >&2
+    exit 1
+  fi
+  FORK_CHAIN_MODE=true
+fi
 
 if [[ -z "${POHW_MINER_ID:-}" ]]; then
   echo "POHW_MINER_ID is required before starting the mining adapter." >&2
@@ -38,6 +49,11 @@ if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" && "${POHW_STRATUM_B
   exit 1
 fi
 
+if [[ "$FORK_CHAIN_MODE" == "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ) ]]; then
+  echo "Fork-chain template mode cannot be combined with Bitcoin RPC job builders." >&2
+  exit 1
+fi
+
 configure_rpc_environment() {
   unset BITCOIN_RPC_USER BITCOIN_RPC_PASSWORD BITCOIN_RPC_COOKIE_FILE
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
@@ -54,7 +70,7 @@ configure_rpc_environment() {
   fi
 }
 
-if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
+if [[ "$FORK_CHAIN_MODE" != "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
   configure_rpc_environment
 fi
 
@@ -125,7 +141,7 @@ elif [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" ]]; then
   "$BIN" "${build_args[@]}"
 fi
 
-if [[ -f "$JOB_FILE" ]] && grep -Eq '"job_id"[[:space:]]*:[[:space:]]*"experiment-0-example"' "$JOB_FILE"; then
+if [[ "$FORK_CHAIN_MODE" != "true" && -f "$JOB_FILE" ]] && grep -Eq '"job_id"[[:space:]]*:[[:space:]]*"experiment-0-example"' "$JOB_FILE"; then
   if [[ "${POHW_ALLOW_EXAMPLE_MINING_JOB:-false}" != "true" ]]; then
     echo "Refusing to start Stratum with the packaged example mining job." >&2
     echo "Provide a locally verified fork/testnet job file, or set POHW_ALLOW_EXAMPLE_MINING_JOB=true for an explicit local dry-run only." >&2
@@ -138,7 +154,6 @@ args=(
   --datadir "$DATADIR"
   --bind-addr "$BIND_ADDR"
   --miner-id "$POHW_MINER_ID"
-  --job-file "$JOB_FILE"
   --idena-snapshot-id "$POHW_IDENA_SNAPSHOT_ID"
   --idena-snapshot-proof-root "$POHW_IDENA_SNAPSHOT_PROOF_ROOT"
   --mining-secret-key-file "$MINING_SECRET_KEY_FILE"
@@ -148,6 +163,16 @@ args=(
   --max-stratum-line-bytes "$MAX_LINE_BYTES"
   --stratum-idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
 )
+
+if [[ "$FORK_CHAIN_MODE" == "true" ]]; then
+  args+=(
+    --fork-chain-rpc-addr "$FORK_CHAIN_RPC_ADDR"
+    --fork-chain-activation-manifest "$FORK_CHAIN_ACTIVATION_MANIFEST"
+    --job-refresh-interval-seconds "$JOB_REFRESH_INTERVAL_SECONDS"
+  )
+else
+  args+=(--job-file "$JOB_FILE")
+fi
 
 if [[ -n "$SHARE_TARGET" ]]; then
   args+=(--share-target "$SHARE_TARGET")
@@ -173,7 +198,18 @@ if [[ "${POHW_STRATUM_APPEND:-true}" != "true" ]]; then
   args+=(--no-append)
 fi
 
-if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+if [[ "$FORK_CHAIN_MODE" == "true" ]]; then
+  if [[ -n "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" || -n "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
+    if [[ -z "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" || -z "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
+      echo "POHW_STRATUM_PAYOUT_SCHEDULE_FILE and POHW_STRATUM_POHW_COMMITMENT_FILE must be set together." >&2
+      exit 1
+    fi
+    args+=(
+      --payout-schedule-file "$POHW_STRATUM_PAYOUT_SCHEDULE_FILE"
+      --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
+    )
+  fi
+elif [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
   args+=(
     --refresh-job-from-rpc
     --job-refresh-interval-seconds "$JOB_REFRESH_INTERVAL_SECONDS"
@@ -190,7 +226,7 @@ if [[ "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
   args+=(--auto-submit-blocks)
 fi
 
-if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
+if [[ "$FORK_CHAIN_MODE" != "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
   if [[ -n "${POHW_BITCOIN_RPC_URL:-}" ]]; then
     args+=(--rpc-url "$POHW_BITCOIN_RPC_URL")
   fi

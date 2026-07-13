@@ -150,6 +150,18 @@ impl ForkActivationManifest {
             replay_protection_required,
         })
     }
+
+    pub fn validate(&self) -> Result<(), ForkError> {
+        let canonical = Self::new(
+            self.config.clone(),
+            self.fork_point.clone(),
+            self.launch_block.clone(),
+        )?;
+        if canonical != *self {
+            return Err(ForkError::ManifestIntegrityMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -177,6 +189,8 @@ pub enum ForkError {
     InvalidTargetSpacing,
     #[error("post-fork compact PoW limit bits decode to an impossible zero target")]
     InvalidPostForkPowLimitBits,
+    #[error("fork activation manifest fields or activation_id are not canonical")]
+    ManifestIntegrityMismatch,
     #[error("{field} must be 32 bytes encoded as 64 hex characters")]
     InvalidBlockHash { field: &'static str },
 }
@@ -350,6 +364,32 @@ mod tests {
             "69242d8f37e5f9e3995b3f7ec92b764471cfad2abb354251dec4e0bd7bcaf937"
         );
         assert_ne!(first.activation_id, changed.activation_id);
+    }
+
+    #[test]
+    fn manifest_integrity_validation_rejects_tampering() {
+        let launch_timestamp = Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap();
+        let mut manifest = ForkActivationManifest::new(
+            ForkConfig::no_value_testnet("pohw-experiment-0", launch_timestamp),
+            ForkPoint {
+                inherited_tip_height: 100,
+                inherited_tip_hash: "aa".repeat(32),
+                first_fork_height: 101,
+                launch_timestamp_utc: launch_timestamp,
+            },
+            MainnetBlockRef {
+                height: 101,
+                block_hash: "bb".repeat(32),
+                timestamp: launch_timestamp,
+            },
+        )
+        .unwrap();
+        manifest.activation_id = "cc".repeat(32);
+
+        assert_eq!(
+            manifest.validate().unwrap_err(),
+            ForkError::ManifestIntegrityMismatch
+        );
     }
 
     #[test]

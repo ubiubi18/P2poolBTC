@@ -1,5 +1,6 @@
 mod bitcoin_rpc;
 mod dashboard_api;
+mod fork_chain;
 mod frost_signer_daemon;
 mod local_node;
 mod mining_adapter;
@@ -81,6 +82,30 @@ enum Command {
     Status {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
+    },
+    RunForkChainNode {
+        #[arg(long, default_value = ".pohw-p2pool/fork-chain")]
+        datadir: PathBuf,
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_bind_addr: SocketAddr,
+        #[arg(long)]
+        p2p_bind_addr: Option<SocketAddr>,
+        #[arg(long)]
+        allow_non_loopback_fork_p2p: bool,
+        #[arg(long = "peer-addr")]
+        peer_addrs: Vec<SocketAddr>,
+        #[arg(long, default_value_t = 5)]
+        sync_interval_seconds: u64,
+    },
+    ForkChainStatus {
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_addr: SocketAddr,
+        #[arg(long)]
+        allow_non_loopback_fork_rpc: bool,
     },
     PrepareForkActivation {
         #[arg(long)]
@@ -285,6 +310,10 @@ enum Command {
         max_peers_per_ip_group: usize,
         #[arg(long)]
         admit_peer_work_templates: bool,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -556,7 +585,11 @@ enum Command {
         #[arg(long)]
         miner_id: String,
         #[arg(long)]
-        job_file: PathBuf,
+        job_file: Option<PathBuf>,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long)]
         share_target: Option<String>,
         #[arg(long)]
@@ -680,6 +713,14 @@ enum Command {
         #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
         rpc_cookie_file: Option<PathBuf>,
     },
+    SubmitForkChainBlockCandidate {
+        #[arg(long)]
+        candidate_file: PathBuf,
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_addr: SocketAddr,
+    },
     CreateWithdrawalRequest {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
@@ -749,6 +790,10 @@ enum Command {
         peer_addr: SocketAddr,
         #[arg(long, default_value_t = 256)]
         limit: usize,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -1354,6 +1399,39 @@ async fn main() -> Result<()> {
             let status = local_node::local_node_status(&datadir)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
         }
+        Command::RunForkChainNode {
+            datadir,
+            activation_manifest,
+            rpc_bind_addr,
+            p2p_bind_addr,
+            allow_non_loopback_fork_p2p,
+            peer_addrs,
+            sync_interval_seconds,
+        } => {
+            fork_chain::run_fork_chain_node(fork_chain::ForkChainNodeConfig {
+                datadir,
+                activation_manifest,
+                rpc_bind_addr,
+                p2p_bind_addr,
+                allow_non_loopback_p2p: allow_non_loopback_fork_p2p,
+                peer_addrs,
+                sync_interval_seconds,
+            })
+            .await?;
+        }
+        Command::ForkChainStatus {
+            activation_manifest,
+            rpc_addr,
+            allow_non_loopback_fork_rpc,
+        } => {
+            let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let client = fork_chain::ForkChainClient::new(
+                rpc_addr,
+                manifest.activation_id,
+                allow_non_loopback_fork_rpc,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&client.status().await?)?);
+        }
         Command::PrepareForkActivation {
             chain_name,
             launch_timestamp_utc,
@@ -1626,6 +1704,8 @@ async fn main() -> Result<()> {
             ban_seconds,
             max_peers_per_ip_group,
             admit_peer_work_templates,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -1641,15 +1721,32 @@ async fn main() -> Result<()> {
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
             }
+            let fork_chain_client = fork_chain_client_from_options(
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            )?;
+            if fork_chain_client.is_some()
+                && (expected_header_merkle_root_hex.is_some()
+                    || allow_unverified_merkle_root
+                    || allow_mutable_time)
+            {
+                bail!("Bitcoin template-policy flags cannot be used with fork-chain admission");
+            }
             let work_template_admission = if admit_peer_work_templates {
-                Some(p2p_node::WorkTemplateAdmissionConfig {
-                    bitcoin_rpc_client: bitcoin_rpc_client(
+                let bitcoin_rpc_client = if fork_chain_client.is_none() {
+                    Some(bitcoin_rpc_client(
                         rpc_url,
                         rpc_user,
                         rpc_password,
                         rpc_cookie_file,
                         allow_remote_rpc,
-                    )?,
+                    )?)
+                } else {
+                    None
+                };
+                Some(p2p_node::WorkTemplateAdmissionConfig {
+                    bitcoin_rpc_client,
+                    fork_chain_client,
                     validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
                         allow_mutable_time,
                         max_time_drift_seconds: max_template_time_drift_seconds,
@@ -1658,6 +1755,9 @@ async fn main() -> Result<()> {
                     },
                 })
             } else {
+                if fork_chain_client.is_some() {
+                    bail!("fork-chain admission options require --admit-peer-work-templates");
+                }
                 None
             };
             p2p_node::run_gossip_mesh(
@@ -2107,6 +2207,8 @@ async fn main() -> Result<()> {
             allow_example_mining_job,
             miner_id,
             job_file,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             share_target,
             idena_snapshot_id,
             idena_snapshot_proof_root,
@@ -2131,17 +2233,38 @@ async fn main() -> Result<()> {
             rpc_cookie_file,
             append,
         } => {
-            let bitcoin_rpc_client = if refresh_job_from_rpc || auto_submit_blocks {
-                Some(bitcoin_rpc_client(
-                    rpc_url,
-                    rpc_user,
-                    rpc_password,
-                    rpc_cookie_file,
-                    allow_remote_rpc,
-                )?)
-            } else {
-                None
+            let fork_chain_client = match (
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            ) {
+                (Some(addr), Some(path)) => {
+                    let manifest = fork_chain::read_activation_manifest(&path)?;
+                    Some(fork_chain::ForkChainClient::new(
+                        addr,
+                        manifest.activation_id,
+                        false,
+                    )?)
+                }
+                (None, None) => None,
+                _ => bail!(
+                    "--fork-chain-rpc-addr and --fork-chain-activation-manifest must be supplied together"
+                ),
             };
+            if fork_chain_client.is_some() && refresh_job_from_rpc {
+                bail!("--fork-chain-rpc-addr cannot be combined with --refresh-job-from-rpc");
+            }
+            let bitcoin_rpc_client =
+                if fork_chain_client.is_none() && (refresh_job_from_rpc || auto_submit_blocks) {
+                    Some(bitcoin_rpc_client(
+                        rpc_url,
+                        rpc_user,
+                        rpc_password,
+                        rpc_cookie_file,
+                        allow_remote_rpc,
+                    )?)
+                } else {
+                    None
+                };
             let (payout_schedule, pohw_commitment) =
                 match (payout_schedule_file, pohw_commitment_file) {
                     (Some(schedule_path), Some(commitment_path)) => (
@@ -2174,6 +2297,7 @@ async fn main() -> Result<()> {
                 idle_timeout_seconds: stratum_idle_timeout_seconds,
                 append,
                 bitcoin_rpc_client,
+                fork_chain_client,
                 refresh_job_from_rpc,
                 job_refresh_interval_seconds,
                 auto_submit_blocks,
@@ -2357,6 +2481,27 @@ async fn main() -> Result<()> {
                 }))?
             );
         }
+        Command::SubmitForkChainBlockCandidate {
+            candidate_file,
+            activation_manifest,
+            rpc_addr,
+        } => {
+            let candidate = read_stratum_block_candidate_file(&candidate_file)?;
+            let block_hex = block_hex_for_stratum_candidate_submission(&candidate)?;
+            let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let client = fork_chain::ForkChainClient::new(rpc_addr, manifest.activation_id, false)?;
+            let outcome = client.submit_block(block_hex).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "candidate_file": display_path(&candidate_file),
+                    "job_id": candidate.job_id,
+                    "block_hash": candidate.block_hash,
+                    "coinbase_txid": candidate.coinbase_txid,
+                    "submit_status": outcome.status,
+                }))?
+            );
+        }
         Command::CreateWithdrawalRequest {
             datadir,
             request_id,
@@ -2460,6 +2605,8 @@ async fn main() -> Result<()> {
             datadir,
             peer_addr,
             limit,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -2477,14 +2624,31 @@ async fn main() -> Result<()> {
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
             }
-            let admission = p2p_node::WorkTemplateAdmissionConfig {
-                bitcoin_rpc_client: bitcoin_rpc_client(
+            let fork_chain_client = fork_chain_client_from_options(
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            )?;
+            if fork_chain_client.is_some()
+                && (expected_header_merkle_root_hex.is_some()
+                    || allow_unverified_merkle_root
+                    || allow_mutable_time)
+            {
+                bail!("Bitcoin template-policy flags cannot be used with fork-chain admission");
+            }
+            let bitcoin_rpc_client = if fork_chain_client.is_none() {
+                Some(bitcoin_rpc_client(
                     rpc_url,
                     rpc_user,
                     rpc_password,
                     rpc_cookie_file,
                     allow_remote_rpc,
-                )?,
+                )?)
+            } else {
+                None
+            };
+            let admission = p2p_node::WorkTemplateAdmissionConfig {
+                bitcoin_rpc_client,
+                fork_chain_client,
                 validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
                     allow_mutable_time,
                     max_time_drift_seconds: max_template_time_drift_seconds,
@@ -4914,6 +5078,26 @@ fn bitcoin_rpc_client(
         BitcoinRpcClient::new_with_remote_policy(rpc_url, auth, true)
     } else {
         BitcoinRpcClient::new(rpc_url, auth)
+    }
+}
+
+fn fork_chain_client_from_options(
+    rpc_addr: Option<SocketAddr>,
+    activation_manifest: Option<PathBuf>,
+) -> Result<Option<fork_chain::ForkChainClient>> {
+    match (rpc_addr, activation_manifest) {
+        (Some(addr), Some(path)) => {
+            let manifest = fork_chain::read_activation_manifest(&path)?;
+            Ok(Some(fork_chain::ForkChainClient::new(
+                addr,
+                manifest.activation_id,
+                false,
+            )?))
+        }
+        (None, None) => Ok(None),
+        _ => bail!(
+            "--fork-chain-rpc-addr and --fork-chain-activation-manifest must be supplied together"
+        ),
     }
 }
 

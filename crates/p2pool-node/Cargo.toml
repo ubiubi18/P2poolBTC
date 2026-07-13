@@ -10,7 +10,9 @@ anyhow.workspace = true
 bitcoin.workspace = true
 chrono.workspace = true
 clap.workspace = true
+fs2.workspace = true
 hex.workspace = true
+libc.workspace = true
 idena-lite-indexer = { path = "../idena-lite-indexer" }
 pohw-core = { path = "../pohw-core" }
 rand_chacha.workspace = true

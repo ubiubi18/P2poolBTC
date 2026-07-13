@@ -9,6 +9,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MINING_ADAPTER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-mining-adapter.sh"
+FORK_CHAIN_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-fork-chain-node.sh"
+GOSSIP_MESH_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-gossip-mesh.sh"
 DASHBOARD_UI_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-ui.sh"
 LOCAL_GOSSIP_PEER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-local-gossip-peer.sh"
 
@@ -289,6 +291,114 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Use either POHW_STRATUM_BUILD_JOB_FROM_RPC", result.stderr)
+
+    def test_mining_adapter_uses_live_fork_templates_without_bitcoin_rpc(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-fork-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_text("{}\n", encoding="utf-8")
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_FORK_CHAIN_RPC_ADDR": "127.0.0.1:40408",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_BITCOIN_RPC_USER": "must-not-be-forwarded",
+                    "POHW_BITCOIN_RPC_PASSWORD": "must-not-be-forwarded",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--fork-chain-rpc-addr", args)
+        self.assertIn("--fork-chain-activation-manifest", args)
+        self.assertIn("--auto-submit-blocks", args)
+        self.assertNotIn("--job-file", args)
+        self.assertNotIn("--rpc-url", args)
+        self.assertNotIn("must-not-be-forwarded", args)
+
+    def test_fork_chain_runner_enforces_no_value_ack_and_peer_config(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-fork-wrapper-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_text("{}\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_EXPERIMENT_NO_VALUE_ACK": "I_UNDERSTAND_NO_VALUE",
+                    "POHW_FORK_CHAIN_DATADIR": str(root / "fork-chain"),
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FORK_P2P_BIND_ADDR": "127.0.0.1:40409",
+                    "POHW_FORK_PEER_ADDRS": "127.0.0.1:41409,127.0.0.1:42409",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(FORK_CHAIN_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-fork-chain-node", args)
+        self.assertIn("--activation-manifest", args)
+        self.assertIn("127.0.0.1:41409", args)
+        self.assertIn("127.0.0.1:42409", args)
+
+    def test_gossip_mesh_admits_templates_against_local_fork_node(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-fork-admission-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_text("{}\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_ADMIT_PEER_WORK_TEMPLATES": "true",
+                    "POHW_STRATUM_FORK_CHAIN_RPC_ADDR": "127.0.0.1:40408",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_BITCOIN_RPC_PASSWORD": "must-not-be-forwarded",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--admit-peer-work-templates", args)
+        self.assertIn("--fork-chain-rpc-addr", args)
+        self.assertIn("--fork-chain-activation-manifest", args)
+        self.assertNotIn("--rpc-url", args)
+        self.assertNotIn("must-not-be-forwarded", args)
 
     def test_dashboard_ui_runner_uses_loopback_and_token_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-wrapper-") as temp:

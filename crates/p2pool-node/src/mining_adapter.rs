@@ -1,8 +1,9 @@
 use crate::{
     bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinRpcClient, SubmitBlockOutcome},
-    default_parent_share_hash, local_node, publish_sharechain_message, random_nonce_hex,
-    read_keypair_from_file, sign_hash_hex, validate_protected_secret_file,
-    PublishSharechainMessageInput,
+    default_parent_share_hash,
+    fork_chain::ForkChainClient,
+    local_node, publish_sharechain_message, random_nonce_hex, read_keypair_from_file,
+    sign_hash_hex, validate_protected_secret_file, PublishSharechainMessageInput,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::consensus::encode::{deserialize, serialize};
@@ -55,7 +56,7 @@ pub(crate) struct MiningAdapterConfig {
     pub allow_non_loopback_stratum: bool,
     pub allow_example_mining_job: bool,
     pub miner_id: String,
-    pub job_file: PathBuf,
+    pub job_file: Option<PathBuf>,
     pub share_target: Option<String>,
     pub idena_snapshot_id: String,
     pub idena_snapshot_proof_root: String,
@@ -70,6 +71,7 @@ pub(crate) struct MiningAdapterConfig {
     pub idle_timeout_seconds: u64,
     pub append: bool,
     pub bitcoin_rpc_client: Option<BitcoinRpcClient>,
+    pub fork_chain_client: Option<ForkChainClient>,
     pub refresh_job_from_rpc: bool,
     pub job_refresh_interval_seconds: u64,
     pub auto_submit_blocks: bool,
@@ -175,7 +177,7 @@ fn default_clean_jobs() -> bool {
     true
 }
 
-pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()> {
+pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Result<()> {
     validate_bind_addr(config.bind_addr, config.allow_non_loopback_stratum)?;
     if !config.bind_addr.ip().is_loopback() && config.stratum_password_file.is_none() {
         bail!("refusing non-loopback Stratum adapter without --stratum-password-file");
@@ -197,28 +199,57 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
             "--job-refresh-interval-seconds must be between 1 and {MAX_JOB_REFRESH_INTERVAL_SECONDS}"
         );
     }
+    if config.fork_chain_client.is_some()
+        && (config.refresh_job_from_rpc || config.bitcoin_rpc_client.is_some())
+    {
+        bail!("fork-chain template mode cannot be combined with Bitcoin RPC job refresh");
+    }
     if (config.refresh_job_from_rpc || config.auto_submit_blocks)
         && config.bitcoin_rpc_client.is_none()
+        && config.fork_chain_client.is_none()
     {
         bail!(
-            "Bitcoin RPC configuration is required for job refresh or automatic block submission"
+            "Bitcoin RPC or fork-chain RPC is required for job refresh or automatic block submission"
         );
     }
     if config.payout_schedule.is_some() != config.pohw_commitment.is_some() {
         bail!("payout schedule and PoHW commitment must be supplied together");
     }
-    if config.payout_schedule.is_some() && !config.refresh_job_from_rpc {
-        bail!("payout schedule and PoHW commitment require --refresh-job-from-rpc");
+    if config.payout_schedule.is_some()
+        && !config.refresh_job_from_rpc
+        && config.fork_chain_client.is_none()
+    {
+        bail!("payout schedule and PoHW commitment require a live template source");
     }
-    let share_target =
-        resolve_share_target(config.share_target.as_deref(), config.stratum_difficulty)?;
-    Share::expected_hashrate_score_delta_for_target(&share_target)
-        .context("invalid share target")?;
-
-    let job = read_stratum_job_file(&config.job_file)?;
+    let job = if let Some(client) = config.fork_chain_client.as_ref() {
+        let material = client.mining_template().await?;
+        build_job_for_template_source(
+            &material,
+            config.payout_schedule.as_ref(),
+            config.pohw_commitment.as_ref(),
+            config.extranonce2_size,
+        )?
+        .job
+    } else {
+        let job_file = config
+            .job_file
+            .as_deref()
+            .context("--job-file is required without --fork-chain-rpc-addr")?;
+        read_stratum_job_file(job_file)?
+    };
     job.validate()?;
     job.validate_example_policy(config.allow_example_mining_job)?;
     let block_target = block_target_hex_from_job_nbits(&job.nbits)?;
+    let share_target = match config.share_target.as_deref() {
+        Some(target) => target.to_ascii_lowercase(),
+        None if config.fork_chain_client.is_some() => {
+            config.stratum_difficulty = difficulty_float_from_target_hex(&block_target)?;
+            block_target.clone()
+        }
+        None => resolve_share_target(None, config.stratum_difficulty)?,
+    };
+    Share::expected_hashrate_score_delta_for_target(&share_target)
+        .context("invalid share target")?;
     ensure_share_target_not_stricter_than_block_target(&share_target, &block_target)?;
     let stratum_password = read_optional_stratum_password(
         config.stratum_password_file.as_deref(),
@@ -251,7 +282,7 @@ pub(crate) async fn run_mining_adapter(config: MiningAdapterConfig) -> Result<()
         state.config.bind_addr, state.config.miner_id, initial_job_id
     );
 
-    if state.config.refresh_job_from_rpc {
+    if state.config.refresh_job_from_rpc || state.config.fork_chain_client.is_some() {
         let refresh_state = Arc::clone(&state);
         tokio::spawn(async move {
             refresh_job_loop(refresh_state).await;
@@ -288,32 +319,30 @@ async fn refresh_job_loop(state: Arc<AdapterState>) {
             }
             Ok(None) => {}
             Err(err) => {
-                eprintln!("failed to refresh Stratum job from Bitcoin RPC: {err:#}");
+                eprintln!("failed to refresh Stratum job from live template source: {err:#}");
             }
         }
     }
 }
 
 async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
-    let client = state
-        .config
-        .bitcoin_rpc_client
-        .as_ref()
-        .context("Bitcoin RPC client is not configured")?;
-    let material = client.mining_job_template().await?;
-    let built = match (
+    let material = if let Some(client) = state.config.fork_chain_client.as_ref() {
+        client.mining_template().await?
+    } else {
+        state
+            .config
+            .bitcoin_rpc_client
+            .as_ref()
+            .context("live mining template source is not configured")?
+            .mining_job_template()
+            .await?
+    };
+    let built = build_job_for_template_source(
+        &material,
         state.config.payout_schedule.as_ref(),
         state.config.pohw_commitment.as_ref(),
-    ) {
-        (Some(schedule), Some(commitment)) => build_pohw_stratum_job_from_template(
-            &material,
-            schedule,
-            commitment,
-            state.config.extranonce2_size,
-        )?,
-        (None, None) => build_stratum_job_from_template(&material, state.config.extranonce2_size)?,
-        _ => bail!("payout schedule and PoHW commitment must be supplied together"),
-    };
+        state.config.extranonce2_size,
+    )?;
     let job = built.job;
     job.validate()?;
     job.validate_example_policy(false)?;
@@ -329,6 +358,23 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
     drop(current);
     let _ = state.job_updates.send(job);
     Ok(Some(job_id))
+}
+
+fn build_job_for_template_source(
+    material: &BitcoinMiningJobTemplate,
+    payout_schedule: Option<&PayoutSchedule>,
+    pohw_commitment: Option<&PohwCommitment>,
+    extranonce2_size: usize,
+) -> Result<BuiltStratumJob> {
+    match (payout_schedule, pohw_commitment) {
+        (Some(schedule), Some(commitment)) => {
+            build_pohw_stratum_job_from_template(material, schedule, commitment, extranonce2_size)
+        }
+        (None, None) => build_stratum_job_from_template(material, extranonce2_size),
+        _ => Err(anyhow!(
+            "payout schedule and PoHW commitment must be supplied together"
+        )),
+    }
 }
 
 pub(crate) async fn build_stratum_job_from_rpc(
@@ -502,6 +548,23 @@ fn resolve_share_target(configured: Option<&str>, stratum_difficulty: f64) -> Re
         bail!("--share-target is required when --stratum-difficulty is not the default diff-1");
     }
     Ok(default_share_target_hex())
+}
+
+fn difficulty_float_from_target_hex(target_hex: &str) -> Result<f64> {
+    let bytes = decode_hex_exact_bytes("fork block target", target_hex, 32)?;
+    let target = Target::from_be_bytes(
+        bytes
+            .try_into()
+            .expect("target byte length was validated as exactly 32"),
+    );
+    if target == Target::ZERO {
+        bail!("fork block target must not be zero");
+    }
+    let difficulty = target.difficulty_float();
+    if difficulty <= 0.0 || !difficulty.is_finite() {
+        bail!("fork block target produced an invalid Stratum difficulty");
+    }
+    Ok(difficulty)
 }
 
 fn ensure_share_target_not_stricter_than_block_target(
@@ -1257,13 +1320,18 @@ async fn maybe_submit_block_candidate(
         return None;
     }
     let result = async {
-        let client = state
-            .config
-            .bitcoin_rpc_client
-            .as_ref()
-            .context("Bitcoin RPC client is not configured")?;
         let block_hex = block_hex_for_stratum_candidate_submission(candidate)?;
-        client.submit_block(block_hex).await
+        if let Some(client) = state.config.fork_chain_client.as_ref() {
+            client.submit_block(block_hex).await
+        } else {
+            state
+                .config
+                .bitcoin_rpc_client
+                .as_ref()
+                .context("block-submission client is not configured")?
+                .submit_block(block_hex)
+                .await
+        }
     }
     .await;
     Some(match result {
@@ -2856,6 +2924,14 @@ mod tests {
             &easy_fork_target
         )
         .is_ok());
+    }
+
+    #[test]
+    fn easy_fork_target_maps_to_positive_fractional_stratum_difficulty() {
+        let easy_fork_target = block_target_hex_from_job_nbits("ffff7f20").unwrap();
+        let difficulty = difficulty_float_from_target_hex(&easy_fork_target).unwrap();
+        assert!(difficulty > 0.0);
+        assert!(difficulty < 1.0);
     }
 
     #[test]
