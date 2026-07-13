@@ -140,7 +140,9 @@ If your Bitcoin Core node is synced far enough for the agreed timestamp:
 scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
 ```
 
-Compare `activation_id`, `first_fork_height`, and `inherited_tip_hash` with the group.
+Compare the complete schema-2 manifest with the group, especially
+`activation_id`, `first_fork_height`, `difficulty_algorithm`, and
+`bootstrap_handoff_hashrate_hps`.
 
 ## What Success Looks Like
 

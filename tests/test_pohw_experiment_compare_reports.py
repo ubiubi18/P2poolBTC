@@ -13,7 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPARE_REPORTS = REPO_ROOT / "scripts" / "pohw-experiment-compare-reports.py"
 FORK_ACTIVATION_HASH_TAG = b"POHW1_FORK_ACTIVATION"
-EXPECTED_ACTIVATION_ID = "69242d8f37e5f9e3995b3f7ec92b764471cfad2abb354251dec4e0bd7bcaf937"
+EXPECTED_ACTIVATION_ID = "eaa1046d1f672b49edcb0fe31ae17545da98ea73405d65a81ac668bd6684a841"
 
 
 class ExperimentCompareReportsTest(unittest.TestCase):
@@ -59,13 +59,15 @@ class ExperimentCompareReportsTest(unittest.TestCase):
 
     def write_activation_manifest(self, report: Path, activation_id: str) -> None:
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "config": {
                 "chain_name": "pohw-experiment-0",
                 "launch_timestamp_utc": "2026-07-05T00:00:00Z",
                 "inherited_utxo_spending_enabled": False,
                 "post_fork_pow_limit_bits": 545259519,
                 "target_spacing_seconds": 600,
+                "difficulty_algorithm": "bootstrap_then_bitcoin_2016_v1",
+                "bootstrap_handoff_hashrate_hps": 1_000_000_000_000_000,
             },
             "fork_point": {
                 "inherited_tip_height": 100,
@@ -107,6 +109,10 @@ class ExperimentCompareReportsTest(unittest.TestCase):
                 ],
                 "post_fork_pow_limit_bits": config["post_fork_pow_limit_bits"],
                 "target_spacing_seconds": config["target_spacing_seconds"],
+                "difficulty_algorithm": config["difficulty_algorithm"],
+                "bootstrap_handoff_hashrate_hps": config[
+                    "bootstrap_handoff_hashrate_hps"
+                ],
             },
             "fork_point": {
                 "inherited_tip_height": fork_point["inherited_tip_height"],
@@ -376,6 +382,41 @@ class ExperimentCompareReportsTest(unittest.TestCase):
                 "replay-protection-mismatch",
                 lambda manifest: manifest.update({"replay_protection_required": False}),
                 "replay_protection_required must be the inverse",
+            ),
+            (
+                "invalid-difficulty-algorithm",
+                lambda manifest: manifest["config"].update(
+                    {"difficulty_algorithm": "fixed_target"}
+                ),
+                "config.difficulty_algorithm must be bootstrap_then_bitcoin_2016_v1",
+            ),
+            (
+                "zero-handoff-hashrate",
+                lambda manifest: manifest["config"].update(
+                    {"bootstrap_handoff_hashrate_hps": 0}
+                ),
+                "bootstrap_handoff_hashrate_hps must be positive",
+            ),
+            (
+                "too-small-spacing",
+                lambda manifest: manifest["config"].update(
+                    {"target_spacing_seconds": 3}
+                ),
+                "config.target_spacing_seconds must be at least 4",
+            ),
+            (
+                "noncanonical-pow-limit",
+                lambda manifest: manifest["config"].update(
+                    {"post_fork_pow_limit_bits": 0x02000100}
+                ),
+                "config.post_fork_pow_limit_bits must be canonical",
+            ),
+            (
+                "oversized-pow-target",
+                lambda manifest: manifest["config"].update(
+                    {"post_fork_pow_limit_bits": 0xFF000001}
+                ),
+                "config.post_fork_pow_limit_bits decodes to a zero target",
             ),
         ]
         for case_name, mutate, expected_error in cases:

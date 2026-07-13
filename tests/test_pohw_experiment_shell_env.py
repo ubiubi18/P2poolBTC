@@ -417,6 +417,54 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Launch timestamp is required", result.stderr)
 
+    def test_prepare_fork_activation_forwards_handoff_hashrate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-activation-handoff-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            args_out = root / "args.txt"
+            manifest = root / "state" / "fork-activation.json"
+            fake_bin = root / "p2pool-node"
+            fake_bin.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f"printf '%s\\n' \"$@\" > {args_out!s}\n"
+                "while (( $# )); do\n"
+                "  if [[ \"$1\" == --manifest-out ]]; then\n"
+                "    mkdir -p \"$(dirname \"$2\")\"\n"
+                "    printf '{}\\n' > \"$2\"\n"
+                "    break\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "printf '{}\\n'\n",
+                encoding="utf-8",
+            )
+            fake_bin.chmod(0o700)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        f"POHW_WORKDIR={REPO_ROOT}",
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
+                        f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
+                        "POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS=123456789",
+                        f"POHW_P2POOL_NODE_BIN={fake_bin}",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-prepare-fork-activation.sh",
+                env_file,
+            )
+            args = args_out.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        threshold_index = args.index("--bootstrap-handoff-hashrate-hps")
+        self.assertEqual(args[threshold_index + 1], "123456789")
+
     def test_prepare_fork_activation_refuses_existing_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-activation-existing-") as temp:
             root = Path(temp)
