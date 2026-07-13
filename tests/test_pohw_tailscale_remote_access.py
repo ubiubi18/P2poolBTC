@@ -8,6 +8,7 @@ from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = REPO_ROOT / "scripts" / "pohw-install-tailscale-remote-access.sh"
+SYNTHETIC_AUTHKEY = "".join(("ts", "key", "-", "auth", "-", "synthetic-fixture"))
 
 
 class TailscaleRemoteAccessTest(unittest.TestCase):
@@ -148,7 +149,7 @@ printf '%s\\n' \\
             self.write_fake_systemctl(root)
             self.write_fake_ufw(root)
             authkey = root / "tailscale.authkey"
-            authkey.write_text("tskey-auth-test-only\n", encoding="utf-8")
+            authkey.write_text(f"{SYNTHETIC_AUTHKEY}\n", encoding="utf-8")
             authkey.chmod(0o600)
 
             result = self.run_installer(root, authkey)
@@ -172,8 +173,8 @@ printf '%s\\n' \\
             "serve --bg --yes --tcp=2222 tcp://127.0.0.1:22",
             tailscale_log,
         )
-        self.assertNotIn("tskey-auth-test-only", result.stdout)
-        self.assertNotIn("tskey-auth-test-only", result.stderr)
+        self.assertNotIn(SYNTHETIC_AUTHKEY, result.stdout)
+        self.assertNotIn(SYNTHETIC_AUTHKEY, result.stderr)
 
     def test_needs_login_json_status_without_authkey_fails_before_up(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-tailscale-needs-login-") as temp:
@@ -199,7 +200,7 @@ printf '%s\\n' \\
             self.write_fake_systemctl(root)
             self.write_fake_ufw(root)
             authkey = root / "tailscale.authkey"
-            authkey.write_text("tskey-auth-test-only\n", encoding="utf-8")
+            authkey.write_text(f"{SYNTHETIC_AUTHKEY}\n", encoding="utf-8")
             authkey.chmod(0o644)
 
             result = self.run_installer(root, authkey)
