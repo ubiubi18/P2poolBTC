@@ -9,7 +9,7 @@ importers:
   .:
     devDependencies:
       assemblyscript:
-        specifier: ^0.27.35
+        specifier: 0.27.37
         version: 0.27.37
 
 packages:

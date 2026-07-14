@@ -13,6 +13,6 @@
     "test": "asc assembly/smoke_test.ts --target release --outFile build/snapshot-registry-smoke.wasm --textFile build/snapshot-registry-smoke.wat && node scripts/smoke-test.mjs && asc assembly/index.ts --target release && node scripts/check-release-abi.mjs"
   },
   "devDependencies": {
-    "assemblyscript": "^0.27.35"
+    "assemblyscript": "0.27.37"
   }
 }
