@@ -8,15 +8,20 @@ DIST_DIR="${POHW_DASHBOARD_UI_DIST_DIR:-$UI_DIR/dist}"
 BIND_HOST="${POHW_DASHBOARD_UI_BIND_HOST:-127.0.0.1}"
 PORT="${POHW_DASHBOARD_UI_PORT:-5176}"
 API_URL="${POHW_DASHBOARD_UI_API_URL:-http://127.0.0.1:40407/dashboard.json}"
+EXPLORER_API_BASE="${POHW_EXPLORER_UI_API_BASE:-http://127.0.0.1:40407/api/v1}"
+DEFAULT_VIEW="${POHW_DASHBOARD_UI_DEFAULT_VIEW:-dashboard}"
+PARTICIPANT_DASHBOARD="${POHW_DASHBOARD_UI_PARTICIPANT_ENABLED:-true}"
 TOKEN_FILE="${POHW_DASHBOARD_API_TOKEN_FILE:-}"
 CACHE_DIR="${POHW_DASHBOARD_UI_CACHE_DIR:-$DATADIR/dashboard-ui-cache}"
 PYTHON_BIN="${POHW_DASHBOARD_UI_PYTHON_BIN:-python3}"
 HTTP_SERVER_BIN="${POHW_DASHBOARD_UI_HTTP_SERVER_BIN:-$PYTHON_BIN}"
+NON_LOOPBACK_BIND=false
 
 case "$BIND_HOST" in
   127.*|localhost|::1)
     ;;
   *)
+    NON_LOOPBACK_BIND=true
     if [[ "${POHW_DASHBOARD_UI_ALLOW_NON_LOOPBACK:-false}" != "true" ]]; then
       echo "Refusing to bind dashboard UI to non-loopback host $BIND_HOST." >&2
       echo "Use SSH port forwarding, or set POHW_DASHBOARD_UI_ALLOW_NON_LOOPBACK=true only on a trusted/firewalled network." >&2
@@ -25,10 +30,34 @@ case "$BIND_HOST" in
     ;;
 esac
 
+if [[ "$NON_LOOPBACK_BIND" == "true" && "$PARTICIPANT_DASHBOARD" == "true" ]]; then
+  echo "Refusing a non-loopback participant dashboard because its browser config contains the dashboard token." >&2
+  echo "Keep the participant UI on loopback and use SSH forwarding, or disable participant mode for a public explorer." >&2
+  exit 1
+fi
+
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   echo "POHW_DASHBOARD_UI_PORT must be a TCP port from 1 to 65535." >&2
   exit 1
 fi
+
+case "$DEFAULT_VIEW" in
+  dashboard|explorer)
+    ;;
+  *)
+    echo "POHW_DASHBOARD_UI_DEFAULT_VIEW must be dashboard or explorer." >&2
+    exit 1
+    ;;
+esac
+
+case "$PARTICIPANT_DASHBOARD" in
+  true|false)
+    ;;
+  *)
+    echo "POHW_DASHBOARD_UI_PARTICIPANT_ENABLED must be true or false." >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -d "$UI_DIR" ]]; then
   echo "Dashboard UI directory does not exist: $UI_DIR" >&2
@@ -52,7 +81,7 @@ if ! command -v "$HTTP_SERVER_BIN" >/dev/null 2>&1; then
 fi
 
 token=""
-if [[ -n "$TOKEN_FILE" ]]; then
+if [[ "$PARTICIPANT_DASHBOARD" == "true" && -n "$TOKEN_FILE" ]]; then
   if [[ ! -f "$TOKEN_FILE" || -L "$TOKEN_FILE" ]]; then
     echo "Dashboard API token file must be a regular file: $TOKEN_FILE" >&2
     exit 1
@@ -76,6 +105,8 @@ json_escape() {
 }
 
 api_url_json="$(printf '%s' "$API_URL" | json_escape)"
+explorer_api_base_json="$(printf '%s' "$EXPLORER_API_BASE" | json_escape)"
+default_view_json="$(printf '%s' "$DEFAULT_VIEW" | json_escape)"
 token_json="$(printf '%s' "$token" | json_escape)"
 demo_json="$(printf '%s' "${POHW_DASHBOARD_UI_DEMO:-}" | json_escape)"
 
@@ -87,6 +118,9 @@ cp -R "$DIST_DIR/." "$next_www_dir/"
 cat > "$next_www_dir/pohw-dashboard-config.js" <<CONFIG
 window.__POHW_DASHBOARD_CONFIG__ = {
   apiUrl: $api_url_json,
+  explorerApiBase: $explorer_api_base_json,
+  defaultView: $default_view_json,
+  participantDashboard: $PARTICIPANT_DASHBOARD,
   apiToken: $token_json,
   demo: $demo_json
 };

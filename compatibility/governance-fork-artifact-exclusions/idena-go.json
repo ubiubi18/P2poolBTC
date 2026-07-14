@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {"path": "resources/header.tar", "sha256": "27e696414b955714ba7ed4defe063794c8dcadef28a7e61dd9249b8623571b3c"},
+    {"path": "resources/identitystatedb.tar", "sha256": "f136ec8939e3f78587a38de517128c7071501e283bac7d12c24ce4be830ff8aa"},
+    {"path": "resources/statedb.tar", "sha256": "7cf6f8c334d76a3617cbd5ac3aa5a104a8d337cb6ceb8d6906c62bf7fab8d131"},
+    {"path": "vm/wasm/testdata/erc20.wasm", "sha256": "f431757436c214d26f6b4abb80dcd60c01b71a11486ec0d8a43a38291f33c04d"},
+    {"path": "vm/wasm/testdata/inc_func.wasm", "sha256": "bdc1e5562e13460f592ad1717c58e6e38c47361994717ebe29d491048ab015d3"},
+    {"path": "vm/wasm/testdata/shared-fungible-token-wallet.wasm", "sha256": "8335a8170bac89f20e1cbbde843cfb73dee44c82f4d9d8566ecccea807b05cce"},
+    {"path": "vm/wasm/testdata/sum_func.wasm", "sha256": "e719e727fc39da3c8e8eab986a30dffb9ef1ccf682c03e9af4f2956b131122c0"},
+    {"path": "vm/wasm/testdata/test-cases.wasm", "sha256": "ca714d4892220bfac4b91d9a336ade11292071f5cc5270c49731cdf08847e7e7"}
+  ]
+}

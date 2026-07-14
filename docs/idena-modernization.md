@@ -93,7 +93,16 @@ symlink and the rollback binary separate.
 sudo install -m 0755 -o root -g root IDENA_BINARY \
   /usr/local/libexec/idena-node-modern-COMMIT
 sudo ln -sfn idena-node-modern-COMMIT /usr/local/libexec/idena-node-modern
+printf '%s\n' aafb254786ac3c82308550a7a82642019f077d6b \
+  | sudo tee /usr/local/libexec/idena-node-modern.source-commit >/dev/null
+sudo chown root:root /usr/local/libexec/idena-node-modern.source-commit
+sudo chmod 0644 /usr/local/libexec/idena-node-modern.source-commit
 ```
+
+The installer verifies this public source-commit marker against
+`compatibility/stack-lock.json`. The marker is provenance, not proof of the
+binary digest; retain the independently recorded checksum required by the
+compatibility gate.
 
 For the SD-card layout, deploy this repository as a root-owned checkout at
 `/opt/p2pool`, then run:
@@ -129,6 +138,12 @@ sudo install -m 0640 -o root -g idena-relay RELAY_CONFIG.json /etc/idena-relay/c
 sudo chown -R idena-modern:idena-modern /srv/idena
 sudo chown -R idena-relay:idena-relay /srv/idena-original-relay
 sudo chmod 0700 /srv/idena /srv/idena-original-relay
+printf '%s\n' aafb254786ac3c82308550a7a82642019f077d6b \
+  | sudo tee /usr/local/libexec/idena-node-compat-v6.source-commit >/dev/null
+printf '%s\n' 938be81dbdeff85f888f4337060a8ebabb12e5b5 \
+  | sudo tee /usr/local/libexec/idena-node-1.1.2.source-commit >/dev/null
+sudo chown root:root /usr/local/libexec/idena-node-*.source-commit
+sudo chmod 0644 /usr/local/libexec/idena-node-*.source-commit
 ```
 
 The two config files must bind JSON-RPC to loopback and point at their own data

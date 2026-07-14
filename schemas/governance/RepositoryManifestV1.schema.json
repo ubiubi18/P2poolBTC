@@ -1,0 +1,20 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/RepositoryManifestV1.schema.json",
+  "title":"RepositoryManifestV1",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","name","sourceTreeCid","sourceTreeSha256","dependencyLocks","toolchainLocks","buildInstructions","artifacts"],
+  "properties":{
+    "schemaVersion":{"const":1},
+    "name":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,80}$"},
+    "sourceTreeCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
+    "sourceTreeSha256":{"$ref":"common.schema.json#/$defs/Sha256"},
+    "gitBundleCid":{"anyOf":[{"$ref":"common.schema.json#/$defs/RawCid"},{"type":"null"}]},
+    "gitCommitMetadata":{"anyOf":[{"type":"string","pattern":"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},{"type":"null"}]},
+    "dependencyLocks":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["path","sha256"],"properties":{"path":{"type":"string","minLength":1,"maxLength":1024},"sha256":{"$ref":"common.schema.json#/$defs/Sha256"}}}},
+    "toolchainLocks":{"type":"object","maxProperties":256,"propertyNames":{"pattern":"^[A-Za-z0-9._:/-]{1,120}$"},"additionalProperties":{"type":"string","minLength":1,"maxLength":4096}},
+    "buildInstructions":{"type":"array","minItems":1,"maxItems":256,"items":{"type":"string","minLength":1,"maxLength":4096}},
+    "artifacts":{"type":"array","maxItems":4096,"items":{"$ref":"common.schema.json#/$defs/Artifact"}}
+  }
+}

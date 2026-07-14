@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "pohw-bootstrap-readiness.sh"
+
+
+def shell_assignment(name: str, value: object) -> str:
+    return f"{name}={shlex.quote(str(value))}"
 
 
 class BootstrapReadinessScriptTest(unittest.TestCase):
@@ -44,12 +49,12 @@ class BootstrapReadinessScriptTest(unittest.TestCase):
         env_file.write_text(
             "\n".join(
                 [
-                    f"POHW_WORKDIR={root}",
-                    f"POHW_DATADIR={datadir}",
-                    f"POHW_SNAPSHOT_DIR={snapshot_dir}",
-                    f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
+                    shell_assignment("POHW_WORKDIR", root),
+                    shell_assignment("POHW_DATADIR", datadir),
+                    shell_assignment("POHW_SNAPSHOT_DIR", snapshot_dir),
+                    shell_assignment("POHW_EXPERIMENT_OUTPUT_ROOT", output_root),
                     "POHW_MINER_ID=alice",
-                    f"POHW_P2POOL_NODE_BIN={fake_bin}",
+                    shell_assignment("POHW_P2POOL_NODE_BIN", fake_bin),
                     "",
                 ]
             ),
@@ -130,8 +135,14 @@ exit 99
                 encoding="utf-8",
             )
             with env_file.open("a", encoding="utf-8") as handle:
-                handle.write(f"POHW_HEALTH_STATUS_FILE={health_file}\n")
-                handle.write(f"POHW_HEALTH_SCRIPT={REPO_ROOT / 'scripts' / 'pohw-health-status.py'}\n")
+                handle.write(shell_assignment("POHW_HEALTH_STATUS_FILE", health_file) + "\n")
+                handle.write(
+                    shell_assignment(
+                        "POHW_HEALTH_SCRIPT",
+                        REPO_ROOT / "scripts" / "pohw-health-status.py",
+                    )
+                    + "\n"
+                )
 
             result = subprocess.run(
                 [str(BOOTSTRAP_SCRIPT), str(env_file), "--mode", "real"],

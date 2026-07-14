@@ -410,10 +410,13 @@ fi
 audit_source_trees "$snapshot_source"
 
 clear_directory "$EXPORT_DIR" "export directory" true
-cp -a --reflink=auto "$DATADIR/idenachain.db" "$EXPORT_DIR/idenachain.db"
-cp -a --reflink=auto "$DATADIR/ipfs/badgerds" "$EXPORT_DIR/ipfs-badgerds"
+cp -a --no-preserve=ownership --reflink=auto \
+  "$DATADIR/idenachain.db" "$EXPORT_DIR/idenachain.db"
+cp -a --no-preserve=ownership --reflink=auto \
+  "$DATADIR/ipfs/badgerds" "$EXPORT_DIR/ipfs-badgerds"
 if [[ -d "$DATADIR/snapshots" && ! -L "$DATADIR/snapshots" ]]; then
-  cp -a --reflink=auto "$DATADIR/snapshots" "$EXPORT_DIR/snapshots"
+  cp -a --no-preserve=ownership --reflink=auto \
+    "$DATADIR/snapshots" "$EXPORT_DIR/snapshots"
 else
   install -d -o root -g root -m 0700 "$EXPORT_DIR/snapshots"
 fi

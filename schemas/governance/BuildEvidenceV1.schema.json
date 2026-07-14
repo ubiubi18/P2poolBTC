@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/BuildEvidenceV1.schema.json",
+  "title": "BuildEvidenceV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifacts",
+    "buildEnvironment",
+    "buildPlan",
+    "coreArtifactDigest",
+    "dependencyLocks",
+    "forkReleaseId",
+    "limitations",
+    "planId",
+    "reproducibility",
+    "sbom",
+    "sourceVerification",
+    "sourceCids",
+    "status",
+    "target",
+    "testResults",
+    "toolchainLocks"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "artifacts": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/Artifact"}},
+    "buildEnvironment": {"$ref": "#/$defs/RawContent"},
+    "buildPlan": {"$ref": "#/$defs/RawContent"},
+    "coreArtifactDigest": {
+      "$ref": "common.schema.json#/$defs/Sha256",
+      "description": "Domain-separated digest of the complete deterministic artifact set."
+    },
+    "dependencyLocks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/DependencyLock"}},
+    "forkReleaseId": {"type": "string", "minLength": 1, "maxLength": 160},
+    "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "planId": {"$ref": "#/$defs/Name"},
+    "reproducibility": {"enum": ["deterministic-core", "platform-constrained"]},
+    "sbom": {"$ref": "#/$defs/RawContent"},
+    "sourceVerification": {"$ref": "#/$defs/RawContent"},
+    "sourceCids": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/SourceCid"}},
+    "status": {"const": "verified-local-build-evidence"},
+    "target": {"$ref": "#/$defs/Name"},
+    "testResults": {"$ref": "#/$defs/RawContent"},
+    "toolchainLocks": {"$ref": "#/$defs/DagCborContent"}
+  },
+  "$defs": {
+    "Name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "RawContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "sha256", "size"],
+      "properties": {
+        "cid": {"$ref": "common.schema.json#/$defs/RawCid"},
+        "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "DagCborContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "sha256", "size"],
+      "properties": {
+        "cid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+        "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "SourceCid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "sourceCid"],
+      "properties": {
+        "repository": {"$ref": "#/$defs/Name"},
+        "sourceCid": {"$ref": "common.schema.json#/$defs/DagCborCid"}
+      }
+    },
+    "DependencyLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "format", "path", "repository", "sha256", "size"],
+      "properties": {
+        "cid": {"$ref": "common.schema.json#/$defs/RawCid"},
+        "format": {"type": "string"},
+        "path": {"type": "string"},
+        "repository": {"$ref": "#/$defs/Name"},
+        "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture",
+        "cid",
+        "deterministic",
+        "kind",
+        "name",
+        "packagedName",
+        "platform",
+        "repository",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "architecture": {"$ref": "#/$defs/Name"},
+        "cid": {"$ref": "common.schema.json#/$defs/RawCid"},
+        "deterministic": {"type": "boolean"},
+        "kind": {"enum": ["file", "directory-tar"]},
+        "name": {"$ref": "#/$defs/Name"},
+        "packagedName": {"type": "string", "minLength": 1, "maxLength": 255},
+        "platform": {"$ref": "#/$defs/Name"},
+        "repository": {"$ref": "#/$defs/Name"},
+        "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    }
+  }
+}

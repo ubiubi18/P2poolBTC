@@ -1,0 +1,49 @@
+[Unit]
+Description=PoHW host-only inherited Bitcoin transaction and address index
+Wants=network-online.target
+After=network-online.target bitcoind-mainnet.service
+Requires=bitcoind-mainnet.service
+
+[Service]
+Type=simple
+User=pohw-bitcoin-index
+Group=pohw-bitcoin-index
+SupplementaryGroups=bitcoin
+WorkingDirectory=/srv/bitcoin/esplora-index
+EnvironmentFile=/etc/pohw/bitcoin-indexer.env
+ExecStart=/opt/p2pool/scripts/pohw-run-bitcoin-indexer.sh
+Restart=always
+RestartSec=20
+TimeoutStopSec=120
+Nice=5
+CPUWeight=50
+IOWeight=50
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/opt/p2pool /etc/pohw /srv/bitcoin/mainnet
+ReadWritePaths=/srv/bitcoin/esplora-index
+
+[Install]
+WantedBy=multi-user.target

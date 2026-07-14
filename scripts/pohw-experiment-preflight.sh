@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -f
+umask 077
 
 ENV_FILE="${1:-${POHW_EXPERIMENT_ENV:-}}"
 validate_env_file() {
@@ -105,6 +107,48 @@ OUTPUT_DIR="$OUTPUT_ROOT/experiment-preflight-$(date -u +%Y%m%dT%H%M%SZ)"
 MINER_ID="${POHW_MINER_ID:-}"
 PEER_ADDRS="${POHW_PEER_ADDRS:-}"
 FORK_ACTIVATION_MANIFEST="${POHW_FORK_ACTIVATION_MANIFEST:-$DATADIR/fork-activation.json}"
+FORK_PEER_ADDRS="${POHW_FORK_PEER_ADDRS:-}"
+NETWORK_MODE="${POHW_EXPERIMENT_NETWORK_MODE:-}"
+BOOTSTRAP_FIRST_SEED="${POHW_FORK_BOOTSTRAP_FIRST_SEED:-false}"
+EXPERIMENT_0_ACTIVATION_ID="0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e"
+
+case "$BOOTSTRAP_FIRST_SEED" in
+  true|false)
+    ;;
+  *)
+    echo "POHW_FORK_BOOTSTRAP_FIRST_SEED must be true or false." >&2
+    exit 1
+    ;;
+esac
+
+case "$NETWORK_MODE" in
+  join-existing)
+    if [[ "$BOOTSTRAP_FIRST_SEED" == "true" ]]; then
+      if [[ -n "$FORK_PEER_ADDRS" ]]; then
+        echo "The first-seed exception must be removed once fork peers are configured." >&2
+        exit 1
+      fi
+    elif [[ -z "$FORK_PEER_ADDRS" ]]; then
+      echo "Experiment 0 preflight requires at least one POHW_FORK_PEER_ADDRS entry." >&2
+      echo "Only the designated coordinator may set POHW_FORK_BOOTSTRAP_FIRST_SEED=true." >&2
+      exit 1
+    fi
+    ;;
+  create-separate)
+    if [[ "$BOOTSTRAP_FIRST_SEED" == "true" ]]; then
+      echo "POHW_FORK_BOOTSTRAP_FIRST_SEED applies only to the canonical Experiment 0 seed." >&2
+      exit 1
+    fi
+    ;;
+  "")
+    # Legacy env files are still inspected; the launch wrapper applies its own
+    # strict join-existing default before any fork service can start.
+    ;;
+  *)
+    echo "Invalid POHW_EXPERIMENT_NETWORK_MODE: $NETWORK_MODE" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "${POHW_P2POOL_NODE_BIN:-}" ]]; then
   P2POOL_CMD=("$POHW_P2POOL_NODE_BIN")
@@ -159,13 +203,13 @@ path = pathlib.Path(sys.argv[1])
 
 def read_limited_json_file(path):
     if path.stat().st_size > MAX_JSON_BYTES:
-        raise ValueError(f"JSON artifact exceeds {MAX_JSON_BYTES} bytes")
+        raise ValueError(f"preflight report JSON exceeds {MAX_JSON_BYTES} bytes")
     return json.loads(path.read_text(encoding="utf-8"))
 
 try:
     data = read_limited_json_file(path)
-except Exception:
-    raise SystemExit(0)
+except Exception as exc:
+    raise SystemExit(f"refusing to publish malformed JSON artifact {path}: {exc}") from exc
 
 PATH_KEYS = {
     "datadir",
@@ -175,11 +219,26 @@ PATH_KEYS = {
     "snapshot_dir",
     "workdir",
 }
+NETWORK_KEYS = {
+    "addr",
+    "advertise_addr",
+    "bind_addr",
+    "listening_on",
+    "peer_addr",
+    "peer_addrs",
+    "remote_addr",
+    "rpc_addr",
+}
+ERROR_KEYS = {"error"}
 
 def scrub(value):
     if isinstance(value, dict):
         return {
-            key: "<redacted>" if key in PATH_KEYS and isinstance(item, str) else scrub(item)
+            key: (
+                "<redacted>"
+                if key in PATH_KEYS | NETWORK_KEYS | ERROR_KEYS
+                else scrub(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -230,6 +289,12 @@ ensure_local_dir "$DATADIR" "datadir"
 ensure_local_dir "$SNAPSHOT_DIR" "snapshot"
 create_output_dir "$OUTPUT_DIR"
 
+gossip_peer_count=0
+for peer in $(split_words "$PEER_ADDRS"); do
+  [[ -z "$peer" ]] && continue
+  gossip_peer_count=$((gossip_peer_count + 1))
+done
+
 {
   echo "generated_at_utc=$(date -u +%FT%TZ)"
   echo "workdir=<redacted>"
@@ -279,9 +344,9 @@ PY
   else
     echo "fork_activation_manifest_present=false"
   fi
-  echo "gossip_bind_addr=${POHW_GOSSIP_BIND_ADDR:-}"
-  echo "advertise_addr=${POHW_ADVERTISE_ADDR:-}"
-  echo "peer_addrs=$PEER_ADDRS"
+  echo "gossip_bind_configured=$([[ -n "${POHW_GOSSIP_BIND_ADDR:-}" ]] && echo true || echo false)"
+  echo "advertise_addr_configured=$([[ -n "${POHW_ADVERTISE_ADDR:-}" ]] && echo true || echo false)"
+  echo "gossip_peer_count=$gossip_peer_count"
   git -C "$WORKDIR" rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/^/git_branch=/' || true
   git -C "$WORKDIR" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
   if [[ -z "$(git -C "$WORKDIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
@@ -290,6 +355,26 @@ PY
     echo "git_dirty=true"
   fi
 } > "$OUTPUT_DIR/public-env-summary.txt"
+
+if [[ "$NETWORK_MODE" == "join-existing" ]]; then
+  python3 - "$FORK_ACTIVATION_MANIFEST" "$EXPERIMENT_0_ACTIVATION_ID" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+if not path.is_file() or path.stat().st_size > 64 * 1024:
+    raise SystemExit("canonical fork activation manifest is missing or too large")
+with path.open(encoding="utf-8") as handle:
+    actual = json.load(handle).get("activation_id")
+if actual != expected:
+    raise SystemExit(
+        "Experiment 0 preflight refuses a noncanonical activation manifest: "
+        f"expected {expected}, got {actual!r}"
+    )
+PY
+fi
 
 if [[ "${POHW_EXPERIMENT_REGISTER_PEERS:-false}" == "true" && -n "$PEER_ADDRS" ]]; then
   for peer in $(split_words "$PEER_ADDRS"); do
@@ -315,6 +400,58 @@ done
 "${P2POOL_CMD[@]}" "${preflight_args[@]}" > "$OUTPUT_DIR/multinode-preflight.json"
 redact_json_file "$OUTPUT_DIR/multinode-preflight.json"
 
+fork_peer_total=0
+fork_peer_reachable=0
+if [[ "$NETWORK_MODE" == "join-existing" && "$BOOTSTRAP_FIRST_SEED" == "false" ]]; then
+  for peer in $(split_words "$FORK_PEER_ADDRS"); do
+    [[ -z "$peer" ]] && continue
+    fork_peer_total=$((fork_peer_total + 1))
+    probe_file="$OUTPUT_DIR/.fork-peer-probe-$fork_peer_total.json"
+    if "${P2POOL_CMD[@]}" fork-chain-status \
+      --activation-manifest "$FORK_ACTIVATION_MANIFEST" \
+      --rpc-addr "$peer" \
+      --allow-non-loopback-fork-rpc > "$probe_file" 2>/dev/null && \
+      python3 - "$probe_file" "$EXPERIMENT_0_ACTIVATION_ID" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+if path.stat().st_size > 1024 * 1024:
+    raise SystemExit(1)
+with path.open(encoding="utf-8") as handle:
+    status = json.load(handle)
+if status.get("activation_id") != expected:
+    raise SystemExit(1)
+PY
+    then
+      fork_peer_reachable=$((fork_peer_reachable + 1))
+    fi
+    rm -f "$probe_file"
+  done
+  if (( fork_peer_reachable == 0 )); then
+    echo "Experiment 0 preflight could not verify any configured fork peer." >&2
+    exit 1
+  fi
+fi
+
+python3 - "$OUTPUT_DIR/fork-peer-preflight.json" "$NETWORK_MODE" \
+  "$BOOTSTRAP_FIRST_SEED" "$fork_peer_total" "$fork_peer_reachable" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = {
+    "network_mode": sys.argv[2] or "legacy-unspecified",
+    "bootstrap_first_seed": sys.argv[3] == "true",
+    "configured_peer_count": int(sys.argv[4]),
+    "activation_matching_reachable_peer_count": int(sys.argv[5]),
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
 python3 - "$OUTPUT_DIR/multinode-preflight.json" <<'PY'
 import json
 import pathlib
@@ -339,5 +476,7 @@ peers = report.get("peer_inventory_probe", [])
 reachable = sum(1 for peer in peers if isinstance(peer, dict) and peer.get("reachable"))
 print(f"Peer probes reachable: {reachable}/{len(peers)}")
 PY
+
+echo "Fork peer probes reachable: $fork_peer_reachable/$fork_peer_total"
 
 echo "Preflight report: $OUTPUT_DIR"

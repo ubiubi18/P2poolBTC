@@ -1,0 +1,397 @@
+# Local Operations
+
+These commands create a disposable local flow. They do not deploy a contract,
+publish a release, push Git, or change a live canonical reference.
+
+## Toolchains
+
+Use Go 1.26.5, Rust 1.97.0, Node 24.18.0, npm 11.16.0, and pnpm 11.11.0 for
+attested builds. Local versions that differ are suitable only for development
+and must be reported as non-attested.
+
+## Package and inspect parameters
+
+```sh
+cargo run -p governance-cli -- parameters-package \
+  --input compatibility/governance-testnet-parameters-v1.json \
+  --output-dir /tmp/governance-parameters
+
+cargo run -p governance-cli -- parameters-inspect \
+  --car /tmp/governance-parameters/governance-parameters.car
+```
+
+## Package source and publish to a public sidecar
+
+```sh
+cargo run -p governance-cli -- package \
+  --root "$PWD" \
+  --repository P2poolBTC \
+  --output-dir /tmp/p2pool-source
+
+export IPFS_PATH="$HOME/.ipfs-pohw-governance-public"
+ipfs init
+ipfs daemon
+
+cargo run -p governance-cli -- pin \
+  --car /tmp/p2pool-source/P2poolBTC.source.car \
+  --store "$HOME/.local/share/pohw-governance/pins" \
+  --kubo-api http://127.0.0.1:5001
+```
+
+Do not reuse the idena-go IPFS repository. Keep Kubo's control API on loopback.
+External pin providers are optional and require operator-specific credentials
+outside the repository.
+
+Before opening a review round, verify that the aggregate patch exactly covers
+every changed repository source and that the candidate names the verified
+parent CID:
+
+```sh
+cargo run -p governance-cli -- ecosystem-verify \
+  --parent-car /verified/ecosystem/parent.car \
+  --candidate-car /verified/ecosystem/candidate.car \
+  --patch-car /verified/ecosystem/aggregate-patch.car
+```
+
+This command rejects added, removed, omitted, unchanged, or substituted source
+transitions. Per-repository patch CARs must still be checked with
+`proposal-verify --base-car ... --candidate-car ... --patch-car ...`.
+
+Run the disposable two-sidecar interoperability test when Docker is available:
+
+```sh
+POHW_RUN_KUBO_E2E=1 \
+  python3 -m unittest \
+  tests.test_governance_kubo_sidecar.GovernanceKuboSidecarTests.test_disposable_kubo_sidecars -v
+```
+
+It uses only generated fixtures, binds both Kubo control APIs and gateways to
+host loopback, verifies structured recursive-pin responses, retrieves and
+rehashes the CAR, compares checkout bytes, and removes both containers on exit.
+The default image is version-pinned as `ipfs/kubo:v0.42.0`; an attested run must
+also record and approve the resolved image digest.
+
+## Generate deterministic build evidence
+
+Validate the pinned plan first:
+
+```sh
+python3 scripts/pohw-governance-build-evidence.py validate-plan \
+  --plan compatibility/governance-build-plan-v1.json
+```
+
+Run the selected target in a separate keyless clean-room worker. Enable
+network access only for the first `dependencyFetchCommandCount` commands, then
+enforce network denial for every remaining command. Mount verified source CAR
+checkouts read-only, use the exact locked toolchains, apply process/CPU/memory
+limits, redact secrets from logs, and save each complete stream as
+`000.stdout.log`, `000.stderr.log`, and so on.
+
+For the governance-contract target, the worker result record is:
+
+```json
+{
+  "schemaVersion": 1,
+  "target": "governance-contract",
+  "sourceCids": {
+    "P2poolBTC": "<candidate-p2pool-source-cid>",
+    "idena-go": "<candidate-idena-go-source-cid>",
+    "idena-wasm-binding": "<locked-binding-source-cid>",
+    "idena-wasm": "<locked-runtime-source-cid>",
+    "wasmer": "<locked-wasmer-source-cid>",
+    "idena-sdk-js-lite": "<locked-sdk-source-cid>"
+  },
+  "cleanRoom": true,
+  "readOnlySources": true,
+  "networkDisabledAfterFetch": true,
+  "dependencyFetchSeparated": true,
+  "isolationKind": "container",
+  "containerImageDigest": "sha256:<64-lowercase-hex-digest>",
+  "resourceLimits": {"cpuCount": 4, "memoryBytes": 8589934592, "processes": 256},
+  "redactionPolicy": "pohw-build-log-redaction-v1",
+  "toolchains": {"node": "24.18.0", "pnpm": "11.11.0", "assemblyscript": "0.27.37", "go": "1.26.5"},
+  "platform": "linux",
+  "architecture": "amd64",
+  "osFamily": "linux",
+  "commands": [
+    {"command": "corepack pnpm --dir contracts/idena-code-governance install --frozen-lockfile --ignore-scripts", "exitCode": 0},
+    {"command": "go -C ../idena-go mod download", "exitCode": 0},
+    {"command": "corepack pnpm --dir contracts/idena-code-governance build", "exitCode": 0},
+    {"command": "corepack pnpm --dir contracts/idena-code-governance test", "exitCode": 0},
+    {"command": "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm --component-repo wasmer=../wasmer --component-repo idena-sdk-js-lite=../idena-sdk-js-lite --require-locked-sources", "exitCode": 0}
+  ]
+}
+```
+
+With that record and the five pairs of redacted logs, generate evidence. Supply
+all six exact source roots and CIDs shown by the build plan; the abbreviated
+command below shows the P2poolBTC pair, and omitting the other five pairs is a
+hard failure:
+
+```sh
+python3 scripts/pohw-governance-build-evidence.py generate \
+  --plan compatibility/governance-build-plan-v1.json \
+  --target governance-contract \
+  --repository-root P2poolBTC="$PWD" \
+  --repository-root idena-go=/verified/idena-go \
+  --repository-root idena-wasm-binding=/verified/idena-wasm-binding \
+  --repository-root idena-wasm=/verified/idena-wasm \
+  --repository-root wasmer=/verified/wasmer \
+  --repository-root idena-sdk-js-lite=/verified/idena-sdk-js-lite \
+  --source-cid P2poolBTC=<candidate-p2pool-source-cid> \
+  --source-cid idena-go=<candidate-idena-go-source-cid> \
+  --source-cid idena-wasm-binding=<locked-binding-source-cid> \
+  --source-cid idena-wasm=<locked-runtime-source-cid> \
+  --source-cid wasmer=<locked-wasmer-source-cid> \
+  --source-cid idena-sdk-js-lite=<locked-sdk-source-cid> \
+  --source-car P2poolBTC=/verified/cars/P2poolBTC.car \
+  --source-car idena-go=/verified/cars/idena-go.car \
+  --source-car idena-wasm-binding=/verified/cars/idena-wasm-binding.car \
+  --source-car idena-wasm=/verified/cars/idena-wasm.car \
+  --source-car wasmer=/verified/cars/wasmer.car \
+  --source-car idena-sdk-js-lite=/verified/cars/idena-sdk-js-lite.car \
+  --source-verifier /verified/bin/pohw-governance \
+  --source-verifier-sha256 <sha256-of-pohw-governance> \
+  --artifact-exclusions idena-go="$PWD/compatibility/governance-fork-artifact-exclusions/idena-go.json" \
+  --artifact-exclusions idena-wasm-binding="$PWD/compatibility/governance-fork-artifact-exclusions/idena-wasm-binding.json" \
+  --artifact-exclusions idena-wasm="$PWD/compatibility/governance-fork-artifact-exclusions/idena-wasm.json" \
+  --artifact-exclusions wasmer="$PWD/compatibility/governance-fork-artifact-exclusions/wasmer.json" \
+  --artifact idena-code-governance.wasm="$PWD/contracts/idena-code-governance/build/idena-code-governance.wasm" \
+  --result-record /protected/governance-contract-result.json \
+  --logs-dir /protected/governance-contract-logs \
+  --output-dir /tmp/governance-contract-evidence
+```
+
+Use the emitted raw SBOM CID as `sbomCid`, raw test-results CID as
+`testResultsCid`, DAG-CBOR toolchain-locks CID as `toolchainCid`, and
+`coreArtifactDigest` in the
+`BuildAttestationV1` input. Map each evidence artifact's `deterministic` flag
+to the attestation artifact's `core` flag without changing any other field.
+The contract recomputes the complete core-set digest. A local evidence package
+is not an independent builder attestation and does not authorize a release.
+
+## Create and verify a proposal
+
+Create strict JSON inputs matching `schemas/governance/ChangeProposalV1` and
+the current parameter set, then run:
+
+```sh
+cargo run -p governance-cli -- proposal-create \
+  --input /absolute/path/proposal-input.json \
+  --parameters compatibility/governance-testnet-parameters-v1.json \
+  --output-dir /tmp/governance-proposal
+
+cargo run -p governance-cli -- proposal-verify \
+  --proposal-car /tmp/governance-proposal/proposal.car \
+  --parameters compatibility/governance-testnet-parameters-v1.json
+```
+
+`proposal-create` also writes `proposal.dag-cbor.hex`. Submit that exact file
+with the emitted proposal CID. The contract recomputes the CID from the
+canonical DAG-CBOR bytes and derives every executable proposal field from the
+verified payload. Do not reconstruct the payload manually or submit parallel
+candidate, risk, bond, root, epoch, or deadline arguments.
+
+Only a `migration` risk-class proposal may replace the identity-metrics root.
+Such a proposal must commit both `candidateIdentityMetricsRoot` and a strictly
+newer `candidateIdentityMetricsEpoch`. Normal and critical code proposals must
+set both fields to `null`.
+
+## Package attestations
+
+```sh
+cargo run -p governance-cli -- identity-metrics-snapshot-package \
+  --input /protected/idena-go-identity-metrics-snapshot.json \
+  --output-dir /tmp/identity-metrics-snapshot
+
+cargo run -p governance-cli -- identity-metrics-snapshot-verify \
+  --car /tmp/identity-metrics-snapshot/identity-metrics-snapshot.car
+
+cargo run -p governance-cli -- review-attestation \
+  --input /absolute/path/agent-review.json \
+  --output-dir /tmp/agent-review
+
+cargo run -p governance-cli -- build-attestation \
+  --input /absolute/path/build-attestation.json \
+  --output-dir /tmp/build-attestation
+
+cargo run -p governance-cli -- identity-metrics-attestation \
+  --input /absolute/path/identity-metrics-attestation.json \
+  --output-dir /tmp/identity-metrics-attestation
+```
+
+The attestation inputs contain public Idena addresses and authentication, so
+generate them in a protected working directory. Never put private keys or RPC
+credentials in the JSON.
+
+Each packaging command writes a `*.dag-cbor.hex` file next to its CAR. Submit
+the exact CID and canonical bytes together with the Merkle proof. The contract
+recomputes the CID, checks the caller and attached bond against the payload,
+and derives all gate claims from those verified bytes. A caller-supplied model
+family, digest, platform, verdict, test result, availability result, or owner
+is not authoritative.
+
+Three distinct eligible operator identities must submit matching canonical
+`IdentityMetricsAttestationV1` objects before a metrics root/epoch can be used.
+The object binds the snapshot CID and SHA-256, source boundary and block,
+domain-separated replay commitment, indexer implementation CID, and operator.
+One early bad descriptor cannot reserve the root. Two conflicting descriptors
+that each reach quorum mark the certification conflicted and unusable.
+The snapshot packaging command rejects unknown fields, reordered or duplicate
+leaves, ineligible states, wrong trust math, boundary drift, noncanonical
+hashes, and a Merkle root that does not recompute from the exact idena-go JSON.
+
+Review evidence is collected before proposal creation. An eligible opener locks
+the review bond for one exact parent/candidate/patch tuple. Any eligible agent,
+builder, or availability operator may submit bonded evidence before the review
+deadline. Anyone may freeze the round; freezing derives sorted, count-bound
+roots from every registered CID. Proposal creation must claim that exact frozen
+round. Every committed leaf is then resubmitted with its proof before
+`openVoting`, so a proposal cannot hide a registered negative review, failed
+build, or unavailable pin behind a favorable subset. Each evidence class is
+bounded to 256 leaves.
+
+`testResultsCid` and `probeResultCid` refer to exact raw evidence bytes in the
+Rust lifecycle and WASM contract. Their raw CIDs are recomputed before an
+objective false-claim challenge is accepted. The WASM vertical slice accepts
+only the exact canonical byte strings `{"passed":false}` and
+`{"available":false}`; arbitrary JSON, gateway timeouts, and subjective review
+disagreements are not slashable evidence.
+
+## Contract actions
+
+The exact RPC transaction envelope depends on the pinned Idena client. The
+desktop experimental UI estimates first and submits only after a second user
+confirmation. In order, call the contract methods:
+
+```text
+registerGovernanceStake()                 attached IDNA; activates next epoch
+activateGovernanceStake()
+registerIdentityMetricsProof(...)
+submitIdentityMetricsAttestation(attestationCid,
+  attestationDagCborHex)                  no attached payment
+identityMetricsCertification(root, epoch)
+openReviewRound(parentCid, parentDagCborHex,
+  candidateCid, candidateDagCborHex,
+  patchCid, patchDagCborHex,
+  pinsetCid, pinsetDagCborHex)
+                                          exact attached proposal bond
+submitAgentAttestation(reviewRoundId, attestationCid,
+  attestationDagCborHex)                  exact attached reviewer bond
+submitBuildAttestation(reviewRoundId, attestationCid,
+  attestationDagCborHex, toolchainDagCborHex)
+                                          exact attached builder bond
+submitDataAvailabilityAttestation(reviewRoundId, attestationCid,
+  attestationDagCborHex)                  exact attached availability bond
+freezeReviewRound(reviewRoundId)          callable by anyone after review end
+createProposal(proposalCid, proposalDagCborHex)
+                                          no attached payment; claims frozen round
+submitProposalMetadataRoot(...)
+openVoting(proposalId)
+castVote(proposalId, yes|no|abstain)
+finalizeVoting(proposalId)
+submitObjectiveChallenge(proposalId, kind, attestationCid,
+  attestationDagCborHex, evidenceCid, evidenceHex,
+  index, leafCount, siblings)
+                                          kind is agent_test_result,
+                                          builder_test_result, or
+                                          availability_probe
+resolveObjectiveChallenge(proposalId)
+advanceChallengePeriod(proposalId)
+executeProposal(proposalId)               callable by anyone after timelock
+```
+
+`openReviewRound` recomputes all four DAG-CBOR CIDs and binds the candidate's
+complete repository source set, artifact set, and toolchain maps to the round.
+The pinset must contain the candidate, patch, parameter set, every candidate
+source tree, every candidate artifact, every repository patch, and every
+proposal metadata CID. Build attestations must repeat the complete source set
+and provide the exact candidate-derived toolchain manifest. Agent and build
+submissions dynamically extend the required availability set with their own
+attestation and referenced policy, result, finding, SBOM, toolchain, and
+artifact CIDs. At freeze, an availability attestation counts only if it covers
+that complete final set plus its own probe-result CID. Providers should submit
+after agent and build evidence has settled, or resubmit against the expanded
+set. Distinct provider IDs and distinct eligible owners are required.
+
+The stake snapshot is proposal-specific. Governance weight scheduled for an
+epoch is settled globally when proposal creation reaches that epoch, so a
+holder cannot be omitted merely by declining to call
+`activateGovernanceStake()`. That method only materializes the holder's pending
+balance for withdrawals and queries. Finalized withdrawals append an
+immutable checkpoint and do not rewrite historical lots, so withdrawing for a
+later epoch cannot change an already-open proposal's vote weight. This
+experimental contract currently caps each account's stake history at 256 lots
+and 256 finalized-withdrawal/slash checkpoints. Each outstanding slashable bond
+reserves one checkpoint slot; operators must treat either limit as a hard
+preflight constraint.
+
+Stake and registered identity-weight changes in the proposal's creation block
+are excluded. Proposal creation requires a block whose global registered weight
+has not already changed, and voter metrics proofs must have been registered in
+an earlier block. This makes the creation-block snapshot deterministic rather
+than transaction-order dependent.
+
+Execution changes only the canonical ecosystem CID. It does not write files or
+install software.
+
+For release verification, the desktop requires the release proposal to be in
+`Executed` state, with the contract's candidate CID and build-attestation root
+matching the release. Every downloadable artifact must also be pinned exactly
+by the accepted ecosystem manifest. A locally indexed proposal summary is not
+release authorization.
+
+## Resolve and check out canonical source
+
+Query `canonicalEcosystemCid()`, retrieve its verified ecosystem CAR through
+the public sidecar or multiple gateways, then retrieve each repository CAR.
+
+```sh
+cargo run -p governance-cli -- fetch \
+  --cid <repository-source-cid> \
+  --gateway https://ipfs.io,https://dweb.link \
+  --output-dir /tmp/canonical-source
+
+cargo run -p governance-cli -- checkout \
+  --car /tmp/canonical-source/<repository-source-cid>.car \
+  --output /tmp/canonical-checkout
+```
+
+`pin` and `fetch` accept any governance CAR, not only repository source CARs.
+They rehash every block and verify the declared root before writing or
+importing it. `checkout` remains source-tree specific and must not be used for
+proposal, attestation, parameter, or release objects.
+
+## Governance metrics RPC opt-in
+
+The read-only `governance` RPC namespace is disabled from the default HTTP
+module list. Explicitly add `governance` to the node's configured HTTP modules
+only on an authenticated or otherwise access-controlled endpoint. The live
+node records exact finalized authored-flip outcomes beginning at its earliest
+verifiable integration boundary and includes eligible zero-history identities
+using the deterministic prior.
+
+Even a new empty metrics runtime rejects records and proofs until node startup
+explicitly supplies the canonical block-hash view. A persisted snapshot is a
+derived cache: it is never exposed on startup, and a valid index plus stale
+snapshot (for example after a crash between atomic file renames) is rebuilt
+after canonical-history verification and authoritative current-state refresh.
+Malformed or unsafe files remain fatal.
+
+The `governance-reindex` command deliberately rejects external JSONL input.
+Current legacy chain data does not independently commit enough author-to-final-
+qualification history to authenticate such an export. On startup, persisted
+record heights and block hashes are checked against the canonical local chain,
+and the current identity-state snapshot is anchored to the current canonical
+head. Those checks detect reorgs and stale snapshots, but legacy block hashes do
+not authenticate the locally observed author/outcome payload. Require matching
+snapshots and attestations from independent indexers before a DAO migration
+uses a root. Do not approximate the missing interval with identity age,
+`LastValidationFlags`, or an operator-supplied file.
+
+## Cross-repository lock gate
+
+From `idena-compat-stack`, run `scripts/verify-ecosystem-lock.py` with
+`--require-external-files` as documented in that repository. A successful lock
+check does not replace source replay, public availability, independent builds,
+or security review.

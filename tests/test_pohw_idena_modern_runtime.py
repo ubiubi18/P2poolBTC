@@ -73,6 +73,9 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('RUNTIME_DIR="${POHW_RUNTIME_DIR:-/opt/p2pool}"', installer)
         self.assertIn('MODERN_IDENA_BIN="${IDENA_MODERN_BIN:-/usr/local/libexec/idena-node-modern}"', installer)
+        self.assertIn('MODERN_IDENA_PROVENANCE="${IDENA_MODERN_PROVENANCE_FILE:-${MODERN_IDENA_BIN}.source-commit}"', installer)
+        self.assertIn("pohw-idena-compatibility-lock.py", installer)
+        self.assertIn("--modern-provenance-file", installer)
         self.assertIn('"$(cat "$IDENA_DATADIR/ipfs/version")" != "18"', installer)
         self.assertIn('find "$RUNTIME_DIR" -xdev', installer)
         self.assertIn("-type l -o ! -uid 0 -o -perm /022", installer)
@@ -135,6 +138,8 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         self.assertIn('systemd-analyze verify "${STAGED_UNITS[@]}"', installer)
         self.assertIn('runuser -u idena-modern -- test ! -x', installer)
         self.assertIn('runuser -u idena-relay -- test ! -x', installer)
+        self.assertIn("PROVENANCE_FILES=(", installer)
+        self.assertIn("--legacy-provenance-file", installer)
         self.assertNotIn("\nsystemctl enable", installer)
 
         result = subprocess.run(

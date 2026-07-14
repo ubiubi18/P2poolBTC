@@ -1,0 +1,26 @@
+explorer.example.com {
+    encode zstd gzip
+
+    header {
+        Referrer-Policy "no-referrer"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    }
+
+    handle /api/v1/* {
+        reverse_proxy 127.0.0.1:40407
+    }
+
+    handle /dashboard.json {
+        respond 404
+    }
+
+    handle /health {
+        respond 404
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:5176
+    }
+}

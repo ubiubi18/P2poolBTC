@@ -8,10 +8,15 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 bitcoin.workspace = true
+cid.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crypto-bigint.workspace = true
+fs2.workspace = true
 hex.workspace = true
+libc.workspace = true
 idena-lite-indexer = { path = "../idena-lite-indexer" }
+governance-core = { path = "../governance-core" }
 pohw-core = { path = "../pohw-core" }
 rand_chacha.workspace = true
 rand_core.workspace = true

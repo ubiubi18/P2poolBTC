@@ -5,6 +5,11 @@ It explores a voluntary mining layer where every node can replay the same sharec
 
 Bitcoin and Idena stay unchanged. This repo builds the experimental coordination layer between them.
 
+`compatibility/stack-lock.json` pins the reviewed Idena candidate consumed by
+PoHW. Run `python3 scripts/pohw-idena-compatibility-lock.py` before deployment;
+the production installers additionally require root-owned source provenance
+files for both modern and legacy binaries.
+
 The idea is simple:
 
 - Bitcoin hashrate still mines the block.
@@ -15,21 +20,49 @@ The idea is simple:
 
 This repo is not a production Bitcoin node, not a token bridge, and not ready for real funds.
 
-## Preview
+> **Experiment 0 has a one-way mainnet handoff.** On nodes that explicitly
+> install and arm the handoff controller, reaching 20 distinct verified Idena
+> identities with accepted work on the active sharechain stops the no-value
+> fork, starts payout-aware mining against Bitcoin mainnet, and deletes that
+> node's dedicated fork-chain datadir. Mainnet submissions can create blocks
+> with real value. Read [The 20-participant mainnet handoff](#the-20-participant-mainnet-handoff)
+> before enabling it.
 
-These screenshots use demo data only; they show the user flow, not live payout claims.
+## Live Preview
 
-![P2poolBTC dashboard overview](docs/assets/dashboard-overview.png)
+These screenshots were captured from the live no-value Experiment 0 seed on
+2026-07-14. They contain public test data, not a payout or value claim. The
+first bootstrap smoke block remains an immutable zero-value coinbase. Later
+blocks use the live fork subsidy, deterministic payout schedule, and `POHW1`
+commitment. These are experimental fork coins, not Bitcoin mainnet funds.
 
-<p align="center">
-  <img src="docs/assets/dashboard-mobile.png" alt="P2poolBTC mobile dashboard overview" width="360">
-</p>
+### Network overview
+
+![Live P2poolBTC Bitcoin fork, sharechain, and Idena overview](docs/assets/p2poolbtc-live-overview.jpg)
+
+### Active fork blocks
+
+![Live Experiment 0 fork blocks and PoHW commitments](docs/assets/p2poolbtc-live-fork-blocks.jpg)
+
+### Payout-aware fork block
+
+![Payout-aware Experiment 0 fork block with a 3.125 BTC subsidy and PoHW commitment](docs/assets/p2poolbtc-payout-aware-fork-block.jpg)
+
+### Live sharechain
+
+![Live P2poolBTC Experiment 0 sharechain](docs/assets/p2poolbtc-live-sharechain.jpg)
 
 ![PoHW pool flow: solve flips, join p2pool, mine Bitcoin, decentralize Bitcoin mining](docs/assets/pohw-flow.png)
 
 ## Start Here
 
-If you want to help test, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the tester roles, the safety boundaries, and the shortest path to a first report bundle.
+If you want to help test, start with the
+[Community Experiment 0 Guide](COMMUNITY-README.md). It gives the explicit
+five-step path to reproduce the build, join the existing experiment, connect an
+Idena identity, produce a readiness report, and report problems safely.
+
+[Beta Testing P2poolBTC](BETA-TESTING.md) explains the tester roles and safety
+boundaries in more detail.
 
 Use [Experiment 0](EXPERIMENT-0.md) as the detailed operator runbook once you are ready to run a multi-node test.
 
@@ -39,6 +72,10 @@ Working prototype pieces:
 
 - deterministic `POHW1` commitment model,
 - reproducible Bitcoin-mainnet-history fork activation manifest generation,
+- complete Experiment 0 coinbase-only fork consensus with durable replay,
+  cumulative-work fork choice, bootstrap difficulty, irreversible Bitcoin-2016
+  difficulty handoff, peer synchronization, and a loopback control RPC,
+- live fork templates and fork-only block submission wired into the Stratum adapter,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
 - signed TCP gossip mesh with inventory sync, peer exchange, rebroadcast, rate limits, and private-network defaults,
@@ -51,14 +88,17 @@ Working prototype pieces:
 - Taproot FROST vault primitives, real local DKG/signing CLI commands, demos, and RPC-validated vault input checks,
 - AssemblyScript snapshot registry with Idena host-storage imports, record validation, and deterministic encoding,
 - read-only local dashboard API,
-- Vite/React dashboard focused on pledge status, hashrate share, Idena share, and block-found payout estimate,
+- versioned public explorer API for decoded fork transactions, scripts, addresses,
+  UTXOs, inherited Bitcoin history, sharechain shares, and aggregate Idena snapshots,
+- optional host-only Esplora index integration; pool participants do not run a
+  Bitcoin address index or enable Bitcoin Core `txindex`,
+- Vite/React combined explorer and participant dashboard,
 - Raspberry Pi systemd helpers for snapshots, gossip mesh, dashboard API, and dashboard UI.
 
 Not done yet:
 
-- full fork-chain consensus node,
-- post-fork block-template builder and custom DAA implementation,
-- live Bitcoin block-template builder wired into the mining adapter,
+- general post-fork transaction/script and UTXO consensus,
+- inherited UTXO replay protection and spending,
 - production P2Pool fork-choice and anti-eclipse logic,
 - long-running networked ChillDKG/FROST signer daemon,
 - complete idena-go reward extraction for every reward source,
@@ -82,9 +122,12 @@ docs/                     design artifacts
 | Component | Default | Purpose |
 | --- | --- | --- |
 | Gossip mesh | `127.0.0.1:40406` | Signed sharechain envelope exchange |
+| Fork control RPC | `127.0.0.1:40408` | Activation-bound templates and block submission |
+| Fork P2P | disabled | Validated fork-block synchronization |
 | Mining adapter | `127.0.0.1:3333` | Local Stratum v1 frontend |
 | Dashboard UI | `127.0.0.1:5176` | Browser UI, tunnel from a workstation |
 | Dashboard API | `127.0.0.1:40407` | Read-only local status |
+| Bitcoin history index | `127.0.0.1:3002` | Optional host-only Esplora HTTP source |
 | Dashboard dev server | Vite | Local frontend development |
 | Idena RPC | `http://127.0.0.1:9009` | Local `idena-go` source |
 | Bitcoin RPC | `http://127.0.0.1:8332` | Local Bitcoin Core source |
@@ -93,9 +136,21 @@ docs/                     design artifacts
 
 Keep Bitcoin and Idena RPC on loopback. Expose gossip, dashboard, or Stratum only to trusted peers, with firewall rules. Non-loopback dashboard needs a token; non-loopback Stratum needs a protected password file.
 
+The combined explorer can be deployed locally or on a dedicated host. See
+[PoHW Network Explorer](docs/explorer.md) for the public API, privacy boundary,
+systemd/Caddy host profile, smoke tests, and rollback procedure.
+
+Only the dedicated explorer operator needs the Bitcoin history index. A miner,
+Pi, or observer can use the hosted versioned API and never downloads the full
+Bitcoin chain or address index. Fork consensus validation remains independent
+from the history index.
+
 ## Community Experiment
 
-Start with [Beta Testing P2poolBTC](BETA-TESTING.md) when multiple people help. It gives a shorter, more welcoming path for observers, gossip testers, Idena testers, and Bitcoin testers.
+Start with the [Community Experiment 0 Guide](COMMUNITY-README.md) when
+multiple people help. It gives the reproducible five-step join path and the
+safe issue-reporting workflow. [Beta Testing P2poolBTC](BETA-TESTING.md)
+describes the available tester roles.
 
 Use [Experiment 0](EXPERIMENT-0.md) for the complete no-value scope, env template, preflight, miner registration, snapshot voting, report bundles, deterministic report comparison, success criteria, and stop conditions for a decentralized dry run.
 
@@ -168,23 +223,202 @@ VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
 
 ## Core Commands
 
-Prepare a no-value fork/testnet activation manifest from local Bitcoin Core:
+To create a deliberately separate no-value fork/testnet, derive a new
+activation manifest from local Bitcoin Core:
 
 ```sh
 cargo run -p p2pool-node -- prepare-fork-activation \
-  --chain-name pohw-experiment-0 \
-  --launch-timestamp-utc 2026-07-05T00:00:00Z \
+  --chain-name my-separate-experiment \
+  --launch-timestamp-utc <future-rfc3339-time> \
   --rpc-cookie-file ~/.bitcoin/.cookie \
   --manifest-out ./fork-activation.json
 ```
 
-The command derives the first Bitcoin mainnet block at or after the launch timestamp, records the inherited parent tip, resets post-fork difficulty to testnet-safe `0x207fffff` by default, and emits an `activation_id`. Every participant should compare the same `fork-activation.json` before mining. Inherited-mainnet UTXO spending remains disabled unless `--inherited-utxo-spending-enabled` is explicitly set, and it should stay disabled until replay protection exists.
+The command derives the first Bitcoin mainnet block at or after the launch
+timestamp, records the inherited parent tip, starts at the no-value bootstrap
+PoW limit `0x207fffff`, and emits an `activation_id`. Bootstrap difficulty
+adjusts every block. At a difficulty-implied hashrate of `1 PH/s` by default,
+the chain irreversibly hands descendants to Bitcoin's normal 2016-block
+retarget mechanism. Set `--bootstrap-handoff-hashrate-hps` before activation to
+choose another threshold. The algorithm, threshold, and spacing are committed
+by the manifest, so every participant must use the identical
+`fork-activation.json`. Inherited-mainnet UTXO spending remains disabled unless
+`--inherited-utxo-spending-enabled` is explicitly set, and it should stay
+disabled until replay protection exists.
 
-For Experiment 0, set `POHW_FORK_LAUNCH_TIMESTAMP_UTC` in `.pohw-experiment.env` and use the wrapper:
+Run the activation-bound Experiment 0 chain and inspect its live status:
 
 ```sh
-scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
+scripts/pohw-run-fork-chain-node.sh
+target/release/p2pool-node fork-chain-status \
+  --activation-manifest .pohw-p2pool/fork-activation.json
 ```
+
+The fork node validates scheduled-target PoW, ancestry, merkle and witness
+roots, block weight, BIP34 height, subsidy, time, and coinbase-only transaction
+rules; persists every accepted branch; selects cumulative work; and
+synchronizes fork blocks with configured peers. See
+[Experiment 0 Fork-Chain Node](docs/fork-chain-node.md).
+
+The normal Experiment 0 participant path does not run that command. Initialize
+in the default `join-existing` mode and use the canonical tracked manifest:
+
+```sh
+scripts/pohw-experiment-init.sh --miner-id alice
+cmp compatibility/experiment-0-activation.json \
+  .pohw-p2pool/fork-activation.json
+```
+
+Its activation ID is
+`0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e`.
+The wrapper `pohw-experiment-prepare-fork-activation.sh` refuses to generate a
+manifest unless initialization used `--separate-experiment`. See
+[Experiment 0](EXPERIMENT-0.md) for peer checks and both network workflows.
+
+## The 20-participant Mainnet Handoff
+
+The canonical Experiment 0 controller has a fixed threshold of **20 active
+Idena participants**. A participant counts once when:
+
+- its `MinerRegistration` has valid mining and Idena ownership signatures;
+- its Idena address is distinct from every other counted participant; and
+- at least one accepted share from that identity's miner is on the active
+  sharechain branch and references a locally accepted template no older than
+  the configured one-hour default; and
+- the address is `Newbie`, `Verified`, or `Human` in the latest locally
+  verified Idena snapshot.
+
+Raw connections and raw miner IDs do not count. Twenty miner IDs controlled by
+one Idena identity count as one participant. The controller requires the
+threshold in three distinct replay observations by default. Reusing the same
+replay tip does not advance the count, and accepted observations are separated
+by ten minutes by default. This prevents one partial replay, a tight polling
+loop, or a short reorganization from immediately triggering the transition.
+The selected snapshot must be no more than two days old by default and must
+have signed votes from at least three distinct registered Idena identities.
+This prevents twenty arbitrary address keypairs or one uncorroborated local
+snapshot from triggering the real-value transition.
+
+The handoff is local to every node that installs the controller. A canonical
+seed deleting its fork data cannot delete data on somebody else's machine, so
+every Experiment 0 fork operator must install the same controller or stop their
+fork node when the explorer reports `20 / 20` active identities.
+
+On an armed host there is no second confirmation prompt at `20 / 20`: after the
+configured consecutive checks and preflight pass, the controller automatically
+stops the fork, starts real Bitcoin mainnet template mining, verifies the live
+process mode, and recursively removes only that host's dedicated fork datadir.
+The durable activation marker prevents the fork service from starting again.
+
+This does not change or fork Bitcoin mainnet consensus. After the handoff, the
+adapter consumes ordinary Bitcoin Core mainnet templates and any submitted
+block must satisfy Bitcoin's existing consensus and network difficulty. The
+PoHW payout outputs and commitment are carried in that candidate's coinbase.
+
+Before changing anything, the controller requires all of the following:
+
+- Bitcoin Core RPC reports `chain=main`, matching block/header heights,
+  `initialblockdownload=false`, and complete verification progress;
+- `getblocktemplate` succeeds;
+- the current sharechain, latest verified Idena snapshot, miner registration,
+  and PoHW commitment template produce a complete payout-aware mainnet Stratum
+  job; and
+- the explicit real-Bitcoin acknowledgement is configured.
+
+Install and arm it on a systemd host from the protected runtime checkout:
+
+```sh
+sudo /opt/p2pool/scripts/pohw-install-mainnet-handoff.sh --enable
+```
+
+The installer refuses a missing or symlinked release binary and copies both the
+controller and the current `p2pool-node` build into root-owned
+`/usr/local/libexec/pohw`. Re-run it after upgrading the binary. Use
+`--p2pool-bin /absolute/path/to/p2pool-node` only when the release build is in a
+different protected location.
+
+Set these values in root-owned `/etc/pohw/p2pool.env`:
+
+```sh
+POHW_MAINNET_HANDOFF_ENABLED=true
+POHW_MAINNET_HANDOFF_ACK=I_UNDERSTAND_REAL_BITCOIN
+POHW_MAINNET_HANDOFF_CONFIRMATIONS=3
+POHW_MAINNET_HANDOFF_SETTLE_SECONDS=15
+POHW_MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS=2
+POHW_MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS=3
+POHW_MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS=3600
+POHW_MAINNET_HANDOFF_MIN_CONFIRMATION_INTERVAL_SECONDS=600
+POHW_MAINNET_HANDOFF_STATE_DIR=/var/lib/pohw-p2pool/mainnet-handoff
+POHW_PAYOUT_CANDIDATE_DIR=/var/lib/pohw-p2pool/payout-candidates
+```
+
+Also configure `POHW_MINER_ID`, `POHW_SNAPSHOT_DIR`, the Bitcoin RPC URL/cookie,
+and a valid `POHW_STRATUM_POHW_COMMITMENT_FILE`. The commitment file is a
+template: its miner identity must match the registration, and its vault epoch
+and FROST key are retained. Snapshot, sharechain-state, payout-root, and fee
+dependent fields are derived again for every Bitcoin template. A static
+`POHW_STRATUM_PAYOUT_SCHEDULE_FILE` is deliberately not used after handoff.
+Keep RPC loopback-only on a host running Bitcoin Core. A node using a remote
+Bitcoin host must use a private tunnel and explicitly set
+`POHW_BITCOIN_RPC_ALLOW_REMOTE=true`; never expose Bitcoin RPC to the public
+Internet.
+
+Inspect the sanitized controller state without exposing identities or RPC
+credentials:
+
+```sh
+systemctl status pohw-mainnet-handoff.timer
+sudo cat /var/lib/pohw-p2pool/mainnet-handoff/status.json
+```
+
+At the confirmed threshold the controller performs one transaction-like
+sequence:
+
+1. Preflight Bitcoin mainnet and derive a payout-aware candidate job from the
+   current sharechain and verified Idena snapshot.
+2. Stop the mining adapter and fork node.
+3. Persist the one-way activation marker before creating the mainnet environment
+   or starting any mainnet-capable Stratum process. A systemd condition prevents
+   the fork service from restarting after this commit point.
+4. Remove the fork launch marker and start the adapter with Bitcoin RPC refresh,
+   per-template dynamic payouts, automatic target-meeting block submission,
+   and the separate `--allow-mainnet-submit` interlock. Inspect its live
+   arguments and require the expected datadir, snapshot, payout-evidence, RPC,
+   miner, and commitment-template paths with no static job or fork RPC argument.
+5. Persist the completion receipt, disable the fork service, and delete only
+   `POHW_FORK_CHAIN_DATADIR`.
+
+The sharechain, signed registrations, Idena snapshots, reward accounting,
+commitment template, generated mainnet payout evidence, keys, and Bitcoin Core
+datadir are preserved.
+Fork deletion means filesystem removal, not forensic secure erasure, and does
+not remove operator backups. If preflight or transition setup fails before the
+activation marker is written, the controller restores fork mode and keeps all
+fork data. Once that durable marker exists, it never recreates the fork;
+mainnet startup or cleanup failures preserve fork data, are reported as
+`mainnet_active_cleanup_pending`, and are retried.
+
+Bitcoin transaction fees change `getblocktemplate.coinbasevalue`, so the
+mainnet adapter never reuses one fixed payout schedule. Each refreshed template
+gets a deterministic schedule that sums to that template's exact coinbase
+value and a matching `POHW1` commitment. If a miner finds a target-meeting
+block, the adapter writes the exact snapshot, schedule, commitment, and payout
+confirmation descriptor under `POHW_PAYOUT_CANDIDATE_DIR`, publishes that
+commitment to the sharechain, and only then submits the block. Failure to
+preserve or publish this evidence fails closed instead of submitting an
+unaccountable block.
+
+Before activation, disarm the host with
+`systemctl disable --now pohw-mainnet-handoff.timer` and set
+`POHW_MAINNET_HANDOFF_ENABLED=false`. After `mainnet-activated.json` exists,
+there is intentionally no automatic rollback to the fork; restoring a backup
+would be a manual, explicitly separate experiment.
+
+This handoff does not make finding a Bitcoin block likely. Afterward miners
+work at Bitcoin's real network difficulty; a small experiment may produce
+shares indefinitely without finding a mainnet block. Because any accepted
+mainnet block has real value, treat this mode as experimental and do not rely
+on its unfinished vault and payout operations for production funds.
 
 Prepare a miner pledge locally:
 
@@ -380,6 +614,26 @@ cargo run -p p2pool-node -- build-stratum-job-rpc \
 ```
 
 The generated job uses local `getblocktemplate` for version, previous block, time, bits, and transaction merkle branches. It is enough for sharechain work accounting and multi-node rehearsal, but it is not yet the final PoHW block-submission coinbase with payout outputs.
+
+For the live Experiment 0 fork feed, do not use Bitcoin RPC job refresh. Start the
+fork node, then run the adapter with:
+
+```sh
+cargo run -p p2pool-node -- run-mining-adapter \
+  --datadir .pohw-p2pool \
+  --bind-addr 127.0.0.1:3333 \
+  --miner-id alice \
+  --fork-chain-rpc-addr 127.0.0.1:40408 \
+  --fork-chain-activation-manifest .pohw-p2pool/fork-activation.json \
+  --idena-snapshot-id <snapshot-id> \
+  --idena-snapshot-proof-root <root> \
+  --mining-secret-key-file .pohw-p2pool/keys/alice/mining.key \
+  --node-secret-key-file .pohw-p2pool/keys/alice/gossip-node.key \
+  --auto-submit-blocks
+```
+
+The adapter derives the easy fork target and Stratum difficulty from each live
+template. Target-meeting blocks go only to the activation-bound fork RPC.
 When using `--replace`, keep the job file in a private node directory that is not group/world writable.
 
 For a long-running adapter, add `--refresh-job-from-rpc --rpc-cookie-file ~/.bitcoin/.cookie`. It polls `getblocktemplate`, atomically swaps changed jobs, and sends a clean `mining.notify` to subscribed miners without restarting their connection. The default refresh interval is five seconds and can be changed with `--job-refresh-interval-seconds`.
@@ -675,10 +929,11 @@ sudo cp deploy/systemd/pohw-gossip-mesh-local-peer.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-ui.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-mining-adapter.service /etc/systemd/system/
+sudo cp deploy/systemd/pohw-fork-chain-node.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.service /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch.path /etc/systemd/system/
 sudo cp deploy/systemd/pohw-dashboard-api-cookie-watch@.path /etc/systemd/system/
-sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer pohw-gossip-mesh.service pohw-dashboard-api.service pohw-dashboard-ui.service pohw-dashboard-api-cookie-watch.path
 ```
@@ -686,21 +941,33 @@ sudo systemctl enable --now pohw-health-status.timer pohw-auto-bootstrap.timer p
 Or reinstall only the self-recovery layer idempotently. It always enables the network watchdog, but installs the two resource guards without changing their enablement:
 
 ```sh
-sudo /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
-Opt into either resource guard explicitly when its policy matches the current workload:
+Opt into either resource guard or the post-sync worker watcher explicitly when its policy matches the current workload:
 
 ```sh
 sudo POHW_INSTALL_ENABLE_IDENA_PRIORITY_GUARD=true \
-  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 sudo POHW_INSTALL_ENABLE_BITCOIN_PRESSURE_GUARD=true \
-  /mnt/ssd/p2pool/scripts/pohw-install-pi-self-recovery.sh
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
+sudo POHW_INSTALL_ENABLE_IDENA_WORKERS_WATCHER=true \
+  /opt/p2pool/scripts/pohw-install-pi-self-recovery.sh
 ```
 
 The installer copies all root-run helpers to root-owned `/usr/local/libexec/pohw`, keeps their state under root-owned `/var/lib/pohw`, and enforces root ownership with mode `0600` on `/etc/pohw/p2pool.env`. Root services never execute scripts from the writable Git checkout.
 
-Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and POHW commitment file paths for the payout-aware job. These modes refresh changed RPC jobs continuously; real `submitblock` calls remain disabled unless `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
+Enable `pohw-mining-adapter.service` only after miner registration and snapshot fields are set in `/etc/pohw/p2pool.env`. For live rehearsal, set `POHW_STRATUM_BUILD_JOB_FROM_RPC=true` plus the local Bitcoin RPC cookie path for a generic RPC job, or set `POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=true` plus payout schedule and PoHW commitment file paths for a static payout-aware rehearsal job. These modes refresh changed RPC jobs continuously. Target-meeting submission needs `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`; Bitcoin mainnet additionally requires the independent `POHW_STRATUM_ALLOW_MAINNET_SUBMIT=true` interlock. After its preflight, the handoff controller instead enables `POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE=true` with both submission interlocks so changing Bitcoin fees produce a fresh deterministic schedule. The packaged `mining-job.example.json` is dry-run material; the Rust adapter refuses it unless `--allow-example-mining-job` is passed, and `scripts/pohw-run-mining-adapter.sh` only passes that flag when `POHW_ALLOW_EXAMPLE_MINING_JOB=true` is set explicitly for a local dry-run.
+
+For Experiment 0 fork mining, start `pohw-fork-chain-node.service` first and set
+`POHW_STRATUM_FORK_CHAIN_RPC_ADDR=127.0.0.1:40408`. Set
+`POHW_ADMIT_PEER_WORK_TEMPLATES=true` when exchanging signed work templates with
+other participants. This mode consumes live fork templates, validates peer work
+through fork RPC, and submits target blocks only to fork RPC; it cannot be
+combined with the Bitcoin RPC job-builder flags. Leave
+`POHW_STRATUM_SHARE_TARGET` empty to derive the fork's PoW-limit share target
+and matching Stratum difficulty from the pinned activation manifest. This keeps
+the share policy valid while the bootstrap DAA changes the block target.
 
 Use `/etc/pohw/p2pool.env` for Pi-specific paths, peer hints, allowed dashboard origins, Stratum settings, and local RPC cookie paths. The systemd helpers bind gossip, dashboard, and Stratum to loopback unless you explicitly expose them. For trusted WLAN access, bind to the Pi WLAN IP instead of all interfaces:
 
@@ -761,6 +1028,12 @@ POHW_STRATUM_BLOCK_CANDIDATE_DIR=/mnt/ssd/pohw-p2pool/block-candidates
 POHW_IDENA_SNAPSHOT_ID=<snapshot-day-or-id>
 POHW_IDENA_SNAPSHOT_PROOF_ROOT=<32-byte-root-hex>
 ```
+
+Keep `POHW_DASHBOARD_UI_BIND_HOST` on loopback when the participant dashboard
+is enabled. Its generated browser configuration contains the dashboard API
+token, so the runner refuses to expose participant mode on a non-loopback UI.
+Use SSH forwarding for remote participant access. A public explorer must set
+`POHW_DASHBOARD_UI_PARTICIPANT_ENABLED=false` and never embeds that token.
 
 Set `POHW_DASHBOARD_ALLOWED_ORIGINS` to the browser UI origin you actually use, for example `http://<pi-wlan-ip>:5176` if the UI is served from the Pi.
 
@@ -832,10 +1105,31 @@ If MagicDNS is disabled in Tailscale, replace `pibtc` with the Pi's `100.x.y.z` 
 For a vacation-safe command-line status that avoids keys, cookies, addresses, and blockchain data, use the health monitor summary:
 
 ```sh
-ssh <pi-ssh-host> '/usr/bin/python3 /mnt/ssd/p2pool/scripts/pohw-health-status.py --format summary'
+ssh <pi-ssh-host> '/usr/bin/python3 /opt/p2pool/scripts/pohw-health-status.py --format summary'
 ```
 
-The timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
+The legacy SSD timer writes the same sanitized state to `/mnt/ssd/pohw-p2pool/health/status.json`. Bootstrap and Stratum RPC-job refresh use `POHW_HEALTH_STATUS_FILE` when it exists, so they stop before calling Bitcoin RPC while the health state says Bitcoin is still in IBD, `NODE_NETWORK_LIMITED`, RPC timeout, or `getblocktemplate` failure. The health monitor also reports warning-only Idena P2P state from local config/log files, including active IPFS port drift and consensus-loop peer counts below `POHW_HEALTH_IDENA_MIN_PEERS`. If the summary reports `idena_ipfs_port_drift`, allow and router-forward the reported active port, or restart Idena during a non-validation window to return to the configured port.
+
+On the SD-card runtime, the sanitized health state is stored at `/var/lib/pohw-p2pool/health/status.json`. `pohw-idena-workers-if-synced.timer` is an explicit opt-in that checks `bcn_syncing` every two minutes and starts only `idena-reward-indexer.service` and `idena-session-recorder.service` after the local node reaches the reported head with a valid clock. It never starts `idena.service`, so an operator pause remains in effect. Its secret-free status is `/var/lib/pohw/idena-workers/status.json`.
+
+For an SD-only Pi that consumes Bitcoin from the Hetzner host, install the
+persistent load guard:
+
+```sh
+sudo scripts/pohw-install-pi-load-guard.sh
+```
+
+It caps Idena at 2.5 CPU cores, starts 1 GB of compressed RAM swap without SD
+writes, keeps 1 GB of RAM available to the operating system through cgroup
+memory limits, disables Bitcoin restart timers, and blocks local Bitcoin Core
+unless `/etc/pohw/enable-local-bitcoin` is deliberately created. Re-enable a
+local Core only as an explicit maintenance action:
+
+```sh
+sudo touch /etc/pohw/enable-local-bitcoin
+sudo systemctl daemon-reload
+sudo systemctl enable --now bitcoind-mainnet.service
+```
 
 `pohw-auto-bootstrap.timer` checks the health file once per minute and runs `scripts/pohw-bootstrap-readiness.sh --mode real` once after the health monitor reports `miningReady=true`. Successful bootstrap writes `/mnt/ssd/pohw-p2pool/auto-bootstrap/bootstrap.done.json`; remove that marker only if you intentionally want another automatic bootstrap run.
 

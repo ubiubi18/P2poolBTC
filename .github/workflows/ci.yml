@@ -18,7 +18,9 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - name: Install Rust components
         run: rustup component add rustfmt clippy
       - name: Check formatting
@@ -35,10 +37,14 @@ jobs:
   python-and-shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - name: Verify Idena legacy compatibility lock
+        run: python scripts/pohw-idena-compatibility-lock.py
       - name: Test host tooling
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test reward indexer
@@ -55,29 +61,42 @@ jobs:
   javascript:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          node-version: "22"
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24.18.0"
       - name: Install dashboard dependencies
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard install --frozen-lockfile
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard install --frozen-lockfile
       - name: Audit dashboard dependencies
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard audit --prod
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard audit --prod
       - name: Build dashboard
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
       - name: Install contract dependencies
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
       - name: Audit contract dependencies
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry audit --prod
       - name: Test contract
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+      - name: Install governance contract dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance install --frozen-lockfile
+      - name: Audit governance contract dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance audit --prod
+      - name: Build governance contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance build
+      - name: Test governance contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance test
+      - name: Verify governance contract lock
+        run: python3 scripts/pohw-governance-runtime-gate.py --verify-artifact-only
 
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

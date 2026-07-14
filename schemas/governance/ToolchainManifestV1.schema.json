@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/ToolchainManifestV1.schema.json",
+  "title": "ToolchainManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "ecosystemLocks", "repositoryLocks"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "ecosystemLocks": {"$ref": "#/$defs/LockMap"},
+    "repositoryLocks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/RepositoryLocks"}
+    }
+  },
+  "$defs": {
+    "LockMap": {
+      "type": "object",
+      "maxProperties": 256,
+      "propertyNames": {"pattern": "^[A-Za-z0-9._:/-]{1,120}$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 4096}
+    },
+    "RepositoryLocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "toolchainLocks"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+        "toolchainLocks": {"$ref": "#/$defs/LockMap"}
+      }
+    }
+  }
+}

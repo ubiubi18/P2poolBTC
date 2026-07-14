@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/BuildPlanV1.schema.json",
+  "title": "BuildPlanV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "status",
+    "forkReleaseId",
+    "sourceDateEpoch",
+    "toolchains",
+    "targets"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "planId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "status": {"const": "experimental-local-only"},
+    "forkReleaseId": {"type": "string", "minLength": 1, "maxLength": 160},
+    "sourceDateEpoch": {"type": "integer", "minimum": 0},
+    "toolchains": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?:[-+][A-Za-z0-9._-]+)?$"}
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/Target"}
+    }
+  },
+  "$defs": {
+    "Name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "Path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+    "DependencyLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "path", "sha256", "format"],
+      "properties": {
+        "repository": {"$ref": "#/$defs/Name"},
+        "path": {"$ref": "#/$defs/Path"},
+        "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+        "format": {"enum": ["cargo-lock", "go-sum", "npm-package-lock", "pnpm-lock", "digest-only"]}
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "repository",
+        "kind",
+        "pathHint",
+        "platform",
+        "architecture",
+        "deterministic",
+        "expectedCid",
+        "expectedSha256",
+        "expectedSize"
+      ],
+      "properties": {
+        "name": {"$ref": "#/$defs/Name"},
+        "repository": {"$ref": "#/$defs/Name"},
+        "kind": {"enum": ["file", "directory-tar"]},
+        "pathHint": {"$ref": "#/$defs/Path"},
+        "platform": {"$ref": "#/$defs/Name"},
+        "architecture": {"$ref": "#/$defs/Name"},
+        "deterministic": {"type": "boolean"},
+        "expectedCid": {"oneOf": [{"$ref": "common.schema.json#/$defs/RawCid"}, {"type": "null"}]},
+        "expectedSha256": {"oneOf": [{"$ref": "common.schema.json#/$defs/Sha256"}, {"type": "null"}]},
+        "expectedSize": {"type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceRepositories",
+        "requiredToolchains",
+        "dependencyLocks",
+        "commands",
+        "dependencyFetchCommandCount",
+        "artifacts",
+        "reproducibility",
+        "limitations"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/Name"},
+        "sourceRepositories": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Name"}},
+        "requiredToolchains": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Name"}},
+        "dependencyLocks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/DependencyLock"}},
+        "commands": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
+        "dependencyFetchCommandCount": {"type": "integer", "minimum": 1},
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/Artifact"},
+          "contains": {
+            "type": "object",
+            "properties": {"deterministic": {"const": true}},
+            "required": ["deterministic"]
+          },
+          "minContains": 1
+        },
+        "reproducibility": {"enum": ["deterministic-core", "platform-constrained"]},
+        "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

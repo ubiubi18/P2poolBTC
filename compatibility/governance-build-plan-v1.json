@@ -1,0 +1,683 @@
+{
+  "schemaVersion": 1,
+  "planId": "ubiubi18-governance-build-v1",
+  "status": "experimental-local-only",
+  "forkReleaseId": "idena-code-governance-testnet-fork-2026.07.13-v1",
+  "sourceDateEpoch": 1783963545,
+  "toolchains": {
+    "go": "1.26.5",
+    "rust": "1.97.0",
+    "node": "24.18.0",
+    "npm": "11.16.0",
+    "pnpm": "11.11.0",
+    "assemblyscript": "0.27.37"
+  },
+  "targets": [
+    {
+      "id": "rust-workspace",
+      "sourceRepositories": ["P2poolBTC"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "P2poolBTC",
+          "path": "Cargo.lock",
+          "sha256": "ada4ba420c7a5e6128b4c5196bffd4de697728b0a30581493317acc9d44e876f",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --workspace --all-targets --all-features -- -D warnings",
+        "cargo test --offline --workspace",
+        "cargo build --offline --workspace --release --locked"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "pohw-governance",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "target/release/pohw-governance",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        },
+        {
+          "name": "p2pool-node",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "target/release/p2pool-node",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        },
+        {
+          "name": "idena-lite-indexer",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "target/release/idena-lite-indexer",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "Native linker and operating-system inputs must match before binary digests are compared across builders."
+      ]
+    },
+    {
+      "id": "governance-contract",
+      "sourceRepositories": [
+        "P2poolBTC",
+        "idena-go",
+        "idena-wasm-binding",
+        "idena-wasm",
+        "wasmer",
+        "idena-sdk-js-lite"
+      ],
+      "requiredToolchains": ["node", "pnpm", "assemblyscript", "go"],
+      "dependencyLocks": [
+        {
+          "repository": "P2poolBTC",
+          "path": "contracts/idena-code-governance/pnpm-lock.yaml",
+          "sha256": "dba78007e5726f5cdb3e4665d17bc55e3be32e9f5fbb8a5c3dc846a6c445c5d9",
+          "format": "pnpm-lock"
+        },
+        {
+          "repository": "idena-go",
+          "path": "go.mod",
+          "sha256": "2c893f802ab84d345c9fb116469145c546ddd4b2a2892d5a83bdd067f5a3834b",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-go",
+          "path": "go.sum",
+          "sha256": "a4f322b4674765b85a22c78ff1aa0b4a70390fc07f83072d8ec365e5ebf7b708",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.mod",
+          "sha256": "11f36cc6a58e55f48b26f800ebd55cbcdf4c23b1fb8a433a08f37d1c219c21af",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.sum",
+          "sha256": "1c2d26a41ae556883e6df99696b1b48723b2d27d997c037b5314de600276ccae",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "idena-sdk-js-lite",
+          "path": "package-lock.json",
+          "sha256": "39636ea42e02444781b0c41fd707f888fa3ab7b051663f14d999312a3bd835cb",
+          "format": "npm-package-lock"
+        }
+      ],
+      "commands": [
+        "corepack pnpm --dir contracts/idena-code-governance install --frozen-lockfile --ignore-scripts",
+        "go -C ../idena-go mod download",
+        "corepack pnpm --dir contracts/idena-code-governance build",
+        "corepack pnpm --dir contracts/idena-code-governance test",
+        "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm --component-repo wasmer=../wasmer --component-repo idena-sdk-js-lite=../idena-sdk-js-lite --require-locked-sources"
+      ],
+      "dependencyFetchCommandCount": 2,
+      "artifacts": [
+        {
+          "name": "idena-code-governance.wasm",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "contracts/idena-code-governance/build/idena-code-governance.wasm",
+          "platform": "wasm",
+          "architecture": "wasm32",
+          "deterministic": true,
+          "expectedCid": "bafkreienni6a2jk7j3x5yhwuuzumcd6oq4wrlwjjq5h6estcfv5ukjkfai",
+          "expectedSha256": "8d6a3c0d255f4eefdc1ed4a668c10fce872d15d929874fe24a622d7b45254502",
+          "expectedSize": 177175
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "This artifact is an unauthorized local prototype until independent builders and every DAO gate pass.",
+        "The production-runtime command fails closed unless every governance-fork component repository is supplied at its exact clean locked revision."
+      ]
+    },
+    {
+      "id": "pohw-dashboard",
+      "sourceRepositories": ["P2poolBTC"],
+      "requiredToolchains": ["node", "pnpm"],
+      "dependencyLocks": [
+        {
+          "repository": "P2poolBTC",
+          "path": "ui/pohw-dashboard/pnpm-lock.yaml",
+          "sha256": "13d9c6354e4a797aeb267a42cfdab31f5e4f6234e181b1dc1494f992267cfec2",
+          "format": "pnpm-lock"
+        }
+      ],
+      "commands": [
+        "corepack pnpm --dir ui/pohw-dashboard install --frozen-lockfile --ignore-scripts",
+        "corepack pnpm --dir ui/pohw-dashboard build"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "pohw-dashboard",
+          "repository": "P2poolBTC",
+          "kind": "directory-tar",
+          "pathHint": "ui/pohw-dashboard/dist",
+          "platform": "web",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "A matching digest still requires the same locked minifier and bundler behavior."
+      ]
+    },
+    {
+      "id": "idena-go",
+      "sourceRepositories": ["idena-go", "idena-wasm-binding", "idena-wasm", "wasmer"],
+      "requiredToolchains": ["go", "rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-go",
+          "path": "go.mod",
+          "sha256": "2c893f802ab84d345c9fb116469145c546ddd4b2a2892d5a83bdd067f5a3834b",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-go",
+          "path": "go.sum",
+          "sha256": "a4f322b4674765b85a22c78ff1aa0b4a70390fc07f83072d8ec365e5ebf7b708",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.mod",
+          "sha256": "11f36cc6a58e55f48b26f800ebd55cbcdf4c23b1fb8a433a08f37d1c219c21af",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.sum",
+          "sha256": "1c2d26a41ae556883e6df99696b1b48723b2d27d997c037b5314de600276ccae",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "go mod download",
+        "GOPROXY=off go test ./...",
+        "GOPROXY=off go vet ./...",
+        "GOPROXY=off go build -trimpath -buildvcs=false -ldflags=-buildid= -o build/idena-go ."
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "idena-go",
+          "repository": "idena-go",
+          "kind": "file",
+          "pathHint": "build/idena-go*",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "CGO and the pinned native WASM archive must be rebuilt on matching operating-system families before binary digests are compared."
+      ]
+    },
+    {
+      "id": "idena-desktop-renderer",
+      "sourceRepositories": ["idena-desktop"],
+      "requiredToolchains": ["node", "npm"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-desktop",
+          "path": "package-lock.json",
+          "sha256": "554fab5c2a41cde7026dea5d5cd5c6e0d563e240cccb391272784c31c1495077",
+          "format": "npm-package-lock"
+        }
+      ],
+      "commands": [
+        "npm ci --ignore-scripts",
+        "node scripts/check-runtime-install.js",
+        "npm run lint",
+        "npm test -- --runInBand",
+        "npm run audit:privacy",
+        "npm run audit:metadata",
+        "npm run audit:artifacts",
+        "npm run audit:deps",
+        "npm run audit:electron",
+        "npm run release:check",
+        "npm run build:renderer"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "idena-desktop-renderer",
+          "repository": "idena-desktop",
+          "kind": "directory-tar",
+          "pathHint": "renderer/out",
+          "platform": "web",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "Next.js output must be compared between independent clean builders before it is called reproducible."
+      ]
+    },
+    {
+      "id": "idena-desktop-installer",
+      "sourceRepositories": ["idena-desktop", "idena-go", "idena-wasm-binding", "idena-wasm", "wasmer"],
+      "requiredToolchains": ["node", "npm", "go", "rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-desktop",
+          "path": "package-lock.json",
+          "sha256": "554fab5c2a41cde7026dea5d5cd5c6e0d563e240cccb391272784c31c1495077",
+          "format": "npm-package-lock"
+        },
+        {
+          "repository": "idena-go",
+          "path": "go.mod",
+          "sha256": "2c893f802ab84d345c9fb116469145c546ddd4b2a2892d5a83bdd067f5a3834b",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-go",
+          "path": "go.sum",
+          "sha256": "a4f322b4674765b85a22c78ff1aa0b4a70390fc07f83072d8ec365e5ebf7b708",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.mod",
+          "sha256": "11f36cc6a58e55f48b26f800ebd55cbcdf4c23b1fb8a433a08f37d1c219c21af",
+          "format": "digest-only"
+        },
+        {
+          "repository": "idena-wasm-binding",
+          "path": "go.sum",
+          "sha256": "1c2d26a41ae556883e6df99696b1b48723b2d27d997c037b5314de600276ccae",
+          "format": "go-sum"
+        },
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "npm ci --ignore-scripts",
+        "node scripts/check-runtime-install.js",
+        "npm run lint",
+        "npm test -- --runInBand",
+        "npm run audit:privacy",
+        "npm run audit:metadata",
+        "npm run audit:artifacts",
+        "npm run audit:deps",
+        "npm run audit:electron",
+        "npm run release:check",
+        "npm run dist"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "idena-desktop-installer",
+          "repository": "idena-desktop",
+          "kind": "file",
+          "pathHint": "dist/idena-client-*",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": false,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        },
+        {
+          "name": "idena-desktop-renderer-core",
+          "repository": "idena-desktop",
+          "kind": "directory-tar",
+          "pathHint": "renderer/out",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        },
+        {
+          "name": "idena-go-bundled",
+          "repository": "idena-desktop",
+          "kind": "file",
+          "pathHint": "build/node/current/idena-go*",
+          "platform": "builder-platform",
+          "architecture": "builder-platform",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "platform-constrained",
+      "limitations": [
+        "Apple notarization, Windows signing, package timestamps, and platform metadata may keep installers from being byte-reproducible.",
+        "The declared renderer and bundled-node core artifacts must match independently even when the signed installer bytes differ."
+      ]
+    },
+    {
+      "id": "idena-sdk-js-lite",
+      "sourceRepositories": ["idena-sdk-js-lite"],
+      "requiredToolchains": ["node", "npm"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-sdk-js-lite",
+          "path": "package-lock.json",
+          "sha256": "39636ea42e02444781b0c41fd707f888fa3ab7b051663f14d999312a3bd835cb",
+          "format": "npm-package-lock"
+        }
+      ],
+      "commands": [
+        "npm ci --ignore-scripts",
+        "npm run audit:compatibility",
+        "npm test",
+        "npm run build",
+        "npm run build:verify"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "idena-sdk-js-lite",
+          "repository": "idena-sdk-js-lite",
+          "kind": "directory-tar",
+          "pathHint": "dist",
+          "platform": "web",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": null,
+          "expectedSha256": null,
+          "expectedSize": null
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": [
+        "The build verifier covers distribution files, while documentation output remains outside the core artifact digest."
+      ]
+    },
+    {
+      "id": "idena-wasm-linux-amd64",
+      "sourceRepositories": ["idena-wasm", "wasmer"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --locked --all-targets --all-features -- -D warnings",
+        "cargo test --offline --locked --all-targets --all-features",
+        "cargo build --offline --locked --release --all-features",
+        "cp target/release/libidena_wasm.a libidena_wasm_linux_amd64.a"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "libidena_wasm_linux_amd64.a",
+          "repository": "idena-wasm",
+          "kind": "file",
+          "pathHint": "libidena_wasm_linux_amd64.a",
+          "platform": "linux",
+          "architecture": "amd64",
+          "deterministic": true,
+          "expectedCid": "bafkreiamrfa2xadtuy4umikkmlehw6fb4d3xggr5qgajlchrvyairshogu",
+          "expectedSha256": "0c8941ab8073a63946214a62c87b78a1e0f7731a3d81809588f1ae0088c8ee35",
+          "expectedSize": 47540154
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": ["The GNU archive and linker versions are part of the effective build environment."]
+    },
+    {
+      "id": "idena-wasm-linux-arm64",
+      "sourceRepositories": ["idena-wasm", "wasmer"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --locked --all-targets --all-features -- -D warnings",
+        "cargo test --offline --locked --all-targets --all-features",
+        "cargo build --offline --locked --release --all-features",
+        "cp target/release/libidena_wasm.a libidena_wasm_linux_aarch64.a"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "libidena_wasm_linux_aarch64.a",
+          "repository": "idena-wasm",
+          "kind": "file",
+          "pathHint": "libidena_wasm_linux_aarch64.a",
+          "platform": "linux",
+          "architecture": "arm64",
+          "deterministic": true,
+          "expectedCid": "bafkreib5mnwbslzuhbotzhofpf5m6kn5govroynxr7lfoeop6epgij34qe",
+          "expectedSha256": "3d636c192f34385d3c9dc5797acf29bd33ab1761b78fd65711cff11e64277c81",
+          "expectedSize": 48822946
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": ["The GNU archive and linker versions are part of the effective build environment."]
+    },
+    {
+      "id": "idena-wasm-darwin-amd64",
+      "sourceRepositories": ["idena-wasm", "wasmer"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --locked --all-targets --all-features -- -D warnings",
+        "cargo test --offline --locked --all-targets --all-features",
+        "cargo build --offline --locked --release --all-features --target x86_64-apple-darwin",
+        "cp target/x86_64-apple-darwin/release/libidena_wasm.a libidena_wasm_darwin_amd64.a"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "libidena_wasm_darwin_amd64.a",
+          "repository": "idena-wasm",
+          "kind": "file",
+          "pathHint": "libidena_wasm_darwin_amd64.a",
+          "platform": "darwin",
+          "architecture": "amd64",
+          "deterministic": true,
+          "expectedCid": "bafkreiaekhiuqcbh3zw4ie3rfvdbezgq6wdcq63p27r4lb7gbtrxjbkhm4",
+          "expectedSha256": "0451d1480827de6dc413712d461264d0f586287b6fd7e3c587e60ce374854767",
+          "expectedSize": 35092032
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": ["The Apple archive and linker versions are part of the effective build environment."]
+    },
+    {
+      "id": "idena-wasm-darwin-arm64",
+      "sourceRepositories": ["idena-wasm", "wasmer"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --locked --all-targets --all-features -- -D warnings",
+        "cargo test --offline --locked --all-targets --all-features",
+        "cargo build --offline --locked --release --all-features --target aarch64-apple-darwin",
+        "cp target/aarch64-apple-darwin/release/libidena_wasm.a libidena_wasm_darwin_arm64.a"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "libidena_wasm_darwin_arm64.a",
+          "repository": "idena-wasm",
+          "kind": "file",
+          "pathHint": "libidena_wasm_darwin_arm64.a",
+          "platform": "darwin",
+          "architecture": "arm64",
+          "deterministic": true,
+          "expectedCid": "bafkreifx7libehput27dakdnpkgdmyf2dgard6okhphuctvkiisiogdksa",
+          "expectedSha256": "b7fad0121df49ebe30286d7a8c3660ba198111f9ca3bcf414eaa422487186a90",
+          "expectedSize": 35300328
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": ["The Apple archive and linker versions are part of the effective build environment."]
+    },
+    {
+      "id": "idena-wasm-windows-amd64",
+      "sourceRepositories": ["idena-wasm", "wasmer"],
+      "requiredToolchains": ["rust"],
+      "dependencyLocks": [
+        {
+          "repository": "idena-wasm",
+          "path": "Cargo.lock",
+          "sha256": "8c0b62c5822d53a1562ab418717fe43b451ccce55917ac25e9b95700077955ae",
+          "format": "cargo-lock"
+        },
+        {
+          "repository": "wasmer",
+          "path": "Cargo.lock",
+          "sha256": "32acdd865a968c692b167c94ffe4749f6c1c9685dab2137dbdf30c60bef173cb",
+          "format": "cargo-lock"
+        }
+      ],
+      "commands": [
+        "cargo fetch --locked",
+        "cargo fmt --all -- --check",
+        "cargo clippy --offline --locked --all-targets --all-features -- -D warnings",
+        "cargo test --offline --locked --all-targets --all-features",
+        "cargo build --offline --locked --release --all-features --target x86_64-pc-windows-gnu",
+        "cp target/x86_64-pc-windows-gnu/release/libidena_wasm.a libidena_wasm_windows_amd64.a"
+      ],
+      "dependencyFetchCommandCount": 1,
+      "artifacts": [
+        {
+          "name": "libidena_wasm_windows_amd64.a",
+          "repository": "idena-wasm",
+          "kind": "file",
+          "pathHint": "libidena_wasm_windows_amd64.a",
+          "platform": "windows",
+          "architecture": "amd64",
+          "deterministic": true,
+          "expectedCid": "bafkreibyzvhdduu6blg2fiwxkelsf3xw4nha76jcvn7swaotbjaqpu5464",
+          "expectedSha256": "38cd4e31d29e0acda2a2d7511722eef6e34e0ff922ab7f2b01d30a4107d3bcf7",
+          "expectedSize": 34466768
+        }
+      ],
+      "reproducibility": "deterministic-core",
+      "limitations": ["The MinGW archive and linker versions are part of the effective build environment."]
+    }
+  ]
+}

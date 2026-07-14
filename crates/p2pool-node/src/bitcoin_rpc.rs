@@ -94,7 +94,7 @@ pub struct BitcoinWorkTemplateValidation {
     pub merkle_root_status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitcoinMiningJobTemplate {
     pub version: i32,
     pub previous_block_hash: String,
@@ -107,7 +107,7 @@ pub struct BitcoinMiningJobTemplate {
     pub default_witness_commitment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitcoinMiningJobTransaction {
     pub txid: String,
     pub data_hex: String,

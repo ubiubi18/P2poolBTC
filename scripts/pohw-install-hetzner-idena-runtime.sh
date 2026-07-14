@@ -27,8 +27,12 @@ CONFIGS=(
   /etc/idena-relay/config.json
 )
 BINARIES=(
-  /usr/local/libexec/idena-node-compat-v5
+  /usr/local/libexec/idena-node-compat-v6
   /usr/local/libexec/idena-node-1.1.2
+)
+PROVENANCE_FILES=(
+  /usr/local/libexec/idena-node-compat-v6.source-commit
+  /usr/local/libexec/idena-node-1.1.2.source-commit
 )
 
 usage() {
@@ -136,14 +140,20 @@ for index in "${!UNITS[@]}"; do
   datadir="${DATADIRS[$index]}"
   config="${CONFIGS[$index]}"
   binary="${BINARIES[$index]}"
+  provenance="${PROVENANCE_FILES[$index]}"
 
   getent passwd "$user" >/dev/null || fail "Required system user is missing: $user"
   require_metadata "$datadir" "$user" "$user" 700 directory
   require_metadata "$(dirname "$config")" root "$user" 750 directory
   require_metadata "$config" root "$user" 640 file
   require_metadata "$binary" root root 755 executable
+  require_metadata "$provenance" root root 644 file
   validate_config "$config" "$datadir"
 done
+
+python3 "$ROOT_DIR/scripts/pohw-idena-compatibility-lock.py" \
+  --modern-provenance-file "${PROVENANCE_FILES[0]}" \
+  --legacy-provenance-file "${PROVENANCE_FILES[1]}"
 
 mountpoint -q /srv/idena || fail "/srv/idena must be a dedicated mount point"
 [[ "$(cat /srv/idena/ipfs/version)" == "18" ]] \

@@ -1,0 +1,23 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/IdentityMetricsAttestationV1.schema.json",
+  "title":"IdentityMetricsAttestationV1",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","metricsRoot","snapshotCid","snapshotSha256","sourceEpoch","sourceBlockHeight","sourceBlockHash","replayStartHeight","replayCommitment","indexerImplementationCid","operatorIdenaAddress","observedAtBlockOrTimestamp","authentication"],
+  "properties":{
+    "schemaVersion":{"const":1},
+    "metricsRoot":{"$ref":"common.schema.json#/$defs/Sha256"},
+    "snapshotCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
+    "snapshotSha256":{"$ref":"common.schema.json#/$defs/Sha256"},
+    "sourceEpoch":{"type":"integer","minimum":0,"maximum":65535},
+    "sourceBlockHeight":{"type":"integer","minimum":0},
+    "sourceBlockHash":{"$ref":"common.schema.json#/$defs/Sha256"},
+    "replayStartHeight":{"type":"integer","minimum":0},
+    "replayCommitment":{"$ref":"common.schema.json#/$defs/Sha256"},
+    "indexerImplementationCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
+    "operatorIdenaAddress":{"$ref":"common.schema.json#/$defs/Address"},
+    "observedAtBlockOrTimestamp":{"type":"integer","minimum":0},
+    "authentication":{"const":"on-chain-submitter"}
+  }
+}

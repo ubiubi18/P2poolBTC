@@ -1,0 +1,289 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {
+      "path": "lib/c-api/examples/assets/call_trap.wasm",
+      "sha256": "e5b20f08e519a51e148d5934bbe2c2a52239bece822a76f39eb6ad46918dd98e"
+    },
+    {
+      "path": "lib/c-api/examples/assets/qjs.wasm",
+      "sha256": "6f62a6bc5c8f8e3e12a54e2ecbc5674ccfe1c75f91d8e4dd6ebb3fec422a4d6c"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/callback.wasm",
+      "sha256": "adce5efd8dcdb34c4c395ce8b8d44dd022312a9cc92671a8ae162070560425dd"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/finalize.wasm",
+      "sha256": "1709bd62ae6718484e475a198de6673ece94af1ba5dec7eefbde3442763f7846"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/global.wasm",
+      "sha256": "3805460a16d997a924c3b62ddff6514ccfd694165dbcbc67cf3d6abc1ed162d5"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/hello.wasm",
+      "sha256": "e1dd151673c8ab420f20060fcbe38885ac5b650bf560fe9dbe441003ed39ebee"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/hostref.wasm",
+      "sha256": "d54c5db82ddbc1a873a66c9623eaaa9e190e4a015829aa60a9d521838c2c745e"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/memory.wasm",
+      "sha256": "c0ca45e42081aa3e5eafc44baaed9d20b2875550cfdbbd710a3cbd378e1e76d3"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/multi.wasm",
+      "sha256": "123327c23a4c0ff7318fc17f98091c057293d5902e57d3e373fb11affa0d736d"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/reflect.wasm",
+      "sha256": "bd9f390b0315692b03bbe0820f5597c794984dd87454d931836cad23d93a1339"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/serialize.wasm",
+      "sha256": "e1dd151673c8ab420f20060fcbe38885ac5b650bf560fe9dbe441003ed39ebee"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/start.wasm",
+      "sha256": "8264b530d8f8d01891ca17e6de624ad3b87e3b45aae3adb88db0a7e3bd2cce6e"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/table.wasm",
+      "sha256": "5b4e22d031524fdea22957b4e21d9488454046833365801f7f26856ab8054edd"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/threads.wasm",
+      "sha256": "1bbf65b9e23a65cf086dff5214910c92b015687212c03f97d33e5a757189d3ed"
+    },
+    {
+      "path": "lib/c-api/tests/wasm-c-api/example/trap.wasm",
+      "sha256": "f873808a997b06cdf4b608a4672e5747c0b77da9282821b1cc78222a8002d169"
+    },
+    {
+      "path": "lib/wasi/tests/envvar.wasm",
+      "sha256": "24c71c908ab51aae0370c143091ffb44ec31b99c83e0fc70088966a56d779336"
+    },
+    {
+      "path": "lib/wasi/tests/stdin-hello.wasm",
+      "sha256": "d9bfa9030e5c489d1daac9e70699020caf59ac244d2db84205be28a62d4ea63b"
+    },
+    {
+      "path": "tests/integration/ios/DylibExample/DylibExample/sum.wasm",
+      "sha256": "7269078e012cbfcc2fb1b8ed9578682ddb47951bb8b05efa8c060b66618a0828"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/close_preopen_fd.wasm",
+      "sha256": "5903bc778fe6f4b0d92041e6da8b101737a4dfc43e90a2554020509b63944d50"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/create_dir.wasm",
+      "sha256": "c389788a393f13b5c48f90d8fb061f087c6f401c2fd0f3aded753d9a16fce860"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/envvar.wasm",
+      "sha256": "1c903ab3e474a1c9116cb3ecaabed67e1cb23c854ea6c2950ac4c53d339853b6"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_allocate.wasm",
+      "sha256": "a4be9fe37899722e7d39d4987ea26e92ffc5727d37cb65f19a73877953601366"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_append.wasm",
+      "sha256": "baffc0cbcc6180b25f1469fc334da2e213d095ecb14d073747abe762860bc997"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_close.wasm",
+      "sha256": "f2cf30ccbd135a3283160c9497ccd8b24be6552f280c75411330a750e345a766"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_pread.wasm",
+      "sha256": "a16125ca9fcec9e72069459768b9ebd0086edac096f340c1d5d524db604dff74"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_read.wasm",
+      "sha256": "1bae6784a1644edaf4b33a29917daa72970d4699f4c0724b78271f9e17d00822"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_rename_path.wasm",
+      "sha256": "bd0b6aa924ee6e013f5a493da270ee6e7bb8afdbde0b43967abbc6c5ce09296a"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fd_sync.wasm",
+      "sha256": "891d4402e6dc80f288d43d006c3d9ba96d63547d2b3f1b95f11dc9c6c8982f04"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/file_metadata.wasm",
+      "sha256": "647d3c47a44360e98ca52689d78eebc1e5d2f7711fa3fe43106bf1037929885f"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fs_sandbox_test.wasm",
+      "sha256": "bc7b28664aac2c81d34b359169ec37da9fbc6f54e37764b807d48fc2a8619e5b"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/fseek.wasm",
+      "sha256": "7b5902314cb8dc828119acf773e3a266626bbc24c6585c5112f1db886890870c"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/hello.wasm",
+      "sha256": "14d11ea128d06ab2aefd9f7de675b06976be401483bf84005038237d52abd56d"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/isatty.wasm",
+      "sha256": "eebee94ed2f3fc48e472b1abe031f73d74fa1a0ee0c6013e569d9e3043b9f580"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/mapdir.wasm",
+      "sha256": "1a3c87cad2badd8d121ff6ef9d4771fcd3f2e293c5754ab69c533039efd3fc9c"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/mapdir_with_leading_slash.wasm",
+      "sha256": "e8893c45fefbfc05e698358ff73208ccb1c30ad6cedfdf1d5518553ebdeef49d"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/path_link.wasm",
+      "sha256": "62b0a9f2fcd05fb2ad18680591962dab43647adabae663ad8491b20a4f002857"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/path_rename.wasm",
+      "sha256": "3a8f10ab11811d4dadafe4ac824aff68e285f6a31abf5aea678b0dce18ac65ed"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/path_symlink.wasm",
+      "sha256": "21d09972c350c142ba84ecfbb4b282eb29ba34eec697b7bcf680cdb49c77b1b1"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/pipe_reverse.wasm",
+      "sha256": "d1729106e422427312691acfee36675f6b47fcf043e44e2f16ec1fa0be83fd8b"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/poll_oneoff.wasm",
+      "sha256": "13e38977b21e769b81691f52922095c051501a30484830b7ed6ee8b7fe715ea5"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/quine.wasm",
+      "sha256": "ec7849bf34795a50006efa5a79f3a15c5bdb6af183d8f0bfd5cb74f141e32924"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/readlink.wasm",
+      "sha256": "16b99ac10b3276974084332ecf8e0e852d7bdf56c7b19d51741a71d0f058a136"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/unix_open_special_files.wasm",
+      "sha256": "3799f40876e5b837c636dd881e24af93112df75fb1631597c615fe2f61e2adb3"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/wasi_sees_virtual_root.wasm",
+      "sha256": "bd1694b48faea62a1e9880ea24faf5340e68cb688b73b379c0e7dbed07610b13"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/snapshot1/writing.wasm",
+      "sha256": "c7441f2a39965a5f0b9d36111e0a2e89c87abd77c84e0b19d27c8b4859fbf059"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/close_preopen_fd.wasm",
+      "sha256": "3c8cc4ae406b695bdad9b6b9e26e775f6c76976b9cc5b48d37cd88c355f0f1e4"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/create_dir.wasm",
+      "sha256": "cf52136712baabb3e2b0ec6c3a937108e111e95adb5e0f6f953cf8ffb3429673"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/envvar.wasm",
+      "sha256": "acaac91334f6f0c627bb0b76eb9ac2377502677ac634e74034b7e5deba72d753"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_allocate.wasm",
+      "sha256": "f6b29ef39edbee88d1f48c05cd508fabcc03448671b4872452e7b688f750416d"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_append.wasm",
+      "sha256": "91530fe4555cc5924d529301beb1bbceb3e48905ff707bd1363872c48424327d"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_close.wasm",
+      "sha256": "e7d45c3c074317d42db133e6490f0f496d4709177c09572a81921984487b2461"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_pread.wasm",
+      "sha256": "a3e10f4158c9ba65de28c73a458c9dd1b11e4ebd1e25c351b3e6d05d22068be1"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_read.wasm",
+      "sha256": "7d78f32648cabcb9cef3921ddf4a979cfa58d4f6c008b59b10b6125e22473037"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fd_sync.wasm",
+      "sha256": "50e733f3d48ec49051f5b4d9149d234eb052d3af920fd99a87f43dabc9ce98ee"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/file_metadata.wasm",
+      "sha256": "b620d57c546f8cda4475e4f597aff91d238eccad4f98c64e71b8a2f253724428"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fs_sandbox_test.wasm",
+      "sha256": "d621327c75e6149606c8980c2fdfd2247e1f356ae281e73eb998bba64b8dd33f"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/fseek.wasm",
+      "sha256": "e6b9ef924ca860fc11007fa4bc5c75915110510b37791b7d8e4d3ac6df4bf437"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/hello.wasm",
+      "sha256": "d0eb4456c48a11ca7fc19f98b9c8e4a2bb5a0fa56f7338470e9b00ac7238ac3e"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/isatty.wasm",
+      "sha256": "68ebf352f8b8170d949f5ee3e55ab97b3a977b0ffdcff75f90e7bed7130c44e3"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/mapdir.wasm",
+      "sha256": "28d004b9b24bd2d195bca48d3d081f8b60a3666054c106e3f352092c3e51151a"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/mapdir_with_leading_slash.wasm",
+      "sha256": "e77bffdc667dd247e6a051ce11faead81e6e53932ae1f71030040e8de8f11088"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/path_link.wasm",
+      "sha256": "5fe9a68872c0ba42ae6540dfa70198632db5a6ca9d0b2faf52008ad51fd16dd0"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/path_rename.wasm",
+      "sha256": "7da8b32d23c91fd9add9bb0f9c83bf0df1fa0c4035f8329cca78d2c1884cc172"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/path_symlink.wasm",
+      "sha256": "f3d511aa116c83089697adf407afa0d38c89a97448e98f06121e55da0ff390f2"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/pipe_reverse.wasm",
+      "sha256": "30b868ac00da8d098518665db44094284f0463bc9d64399689b07d7b794ae20e"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/poll_oneoff.wasm",
+      "sha256": "733d865a74583bbea269ed11ea74ca89754e4084e63af7c8b78a0eeda4a16f2b"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/quine.wasm",
+      "sha256": "b93e7d7a92d74ddc8f308ab3d5ffd23d92080d26f8623231df711b190335f54c"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/readlink.wasm",
+      "sha256": "a2cdaaa1b59a2e95813340ab19b67409f4dd1f8a195b1c8d6e2e009565791d8c"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/unix_open_special_files.wasm",
+      "sha256": "6b2f3c964047d155647f469f86f9f22e263ba83feda9eaed24991ddacf6ea3bb"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/wasi_sees_virtual_root.wasm",
+      "sha256": "ba04b4661cec8ebe44458003d052036f682466a538ca6f9399c07651bebbd7eb"
+    },
+    {
+      "path": "tests/wasi-wast/wasi/unstable/writing.wasm",
+      "sha256": "0755a7079b49f55feb27c637af3711a46f62f3f50da4f7bedd14f7317522995a"
+    }
+  ]
+}

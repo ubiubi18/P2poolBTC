@@ -1,0 +1,13 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/VoteReceiptV1.schema.json",
+  "title":"VoteReceiptV1","type":"object","additionalProperties":false,
+  "required":["schemaVersion","proposalId","voterAddress","choice","stakingEpoch","identityMetricsEpoch","activeStakeAtoms","stakeScore","identityStatusBps","flipTrustBps","effectiveVoteWeight","castAtBlock"],
+  "properties":{
+    "schemaVersion":{"const":1},"proposalId":{"$ref":"common.schema.json#/$defs/Sha256"},"voterAddress":{"$ref":"common.schema.json#/$defs/Address"},
+    "choice":{"enum":["yes","no","abstain"]},"stakingEpoch":{"type":"integer","minimum":0},"identityMetricsEpoch":{"type":"integer","minimum":0},
+    "activeStakeAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},"stakeScore":{"type":"integer","minimum":0},
+    "identityStatusBps":{"type":"integer","minimum":7000,"maximum":10000},"flipTrustBps":{"type":"integer","minimum":4000,"maximum":10000},
+    "effectiveVoteWeight":{"type":"integer","minimum":0},"castAtBlock":{"type":"integer","minimum":0}
+  }
+}

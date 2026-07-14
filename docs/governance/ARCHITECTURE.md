@@ -1,0 +1,73 @@
+# IPFS-Native Governance Architecture
+
+## Trust Root
+
+The canonical trust root is a CIDv1/base32 `EcosystemManifestV1` stored by an
+Idena WASM governance contract. Git commits and mirrors are metadata and
+transport only. Contract execution changes one canonical CID atomically; it
+never edits repository files. A proposal whose parent is no longer canonical
+is stale and cannot overwrite the newer manifest.
+
+There is no lead developer, maintainer merge key, contract owner, emergency
+installer, or AI merge authority. Deployment may set the immutable initial CID
+and testnet parameters once. Afterwards, any caller may execute an accepted
+proposal after all gates, challenge period, and timelock pass.
+
+## Components
+
+1. `governance-core` implements canonical schemas, deterministic integer
+   voting math, CID verification, proposal gates, and a local contract model.
+2. `governance-cli` packages sorted source trees into deterministic DAG-CBOR
+   manifests and CARv1 files, creates multi-repository proposals, verifies
+   patches, interacts with a separate public Kubo sidecar, and runs simulations.
+3. `contracts/idena-code-governance` is a non-upgradeable AssemblyScript WASM
+   contract with stake, bond, permissionless review-round, vote, attestation,
+   challenge, and execution state. It derives evidence roots only when a fixed
+   review window is frozen; a proposer cannot curate the committed set.
+4. idena-go builds exact authored-flip metrics by replaying finalized validation
+   outcomes, commits the exact ordered replay payload, and exposes only
+   read-only governance RPC methods. The application-layer contract requires a
+   threshold of distinct eligible indexer operators for a migration root and
+   rejects conflicting quorums.
+5. P2poolBTC exposes a local read-only governance API and experimental UI.
+6. idena-desktop adds an opt-in experimental resolver and release verifier while
+   retaining the existing updater as a rollback path.
+7. idena-compat-stack validates atomic cross-repository locks and separates the
+   unchanged legacy compatibility candidate from governance-fork experiments.
+8. The non-executing build-evidence tool validates a pinned command plan,
+   source CIDs, dependency locks, redacted logs, SBOM inputs, and artifacts.
+   Source-controlled commands run only in separately isolated workers.
+9. The production-runtime gate verifies the exact contract CID and SHA-256,
+   confirms idena-go resolves the locked native binding, deploys twice through
+   the real `WasmVM`, compares deterministic outputs/gas, and rejects unlocked
+   source evidence in release mode.
+
+## Four Independent Gates
+
+- PoS: sublinear, time-locked IDNA stake with yes/no/abstain and snapshotted
+  turnout. One identity is not one equal political vote.
+- PoHW: distinct eligible Idena identities, bounded state multiplier, and exact
+  finalized authored-flip trust. Identity age is ignored.
+- PoAW: content-addressed AI review attestations with owner and runtime-family
+  diversity. AI agents cannot execute proposals.
+- Proof of verification work: independent reproducible builds, tests, SBOMs,
+  static/dependency analysis, and matching core artifact digests.
+
+Every required gate must pass. No component is collapsed into an opaque score.
+
+## Public IPFS Boundary
+
+Idena's embedded Kubo node writes a fixed private-swarm key and is never reused.
+Governance uses a separate repository, process, API endpoint, and pinset. CAR
+downloads and gateway responses are accepted only after CID and declared digest
+verification. Multiple signed availability attestations reduce, but cannot
+eliminate, long-term availability risk.
+
+## Compatibility Boundary
+
+`compatibility/stack-lock.json` remains the legacy, no-consensus-change profile.
+Application-layer contracts, indexers, Merkle proofs, and public IPFS work
+without changing mainnet consensus. Any new host function, identity-state
+counter, genesis change, network ID, or validation rule belongs exclusively in
+`compatibility/governance-fork-lock.json`, with a distinct network identifier,
+activation mechanism, replay/migration gates, source CIDs, and artifact digests.

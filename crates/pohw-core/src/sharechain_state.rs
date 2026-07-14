@@ -51,6 +51,8 @@ pub struct SnapshotVoteKey {
 pub struct SharechainReplaySummary {
     pub applied_message_count: usize,
     pub registered_miner_count: usize,
+    pub unique_registered_idena_count: usize,
+    pub active_idena_participant_count: usize,
     pub accepted_bitcoin_work_template_count: usize,
     pub bitcoin_work_template_count: usize,
     pub stored_share_count: usize,
@@ -68,6 +70,24 @@ pub struct SharechainReplaySummary {
     pub last_message_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharechainShareSummary {
+    pub share_hash: String,
+    pub height: u64,
+    pub active: bool,
+    pub miner_id: String,
+    pub parent_share_hash: String,
+    pub bitcoin_template_hash: String,
+    pub work_hash: String,
+    pub target: String,
+    pub hashrate_score_delta: String,
+    pub cumulative_score: Option<String>,
+    pub idena_snapshot_id: String,
+    pub idena_snapshot_proof_root: String,
+    pub template_created_at_unix: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AccountingStateRootMaterial {
     version: &'static str,
@@ -76,11 +96,20 @@ struct AccountingStateRootMaterial {
     active_share_score_total: Score,
     hashrate_scores: BTreeMap<String, Score>,
     registrations: BTreeMap<String, MinerRegistration>,
-    snapshot_votes: BTreeMap<SnapshotVoteKey, BTreeSet<String>>,
+    snapshot_votes: BTreeMap<String, BTreeSet<String>>,
     proposed_payout_schedules: BTreeMap<String, PayoutSchedule>,
     withdrawal_requests: BTreeMap<String, WithdrawalRequest>,
     withdrawal_batches: BTreeMap<String, WithdrawalBatch>,
     claim_ledger: ClaimLedger,
+}
+
+fn accounting_snapshot_vote_key(key: &SnapshotVoteKey) -> String {
+    serde_json::to_string(&(
+        key.snapshot_day.as_str(),
+        key.idena_height,
+        key.score_root.to_ascii_lowercase(),
+    ))
+    .expect("snapshot vote key serialization cannot fail")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,9 +248,18 @@ impl SharechainReplayState {
     }
 
     pub fn summary(&self) -> SharechainReplaySummary {
+        let unique_registered_idena_count = self
+            .registrations
+            .values()
+            .map(|registration| registration.idena_address.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let active_idena_participant_count = self.active_idena_addresses().len();
         SharechainReplaySummary {
             applied_message_count: self.applied_message_hashes.len(),
             registered_miner_count: self.registrations.len(),
+            unique_registered_idena_count,
+            active_idena_participant_count,
             accepted_bitcoin_work_template_count: self
                 .accepted_bitcoin_work_template_prefixes
                 .len(),
@@ -277,6 +315,58 @@ impl SharechainReplayState {
         &self.hashrate_scores
     }
 
+    pub fn active_idena_addresses(&self) -> BTreeSet<String> {
+        self.hashrate_scores
+            .iter()
+            .filter(|(_, score)| **score > 0)
+            .filter_map(|(miner_id, _)| self.registrations.get(miner_id))
+            .map(|registration| registration.idena_address.to_ascii_lowercase())
+            .collect()
+    }
+
+    pub fn recent_active_idena_addresses(
+        &self,
+        minimum_template_created_at_unix: i64,
+    ) -> BTreeSet<String> {
+        self.active_share_hashes
+            .iter()
+            .filter_map(|share_hash| self.shares.get(share_hash))
+            .filter(|node| {
+                self.bitcoin_work_templates
+                    .get(&node.share.bitcoin_template_hash)
+                    .is_some_and(|template| {
+                        template.created_at_unix >= minimum_template_created_at_unix
+                    })
+            })
+            .filter_map(|node| {
+                self.registrations
+                    .get(&node.share.miner_id.to_ascii_lowercase())
+            })
+            .map(|registration| registration.idena_address.to_ascii_lowercase())
+            .collect()
+    }
+
+    pub fn unique_snapshot_voter_idena_count(
+        &self,
+        snapshot_day: &str,
+        idena_height: u64,
+        score_root: &str,
+    ) -> usize {
+        let key = SnapshotVoteKey {
+            snapshot_day: snapshot_day.to_string(),
+            idena_height,
+            score_root: score_root.to_ascii_lowercase(),
+        };
+        self.snapshot_votes
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter_map(|miner_id| self.registrations.get(miner_id))
+            .map(|registration| registration.idena_address.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
     pub fn best_share_tip(&self) -> Option<&str> {
         self.best_share_tip.as_deref()
     }
@@ -294,6 +384,49 @@ impl SharechainReplayState {
 
     pub fn active_share_score_total(&self) -> Score {
         self.active_share_score_total
+    }
+
+    pub fn share_summaries(&self) -> Vec<SharechainShareSummary> {
+        let mut summaries = self
+            .shares
+            .iter()
+            .map(|(share_hash, node)| self.share_summary_for_node(share_hash, node))
+            .collect::<Vec<_>>();
+        summaries.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| left.share_hash.cmp(&right.share_hash))
+        });
+        summaries
+    }
+
+    pub fn share_summary(&self, share_hash: &str) -> Option<SharechainShareSummary> {
+        let normalized = share_hash.to_ascii_lowercase();
+        self.shares
+            .get(&normalized)
+            .map(|node| self.share_summary_for_node(&normalized, node))
+    }
+
+    fn share_summary_for_node(&self, share_hash: &str, node: &ShareNode) -> SharechainShareSummary {
+        SharechainShareSummary {
+            share_hash: share_hash.to_string(),
+            height: node.height,
+            active: self.active_share_hashes.contains(share_hash),
+            miner_id: node.share.miner_id.clone(),
+            parent_share_hash: node.parent_share_hash.clone(),
+            bitcoin_template_hash: node.share.bitcoin_template_hash.clone(),
+            work_hash: node.share.work_hash.clone(),
+            target: node.share.target.clone(),
+            hashrate_score_delta: node.share.hashrate_score_delta.to_string(),
+            cumulative_score: node.cumulative_score.map(|score| score.to_string()),
+            idena_snapshot_id: node.share.idena_snapshot_id.clone(),
+            idena_snapshot_proof_root: node.share.idena_snapshot_proof_root.clone(),
+            template_created_at_unix: self
+                .bitcoin_work_templates
+                .get(&node.share.bitcoin_template_hash)
+                .map(|template| template.created_at_unix),
+        }
     }
 
     pub fn claim_ledger(&self) -> &ClaimLedger {
@@ -453,7 +586,11 @@ impl SharechainReplayState {
                     (miner_id.clone(), registration.clone().normalized())
                 })
                 .collect(),
-            snapshot_votes: self.snapshot_votes.clone(),
+            snapshot_votes: self
+                .snapshot_votes
+                .iter()
+                .map(|(key, voters)| (accounting_snapshot_vote_key(key), voters.clone()))
+                .collect(),
             proposed_payout_schedules: self.proposed_payout_schedules.clone(),
             withdrawal_requests: self
                 .withdrawal_requests
@@ -1047,7 +1184,7 @@ impl SharechainReplayState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sharechain::{BitcoinWorkTemplate, MinerRegistration, Share};
+    use crate::sharechain::{BitcoinWorkTemplate, MinerRegistration, Share, SnapshotVote};
     use crate::withdrawal::{build_withdrawal_batch, WithdrawalOutputKind, WithdrawalRequest};
     use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
     use tiny_keccak::{Hasher, Keccak};
@@ -1067,16 +1204,21 @@ mod tests {
         hex::encode(signature.serialize())
     }
 
-    fn signed_registration() -> (MinerRegistration, Keypair) {
-        let mining_keypair = keypair(9);
-        let claim_keypair = keypair(10);
-        let idena_secret = SecretKey::from_slice(&[13; 32]).unwrap();
+    fn signed_registration_for(
+        miner_id: &str,
+        mining_key_byte: u8,
+        claim_key_byte: u8,
+        idena_key_byte: u8,
+    ) -> (MinerRegistration, Keypair) {
+        let mining_keypair = keypair(mining_key_byte);
+        let claim_keypair = keypair(claim_key_byte);
+        let idena_secret = SecretKey::from_slice(&[idena_key_byte; 32]).unwrap();
         let idena_address = idena_address_from_pubkey(&PublicKey::from_secret_key(
             &Secp256k1::new(),
             &idena_secret,
         ));
         let mut registration = MinerRegistration {
-            miner_id: "Miner-A".to_string(),
+            miner_id: miner_id.to_string(),
             idena_address,
             btc_payout_script_hex:
                 "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
@@ -1089,6 +1231,10 @@ mod tests {
             idena_signature(&registration.idena_ownership_challenge(), &idena_secret);
         registration.mining_signature_hex = sign(registration.signing_hash(), &mining_keypair);
         (registration, mining_keypair)
+    }
+
+    fn signed_registration() -> (MinerRegistration, Keypair) {
+        signed_registration_for("Miner-A", 9, 10, 13)
     }
 
     fn signed_withdrawal_request(
@@ -1116,9 +1262,13 @@ mod tests {
     }
 
     fn test_bitcoin_header_hex(nonce: u32) -> String {
+        test_bitcoin_header_hex_with_merkle(nonce, 0x22)
+    }
+
+    fn test_bitcoin_header_hex_with_merkle(nonce: u32, merkle_byte: u8) -> String {
         let mut header = [0u8; 80];
         header[0..4].copy_from_slice(&1u32.to_le_bytes());
-        header[36..68].copy_from_slice(&[0x22; 32]);
+        header[36..68].copy_from_slice(&[merkle_byte; 32]);
         header[68..72].copy_from_slice(&1_231_006_505u32.to_le_bytes());
         header[72..76].copy_from_slice(&0x207f_ffffu32.to_le_bytes());
         header[76..80].copy_from_slice(&nonce.to_le_bytes());
@@ -1157,8 +1307,22 @@ mod tests {
         proof_root: &str,
         parent_hash: &str,
     ) -> Share {
-        for nonce in 0..10_000 {
-            let share = test_share(miner_id, target, nonce, proof_root, parent_hash);
+        mined_test_share_from_nonce(miner_id, target, proof_root, parent_hash, 0, 0x22)
+    }
+
+    fn mined_test_share_from_nonce(
+        miner_id: &str,
+        target: &str,
+        proof_root: &str,
+        parent_hash: &str,
+        start_nonce: u32,
+        merkle_byte: u8,
+    ) -> Share {
+        for nonce in start_nonce..start_nonce.saturating_add(10_000) {
+            let mut share = test_share(miner_id, target, nonce, proof_root, parent_hash);
+            share.bitcoin_header_hex = test_bitcoin_header_hex_with_merkle(nonce, merkle_byte);
+            share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
+            share.work_hash = share.recomputed_work_hash().unwrap();
             if share.work_hash <= target.to_ascii_lowercase() {
                 return share;
             }
@@ -1175,6 +1339,18 @@ mod tests {
         .unwrap();
         template.mining_signature_hex = sign(template.signing_hash(), keypair);
         template
+    }
+
+    fn signed_snapshot_vote(miner_id: &str, keypair: &Keypair) -> SnapshotVote {
+        let mut vote = SnapshotVote {
+            voter_miner_id: miner_id.to_string(),
+            snapshot_day: "2026-07-13".to_string(),
+            idena_height: 1_000,
+            score_root: "44".repeat(32),
+            signature_hex: String::new(),
+        };
+        vote.signature_hex = sign(vote.signing_hash(), keypair);
+        vote
     }
 
     fn apply_registration_and_template(
@@ -1250,6 +1426,78 @@ mod tests {
         let accounts = state.participant_accounts();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].hashrate_score, 1);
+    }
+
+    #[test]
+    fn replay_counts_distinct_active_idena_identities_not_miner_ids() {
+        let (registration_a, mining_keypair_a) = signed_registration_for("Miner-A", 9, 10, 13);
+        let mut share_a = mined_test_share(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"11".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        share_a.mining_signature_hex = sign(share_a.signing_hash(), &mining_keypair_a);
+
+        let (registration_b, mining_keypair_b) = signed_registration_for("Miner-B", 14, 15, 13);
+        let mut share_b = mined_test_share_from_nonce(
+            "Miner-B",
+            MAX_SHARE_TARGET_HEX,
+            &"22".repeat(32),
+            &share_a.share_hash(),
+            100,
+            0x23,
+        );
+        share_b.mining_signature_hex = sign(share_b.signing_hash(), &mining_keypair_b);
+
+        let (registration_c, _) = signed_registration_for("Miner-C", 16, 17, 18);
+        let mut state = SharechainReplayState::default();
+        apply_registration_and_template(&mut state, registration_a, &share_a, &mining_keypair_a);
+        state
+            .apply_message(&SharechainMessage::Share(share_a))
+            .unwrap();
+        apply_registration_and_template(&mut state, registration_b, &share_b, &mining_keypair_b);
+        state
+            .apply_message(&SharechainMessage::Share(share_b))
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration_c))
+            .unwrap();
+
+        let summary = state.summary();
+        assert_eq!(summary.registered_miner_count, 3);
+        assert_eq!(summary.unique_registered_idena_count, 2);
+        assert_eq!(summary.active_idena_participant_count, 1);
+    }
+
+    #[test]
+    fn snapshot_voter_quorum_counts_distinct_idena_identities() {
+        let (registration_a, mining_keypair_a) = signed_registration_for("Miner-A", 9, 10, 13);
+        let (registration_b, mining_keypair_b) = signed_registration_for("Miner-B", 14, 15, 13);
+        let (registration_c, mining_keypair_c) = signed_registration_for("Miner-C", 16, 17, 18);
+        let mut state = SharechainReplayState::default();
+        for registration in [registration_a, registration_b, registration_c] {
+            state
+                .apply_message(&SharechainMessage::MinerRegistration(registration))
+                .unwrap();
+        }
+        for vote in [
+            signed_snapshot_vote("Miner-A", &mining_keypair_a),
+            signed_snapshot_vote("Miner-B", &mining_keypair_b),
+            signed_snapshot_vote("Miner-C", &mining_keypair_c),
+        ] {
+            state
+                .apply_message(&SharechainMessage::SnapshotVote(vote))
+                .unwrap();
+        }
+
+        assert_eq!(
+            state.unique_snapshot_voter_idena_count("2026-07-13", 1_000, &"44".repeat(32)),
+            2
+        );
+        let state_root = state.accounting_state_root();
+        assert_eq!(state_root.len(), 64);
+        assert_eq!(state.accounting_state_root(), state_root);
     }
 
     #[test]
@@ -1343,6 +1591,27 @@ mod tests {
         );
         assert_eq!(state.best_share_height(), Some(2));
         assert_eq!(state.hashrate_scores().get("miner-a"), Some(&2));
+
+        let shares = state.share_summaries();
+        assert_eq!(shares.len(), 3);
+        assert_eq!(shares[0].share_hash, child_a_hash);
+        assert_eq!(shares[0].height, 2);
+        assert!(shares[0].active);
+        assert_eq!(shares[0].hashrate_score_delta, "1");
+        assert_eq!(shares[0].cumulative_score.as_deref(), Some("2"));
+        assert!(shares[0].template_created_at_unix.is_some());
+        let template_time = shares[0].template_created_at_unix.unwrap();
+        assert_eq!(state.recent_active_idena_addresses(template_time).len(), 1);
+        assert!(state
+            .recent_active_idena_addresses(template_time.saturating_add(1))
+            .is_empty());
+        assert_eq!(
+            state
+                .share_summary(&shares[0].share_hash.to_ascii_uppercase())
+                .as_ref()
+                .map(|share| share.share_hash.as_str()),
+            Some(shares[0].share_hash.as_str())
+        );
     }
 
     #[test]
