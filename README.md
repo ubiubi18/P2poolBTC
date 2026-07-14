@@ -368,7 +368,7 @@ credentials:
 
 ```sh
 systemctl status pohw-mainnet-handoff.timer
-cat /var/lib/pohw-p2pool/mainnet-handoff/status.json
+sudo cat /var/lib/pohw-p2pool/mainnet-handoff/status.json
 ```
 
 At the confirmed threshold the controller performs one transaction-like
