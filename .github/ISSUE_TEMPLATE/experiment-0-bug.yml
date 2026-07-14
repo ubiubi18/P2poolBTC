@@ -1,0 +1,109 @@
+name: Experiment 0 bug report
+description: Report a reproducible P2poolBTC testnet problem without publishing secrets.
+title: "[Experiment 0] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is public. Do not include keys, seed phrases, API keys, RPC cookies, wallet data, identity addresses, peer endpoints, IP addresses, hostnames, usernames, `.env` files, raw logs, or unreviewed report archives.
+
+        For a security or privacy vulnerability, stop and use the repository's private vulnerability reporting flow instead.
+  - type: dropdown
+    id: role
+    attributes:
+      label: Participant role
+      options:
+        - Observer
+        - Replay or gossip peer
+        - Idena participant
+        - Miner
+        - Coordinator or host operator
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - Installation or build
+        - Experiment initialization or preflight
+        - Gossip or sharechain replay
+        - Idena registration or snapshot accounting
+        - Fork consensus or peer synchronization
+        - Stratum or mining adapter
+        - Dashboard or explorer
+        - Report bundle or comparison
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Exact Git commit
+      description: Paste only the 40-character public commit ID.
+      placeholder: 0123456789abcdef0123456789abcdef01234567
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04, x86_64
+    validations:
+      required: true
+  - type: input
+    id: time
+    attributes:
+      label: UTC occurrence time
+      placeholder: "2026-07-13T12:34:56Z"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List the smallest commands or actions that reproduce the problem. Replace local paths and endpoints with placeholders.
+      placeholder: |
+        1. Run `<sanitized command>`.
+        2. Wait for `<event>`.
+        3. Observe `<failure>`.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include only a minimal sanitized error excerpt, not a raw log.
+    validations:
+      required: true
+  - type: input
+    id: frequency
+    attributes:
+      label: Frequency
+      placeholder: Every time, 3 of 5 attempts, or once
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Sanitized report evidence
+      description: State whether a reviewed report bundle is attached, or provide only its checksum. Do not upload it if public identifiers would reveal you.
+      placeholder: SHA-256 only, reviewed attachment, or not available
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I searched existing issues and reproduced this on the stated commit where safe.
+          required: true
+        - label: I reviewed this report and every attachment for secrets and identifying data.
+          required: true
+        - label: I stopped fork and mining services if this can affect consensus, payouts, signatures, or network exposure.
+          required: true

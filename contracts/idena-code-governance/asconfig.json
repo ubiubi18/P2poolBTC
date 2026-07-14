@@ -1,0 +1,12 @@
+{
+  "targets": {
+    "release": {
+      "outFile": "build/idena-code-governance.wasm",
+      "textFile": "build/idena-code-governance.wat",
+      "optimizeLevel": 3,
+      "shrinkLevel": 2,
+      "noAssert": false,
+      "disable": ["bulk-memory"]
+    }
+  }
+}

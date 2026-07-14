@@ -1,7 +1,7 @@
 [Unit]
 Description=PoHW P2Pool local Stratum mining adapter
 Wants=network-online.target pohw-gossip-mesh.service
-After=network-online.target pohw-gossip-mesh.service
+After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service
 RequiresMountsFor=/mnt/ssd
 
 [Service]

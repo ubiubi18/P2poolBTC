@@ -1,0 +1,15 @@
+[Unit]
+Description=PoHW Pi compressed RAM swap
+After=systemd-modules-load.service
+Before=idena.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=POHW_ZRAM_SIZE_BYTES=1073741824
+ExecStart=/usr/local/libexec/pohw-zram start
+ExecStop=/usr/local/libexec/pohw-zram stop
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target

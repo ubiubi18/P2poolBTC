@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {
+      "path": "src/optimized.wasm",
+      "sha256": "6f4d45ad077bc0289a01dc70b7dc3eddca7bcd828160a84911a2375bfd84910f"
+    },
+    {
+      "path": "testdata/erc20.wasm",
+      "sha256": "58aba3843b79c76d55ee15031e9d11d367079481c60368e0d625fe45b4aed79d"
+    }
+  ]
+}

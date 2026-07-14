@@ -5,7 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/pohw-experiment-prepare-fork-activation.sh [ENV_FILE] [options]
 
-Derives the shared fork/testnet activation manifest from local Bitcoin Core.
+Derives a new, separate fork/testnet activation manifest from local Bitcoin
+Core. The env file must explicitly set
+POHW_EXPERIMENT_NETWORK_MODE=create-separate.
 
 Options:
   --chain-name NAME              Override POHW_FORK_CHAIN_NAME
@@ -178,6 +180,14 @@ if [[ "${POHW_EXPERIMENT_NO_VALUE_ACK:-}" != "I_UNDERSTAND_NO_VALUE" ]]; then
   exit 1
 fi
 
+NETWORK_MODE="${POHW_EXPERIMENT_NETWORK_MODE:-join-existing}"
+if [[ "$NETWORK_MODE" != "create-separate" ]]; then
+  echo "Refusing to derive a fork activation manifest in $NETWORK_MODE mode." >&2
+  echo "Joining nodes must use compatibility/experiment-0-activation.json." >&2
+  echo "Initialize another network with pohw-experiment-init.sh --separate-experiment." >&2
+  exit 1
+fi
+
 WORKDIR="${POHW_WORKDIR:-$(pwd)}"
 DATADIR="${POHW_DATADIR:-$WORKDIR/.pohw-p2pool}"
 CHAIN_NAME="${CHAIN_NAME:-${POHW_FORK_CHAIN_NAME:-pohw-experiment-0}}"
@@ -185,6 +195,7 @@ LAUNCH_TIMESTAMP_UTC="${LAUNCH_TIMESTAMP_UTC:-${POHW_FORK_LAUNCH_TIMESTAMP_UTC:-
 MANIFEST_OUT="${MANIFEST_OUT:-${POHW_FORK_ACTIVATION_MANIFEST:-$DATADIR/fork-activation.json}}"
 POST_FORK_POW_LIMIT_BITS="${POHW_FORK_POST_FORK_POW_LIMIT_BITS:-207fffff}"
 TARGET_SPACING_SECONDS="${POHW_FORK_TARGET_SPACING_SECONDS:-600}"
+BOOTSTRAP_HANDOFF_HASHRATE_HPS="${POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS:-1000000000000000}"
 TIMESTAMP_SEARCH_WINDOW_BLOCKS="${POHW_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS:-4096}"
 
 if [[ -z "$LAUNCH_TIMESTAMP_UTC" ]]; then
@@ -222,6 +233,7 @@ args=(
   --launch-timestamp-utc "$LAUNCH_TIMESTAMP_UTC"
   --post-fork-pow-limit-bits "$POST_FORK_POW_LIMIT_BITS"
   --target-spacing-seconds "$TARGET_SPACING_SECONDS"
+  --bootstrap-handoff-hashrate-hps "$BOOTSTRAP_HANDOFF_HASHRATE_HPS"
   --timestamp-search-window-blocks "$TIMESTAMP_SEARCH_WINDOW_BLOCKS"
   --rpc-url "${BITCOIN_RPC_URL:-http://127.0.0.1:8332}"
   --manifest-out "$MANIFEST_OUT"

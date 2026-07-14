@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -30,6 +31,10 @@ PRIVATE_MACHINE_DATA_RE = re.compile(
     r")\b|/Users/[A-Za-z0-9._-]+\b|" + NOTEBOOK_HOST_PATTERN,
     re.IGNORECASE,
 )
+
+
+def shell_assignment(name: str, value: object) -> str:
+    return f"{name}={shlex.quote(str(value))}"
 
 
 class ExperimentShellEnvValidationTest(unittest.TestCase):
@@ -84,6 +89,34 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
             f"padding = 'x' * {preflight_padding_bytes}\n"
             "print(json.dumps({'readiness': {'local_node': True}, 'peer_inventory_probe': [], 'padding': padding}))\n"
             "PY\n"
+            "    ;;\n"
+            "  fork-chain-status)\n"
+            "    printf '{\"activation_id\":\"%s\"}\\n' "
+            '"${POHW_FAKE_FORK_ACTIVATION_ID:-0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e}"\n'
+            "    ;;\n"
+            "  *)\n"
+            "    printf '{}\\n'\n"
+            "    ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        return fake
+
+    def fake_p2pool_bin_with_network_data(self, root: Path) -> Path:
+        fake = root / "p2pool-node-network-data"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "case \"${1:-}\" in\n"
+            "  status)\n"
+            "    printf '{\"ok\":true,\"datadir\":\"/private/path\"}\\n'\n"
+            "    ;;\n"
+            "  list-gossip-peers)\n"
+            "    printf '[{\"addr\":\"203.0.113.77:40406\",\"source\":\"seed\"}]\\n'\n"
+            "    ;;\n"
+            "  multinode-preflight)\n"
+            "    printf '{\"readiness\":{},\"peer_book\":[{\"addr\":\"203.0.113.77:40406\"}],\"peer_inventory_probe\":[{\"peer_addr\":\"203.0.113.77:40406\",\"reachable\":false,\"error\":\"connect 203.0.113.77:40406 failed\"}]}\\n'\n"
             "    ;;\n"
             "  *)\n"
             "    printf '{}\\n'\n"
@@ -156,7 +189,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={snapshot_dir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -189,7 +222,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={snapshot_dir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -217,7 +250,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -236,6 +269,142 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("preflight report JSON exceeds", result.stderr)
 
+    def test_preflight_rejects_peerless_ordinary_experiment_join(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-preflight-peerless-join-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
+                        "POHW_FORK_BOOTSTRAP_FIRST_SEED=false",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-preflight.sh",
+                env_file,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires at least one POHW_FORK_PEER_ADDRS entry", result.stderr)
+
+    def test_preflight_allows_explicit_canonical_first_seed_without_peer(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-preflight-first-seed-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            datadir.mkdir()
+            manifest = datadir / "fork-activation.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            fake_bin = self.fake_p2pool_bin(root)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_DATADIR={datadir}",
+                        f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
+                        f"POHW_P2POOL_NODE_BIN={fake_bin}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
+                        "POHW_FORK_BOOTSTRAP_FIRST_SEED=true",
+                        "POHW_MINER_ID=coordinator",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-preflight.sh",
+                env_file,
+            )
+            reports = list((root / "output").glob("experiment-preflight-*"))
+            fork_peer_status = json.loads(
+                (reports[0] / "fork-peer-preflight.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(reports), 1)
+        self.assertTrue(fork_peer_status["bootstrap_first_seed"])
+        self.assertEqual(fork_peer_status["configured_peer_count"], 0)
+        self.assertEqual(fork_peer_status["activation_matching_reachable_peer_count"], 0)
+
+    def test_preflight_requires_activation_matching_reachable_fork_peer(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-preflight-fork-peer-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            datadir.mkdir()
+            manifest = datadir / "fork-activation.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            fake_bin = self.fake_p2pool_bin(root)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_DATADIR={datadir}",
+                        f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
+                        f"POHW_P2POOL_NODE_BIN={fake_bin}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
+                        "POHW_FORK_BOOTSTRAP_FIRST_SEED=false",
+                        "POHW_FORK_PEER_ADDRS=127.0.0.1:40409",
+                        "POHW_MINER_ID=alice",
+                        "",
+                    ]
+                ),
+            )
+
+            accepted = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-preflight.sh",
+                env_file,
+            )
+            accepted_report = next((root / "output").glob("experiment-preflight-*"))
+            fork_peer_status = json.loads(
+                (accepted_report / "fork-peer-preflight.json").read_text(encoding="utf-8")
+            )
+
+            rejected_env_file = root / ".pohw-rejected.env"
+            rejected_env_file.write_text(
+                env_file.read_text(encoding="utf-8").replace(
+                    f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                    f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'rejected-output'}",
+                ),
+                encoding="utf-8",
+            )
+            rejected_env_file.chmod(0o600)
+            rejected_env = dict(os.environ)
+            rejected_env["POHW_FAKE_FORK_ACTIVATION_ID"] = "11" * 32
+            rejected_env["POHW_EXPERIMENT_ENV"] = str(rejected_env_file)
+            rejected = subprocess.run(
+                ["bash", str(REPO_ROOT / "scripts" / "pohw-experiment-preflight.sh")],
+                cwd=REPO_ROOT,
+                env=rejected_env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(fork_peer_status["configured_peer_count"], 1)
+        self.assertEqual(fork_peer_status["activation_matching_reachable_peer_count"], 1)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("could not verify any configured fork peer", rejected.stderr)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_preflight_refuses_symlinked_fork_activation_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-preflight-manifest-link-") as temp:
@@ -249,7 +418,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -283,7 +452,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_FORK_ACTIVATION_MANIFEST={link_parent / 'existing' / 'fork-activation.json'}",
@@ -310,7 +479,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_FORK_ACTIVATION_MANIFEST={manifest_dir}",
@@ -342,7 +511,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_P2POOL_NODE_BIN={fake_bin}",
@@ -375,7 +544,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_P2POOL_NODE_BIN={fake_bin}",
@@ -394,6 +563,33 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Gossip envelope log is too large", result.stderr)
 
+    def test_prepare_fork_activation_refuses_default_join_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-activation-join-guard-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            manifest = root / "fork-activation.json"
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
+                        "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-13T00:52:48Z",
+                        f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-prepare-fork-activation.sh",
+                env_file,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Refusing to derive a fork activation manifest", result.stderr)
+        self.assertFalse(manifest.exists())
+
     def test_prepare_fork_activation_requires_launch_timestamp(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-activation-missing-launch-") as temp:
             root = Path(temp)
@@ -402,8 +598,9 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "",
                     ]
                 ),
@@ -417,6 +614,55 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Launch timestamp is required", result.stderr)
 
+    def test_prepare_fork_activation_forwards_handoff_hashrate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-activation-handoff-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            args_out = root / "args.txt"
+            manifest = root / "state" / "fork-activation.json"
+            fake_bin = root / "p2pool-node"
+            fake_bin.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f"printf '%s\\n' \"$@\" > {args_out!s}\n"
+                "while (( $# )); do\n"
+                "  if [[ \"$1\" == --manifest-out ]]; then\n"
+                "    mkdir -p \"$(dirname \"$2\")\"\n"
+                "    printf '{}\\n' > \"$2\"\n"
+                "    break\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "printf '{}\\n'\n",
+                encoding="utf-8",
+            )
+            fake_bin.chmod(0o700)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
+                        "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
+                        f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
+                        "POHW_FORK_BOOTSTRAP_HANDOFF_HASHRATE_HPS=123456789",
+                        f"POHW_P2POOL_NODE_BIN={fake_bin}",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-prepare-fork-activation.sh",
+                env_file,
+            )
+            args = args_out.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        threshold_index = args.index("--bootstrap-handoff-hashrate-hps")
+        self.assertEqual(args[threshold_index + 1], "123456789")
+
     def test_prepare_fork_activation_refuses_existing_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-activation-existing-") as temp:
             root = Path(temp)
@@ -427,8 +673,9 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
                         f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
                         "",
@@ -457,8 +704,9 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
                         f"POHW_FORK_ACTIVATION_MANIFEST={link_parent / 'fork-activation.json'}",
                         "",
@@ -487,8 +735,9 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
                         f"POHW_FORK_ACTIVATION_MANIFEST={link_parent / 'nested' / 'fork-activation.json'}",
                         "",
@@ -518,8 +767,9 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
                         f"POHW_FORK_ACTIVATION_MANIFEST={link_parent / 'existing' / 'fork-activation.json'}",
                         "",
@@ -535,6 +785,221 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to write through symlinked path component", result.stderr)
         self.assertFalse((existing_child / "fork-activation.json").exists())
+
+    def test_init_defaults_to_existing_experiment_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-existing-network-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "alice",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--datadir",
+                    str(datadir),
+                    "--snapshot-dir",
+                    str(root / "snapshots"),
+                    "--output-root",
+                    str(root / "output"),
+                    "--fork-peer-addrs",
+                    "127.0.0.1:40409",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            manifest = datadir / "fork-activation.json"
+            env_text = env_file.read_text(encoding="utf-8")
+            canonical = REPO_ROOT / "compatibility" / "experiment-0-activation.json"
+            manifest_bytes = manifest.read_bytes()
+            canonical_bytes = canonical.read_bytes()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("POHW_EXPERIMENT_NETWORK_MODE=join-existing", env_text)
+        self.assertIn("POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-13T00:52:48Z", env_text)
+        self.assertIn("POHW_FORK_PEER_ADDRS=127.0.0.1:40409", env_text)
+        self.assertIn("POHW_FORK_BOOTSTRAP_FIRST_SEED=false", env_text)
+        self.assertEqual(manifest_bytes, canonical_bytes)
+
+    def test_init_allows_explicit_canonical_first_seed_without_peer(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-first-seed-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "coordinator",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--datadir",
+                    str(datadir),
+                    "--snapshot-dir",
+                    str(root / "snapshots"),
+                    "--output-root",
+                    str(root / "output"),
+                    "--bootstrap-first-seed",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            env_text = env_file.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("POHW_EXPERIMENT_NETWORK_MODE=join-existing", env_text)
+        self.assertIn("POHW_FORK_BOOTSTRAP_FIRST_SEED=true", env_text)
+        self.assertIn("POHW_FORK_PEER_ADDRS=", env_text)
+
+    def test_init_rejects_first_seed_exception_with_existing_peer(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-first-seed-peer-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "coordinator",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--bootstrap-first-seed",
+                    "--fork-peer-addrs",
+                    "127.0.0.1:40409",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "--bootstrap-first-seed cannot be combined with --fork-peer-addrs",
+            result.stderr,
+        )
+        self.assertFalse(env_file.exists())
+
+    def test_init_separate_experiment_rejects_existing_fork_peers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-separate-peers-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--separate-experiment",
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "alice",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--fork-peer-addrs",
+                    "127.0.0.1:40409",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "--fork-peer-addrs cannot be used while creating a separate experiment",
+            result.stderr,
+        )
+        self.assertFalse(env_file.exists())
+
+    def test_init_requires_explicit_mode_for_separate_experiment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-separate-network-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--separate-experiment",
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "alice",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--datadir",
+                    str(datadir),
+                    "--snapshot-dir",
+                    str(root / "snapshots"),
+                    "--output-root",
+                    str(root / "output"),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            env_text = env_file.read_text(encoding="utf-8")
+            manifest_exists = (datadir / "fork-activation.json").exists()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("POHW_EXPERIMENT_NETWORK_MODE=create-separate", env_text)
+        self.assertFalse(manifest_exists)
+
+    def test_init_join_mode_refuses_different_existing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-init-network-mismatch-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            datadir = root / "datadir"
+            datadir.mkdir()
+            manifest = datadir / "fork-activation.json"
+            manifest.write_text('{"activation_id":"different-network"}\n', encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(INIT_SCRIPT),
+                    "--env-file",
+                    str(env_file),
+                    "--miner-id",
+                    "alice",
+                    "--workdir",
+                    str(REPO_ROOT),
+                    "--datadir",
+                    str(datadir),
+                    "--snapshot-dir",
+                    str(root / "snapshots"),
+                    "--output-root",
+                    str(root / "output"),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            manifest_text = manifest.read_text(encoding="utf-8")
+            env_exists = env_file.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different fork activation manifest", result.stderr)
+        self.assertEqual(manifest_text, '{"activation_id":"different-network"}\n')
+        self.assertFalse(env_exists)
 
     @unittest.skipUnless(os.name == "posix", "POSIX permissions required")
     def test_init_rejects_writable_env_parent(self) -> None:
@@ -705,7 +1170,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         "POHW_MINER_ID=alice",
@@ -754,7 +1219,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={nested_output}",
@@ -830,7 +1295,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={existing_output}",
@@ -898,10 +1363,11 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_MINER_ID=alice",
                         "POHW_IDENA_ADDRESS=0x1111111111111111111111111111111111111111",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -935,7 +1401,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
@@ -974,7 +1440,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
@@ -1002,6 +1468,58 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to reuse existing output directory", result.stderr)
 
+    def test_shareable_report_redacts_network_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-report-network-redaction-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            output_root = root / "output"
+            fake_date_dir = self.fake_date_bin(root)
+            fake_p2pool = self.fake_p2pool_bin_with_network_data(root)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
+                        f"POHW_P2POOL_NODE_BIN={fake_p2pool}",
+                        "POHW_MINER_ID=alice",
+                        "POHW_GOSSIP_BIND_ADDR=203.0.113.77:40406",
+                        "POHW_ADVERTISE_ADDR=203.0.113.77:40406",
+                        "POHW_PEER_ADDRS=203.0.113.77:40406",
+                        "",
+                    ]
+                ),
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_date_dir}{os.pathsep}{env.get('PATH', '')}"
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "scripts" / "pohw-experiment-report.sh"),
+                    str(env_file),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = output_root / "experiment-report-20260704T120000Z"
+            self.assertEqual(report.stat().st_mode & 0o077, 0)
+            published_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in report.rglob("*")
+                if path.is_file()
+            )
+            self.assertNotIn("203.0.113.77", published_text)
+            self.assertIn("gossip_peer_count=1", published_text)
+            self.assertIn('"peer_addr": "<redacted>"', published_text)
+
     def test_snapshot_vote_refuses_existing_output_dir(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-existing-snapshot-vote-") as temp:
             root = Path(temp)
@@ -1019,7 +1537,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        f"POHW_WORKDIR={REPO_ROOT}",
+                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -1087,16 +1605,38 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                             text = extracted.read().decode("utf-8", errors="ignore")
                             if match := PRIVATE_MACHINE_DATA_RE.search(text):
                                 machine_data_hits.append(f"{member.name}: {match.group(0)}")
+                quickstart_text = handle.extractfile(
+                    "experiment0-test/QUICKSTART.md"
+                ).read().decode("utf-8")
+                canonical_activation = json.load(
+                    handle.extractfile(
+                        "experiment0-test/compatibility/experiment-0-activation.json"
+                    )
+                )
                 manifest = json.load(handle.extractfile("experiment0-test/MANIFEST.json"))
                 sha_text = handle.extractfile("experiment0-test/SHA256SUMS").read().decode("utf-8")
 
         self.assertEqual([], machine_data_hits)
         required = {
+            "experiment0-test/.github/ISSUE_TEMPLATE/experiment-0-bug.yml",
+            "experiment0-test/BETA-TESTING.md",
+            "experiment0-test/COMMUNITY-README.md",
             "experiment0-test/QUICKSTART.md",
+            "experiment0-test/LICENSE",
+            "experiment0-test/SECURITY.md",
             "experiment0-test/MANIFEST.json",
             "experiment0-test/SHA256SUMS",
             "experiment0-test/EXPERIMENT-0.md",
+            "experiment0-test/compatibility/experiment-0-activation.json",
+            "experiment0-test/compatibility/explorer-stack-lock.json",
+            "experiment0-test/compatibility/stack-lock.json",
+            "experiment0-test/deploy/caddy/pohw-explorer.Caddyfile.example",
+            "experiment0-test/deploy/pohw-bitcoin-indexer.env.example",
+            "experiment0-test/deploy/pohw-explorer-host.env.example",
             "experiment0-test/deploy/pohw-experiment.env.example",
+            "experiment0-test/docs/assets/dashboard-overview.png",
+            "experiment0-test/docs/explorer.md",
+            "experiment0-test/docs/fork-chain-node.md",
             "experiment0-test/scripts/pohw-experiment-init.sh",
             "experiment0-test/scripts/pohw-experiment-package.sh",
             "experiment0-test/scripts/pohw-experiment-prepare-fork-activation.sh",
@@ -1107,6 +1647,12 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertTrue(required.issubset(set(names)))
         self.assertEqual(manifest["package"], "experiment0-test")
         self.assertIn("scripts/pohw-experiment-init.sh", manifest["files"])
+        self.assertEqual(
+            canonical_activation["activation_id"],
+            "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e",
+        )
+        self.assertIn("Five-Step Fast Path", quickstart_text)
+        self.assertIn("A different activation ID is a different experiment", quickstart_text)
         self.assertIn("QUICKSTART.md", sha_text)
         self.assertIn("MANIFEST.json", sha_text)
 
@@ -1136,6 +1682,27 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 self.assertFalse(any(fragment in name for fragment in forbidden_fragments))
                 self.assertFalse(name.endswith(forbidden_suffixes))
                 self.assertNotIn("/.env", name)
+
+    def test_manual_launch_gate_is_fail_closed_for_fork_and_mining(self) -> None:
+        installer = (REPO_ROOT / "scripts" / "pohw-install-manual-launch-gate.sh").read_text(
+            encoding="utf-8"
+        )
+        fork_dropin = (
+            REPO_ROOT / "deploy" / "systemd" / "pohw-fork-chain-manual-approval.conf"
+        ).read_text(encoding="utf-8")
+        mining_dropin = (
+            REPO_ROOT / "deploy" / "systemd" / "pohw-mining-manual-approval.conf"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "ConditionPathExists=/etc/pohw/enable-experiment-0-fork", fork_dropin
+        )
+        self.assertIn(
+            "ConditionPathExists=/etc/pohw/enable-experiment-0-mining", mining_dropin
+        )
+        self.assertIn('rm -f "$FORK_MARKER" "$MINING_MARKER"', installer)
+        self.assertIn('systemctl start "$FORK_UNIT" "$MINING_UNIT"', installer)
+        self.assertIn('systemctl is-active --quiet "$unit"', installer)
 
     def test_experiment_package_refuses_existing_archive(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-package-existing-") as temp:

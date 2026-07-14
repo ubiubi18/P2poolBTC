@@ -1,0 +1,139 @@
+# Known Limitations
+
+This implementation is safe only for local, no-value testing.
+
+- Nothing is deployed. There is no authorized contract address, initial
+  ecosystem CID, genesis CID, activation block, release, or public testnet.
+- The exact lock-bound contract now deploys and executes through idena-go's
+  production `WasmVM` with the pinned native binding. Two independent
+  in-memory runs match byte-for-byte and enforce measured ceilings for deploy,
+  query, storage, attached-payment, stake-scheduling, and activation paths. The
+  test discovered and removed unsupported bulk-memory instructions. This is
+  still not an exhaustive maximum-state gas proof, cross-architecture run, or
+  external runtime audit.
+- The contract parameter CID is compiled in and exact, but changing parameters
+  requires a separately reviewed contract migration proposal. There is no
+  upgradeable admin proxy.
+- Evidence is registered permissionlessly in a fixed bonded review round for
+  one parent/candidate/patch tuple. Anyone may freeze the round after its
+  deadline, and roots are derived from all registered CIDs; proposal creation
+  cannot curate a favorable subset. Both the Rust lifecycle and WASM contract
+  recompute bounded raw evidence CIDs for false agent test, builder test, and
+  availability claims. The WASM parser deliberately accepts only
+  `{"passed":false}` and `{"available":false}`. General malformed-content and
+  transient IPFS outage proofs are not fully expressible on-chain. The host
+  cannot fetch IPFS, and global unavailability has no simple trustless proof.
+- A permissionless review window does not prove universal notice, network
+  access, or freedom from censorship. Operators still need public discovery,
+  mirrors, and enough review time. The prototype caps each evidence class at
+  256 entries and allows at most two agent and two build attestations from one
+  eligible identity per round; availability already permits one per owner.
+  Saturating an agent or build class therefore requires at least 128 eligible,
+  bonded identities. That materially raises the cost but does not eliminate a
+  coordinated identity-farming or censorship attack, so public-testnet
+  parameters still require adversarial capacity testing.
+- Model family, runtime family, architecture, provider, and pin-operator labels
+  are authenticated to the submitting Idena identity but remain self-asserted.
+  Diversity counts therefore resist duplicate identities, not coordinated
+  operators lying about infrastructure. External attestation or measured
+  execution is still required before these labels can be treated as strong
+  independence evidence.
+- Signed pinning attestations reduce availability risk but cannot guarantee
+  permanent retrieval. The opening pinset covers candidate and proposal
+  content, and the final gate additionally requires every accepted agent/build
+  attestation and referenced policy, result, finding, toolchain, SBOM, and
+  artifact CID. An availability attestation's own CID is necessarily excluded
+  from its recursively described set; its canonical bytes are instead checked
+  directly at submission. No finite attestation proves future persistence.
+- The current idena-go database does not retain enough direct author-to-final-
+  qualification history for an authenticated pre-integration replay. The
+  offline `governance-reindex` command therefore fails closed instead of
+  trusting operator-supplied JSONL. The live index begins at the earliest
+  verifiable post-integration validation ceremony. Missing pre-boundary
+  reputation stays unknown and is never approximated with age or validation
+  flags.
+- Canonical source block hashes prove that a locally persisted record refers to
+  the canonical chain at those heights; on the legacy chain they do not commit
+  the record's author-to-final-qualification mapping. The index now adds a
+  domain-separated commitment over every ordered author/outcome record, so any
+  payload difference is visible, but a modified local index can still retain
+  valid block hashes. The contract therefore requires three distinct eligible
+  operator attestations over the exact snapshot, replay commitment, source
+  boundary, and implementation. One bad first writer cannot reserve a root,
+  and two conflicting quorums fail closed. Correlated or colluding operators
+  remain a trust assumption until a separately activated governance fork
+  commits the counters in consensus.
+- The read-only governance RPC namespace is disabled from the default HTTP
+  module list and must be enabled explicitly. Its proof cache avoids rebuilding
+  the full Merkle tree per request, but large snapshots still consume memory.
+  Snapshots now fail closed above 262,144 eligible leaves or 65,537 replay
+  anchors; these are format safety ceilings, not claims about future network
+  scale.
+- The experimental contract stores at most 256 stake lots and 256 finalized
+  withdrawal/slash checkpoints per account. Every outstanding slashable bond
+  reserves checkpoint capacity, so voluntary withdrawals cannot make a later
+  slash fail. There is no reviewed compaction protocol; reaching the bound
+  halts new bonds or voluntary history growth rather than discarding snapshot
+  history.
+- Consensus-maintained governance counters and new host functions are not
+  implemented. Any such work belongs only to the disabled governance-fork
+  profile.
+- Source CIDs for the five legacy-pinned components are exact, but public CAR
+  replication and independent availability attestations have not been run.
+- The contract artifact in the fork lock was built from an uncommitted local
+  prototype. It is explicitly unauthorized and not a release.
+- Exact locked Rust 1.97.0 and Go 1.26.5 builds must be performed by attested
+  clean-room builders. A local development build with different versions is
+  non-attested and its tool versions must be reported.
+- `pohw-governance-runtime-gate.py --require-locked-sources` intentionally
+  fails while the fork lock identifies uncommitted prototype source or any
+  component is dirty/revision-mismatched. The local production-runtime pass is
+  not a clean-room or independent-builder attestation.
+- A deterministic build-evidence generator and SBOM workflow exist and have
+  local fixture coverage. No independent clean-room builder attestations,
+  reviewer attestations, public evidence replication, or external security
+  audit exist yet.
+- Desktop renderer output can be deterministic, but signed/notarized installers
+  may retain platform-specific nondeterminism and centralized signing
+  constraints.
+- The existing desktop updater remains present for rollback. The experimental
+  DAO path verifies contract-executed proposal state, canonical artifact pins,
+  build roots, CIDs, SHA-256 digests, and a local anti-replay high-water mark,
+  then fetches an artifact after explicit confirmation. It does not yet hand
+  the artifact to a privileged installer.
+- Experimental desktop release retrieval currently buffers each artifact in
+  the renderer verification path and therefore rejects artifacts larger than
+  512 MiB. A future privileged installer should stream to a private temporary
+  file while incrementally verifying CID and SHA-256 before raising this cap.
+- The desktop anti-replay sequence is local persistent state. Resetting or
+  tampering with the application data directory can erase that high-water
+  mark; semantic-version downgrade checks and exact contract authorization
+  still apply, but durable rollback resistance ultimately needs a contract-
+  committed release sequence or equivalent authenticated monotonic state.
+- Dashboard proposal counters are cross-checked against read-only contract
+  state before rendering, and the node now recomputes every displayed gate
+  from bounded vote and attestation evidence. Diff summaries and affected-
+  repository labels remain local index metadata until the desktop also decodes
+  the full proposal CID.
+- The Rust lifecycle engine emulates WASM transaction rollback by snapshotting
+  state around fallible balance, vote, settlement, and execution transitions.
+  This is appropriate for tests and simulation but can be expensive at maximum
+  review-round size; it is not the production contract storage engine.
+- Concave square-root stake weight does not eliminate stake splitting, identity
+  farming, whale coordination, bribery, collusion, or low participation.
+- AI diversity labels cannot prove independent ownership. AI agents are not
+  correctness oracles and cannot execute proposals. Prompt injection,
+  provider compromise, and collusion remain residual risks even when the
+  content-addressed review record is structurally valid.
+- The lifecycle E2E uses a deterministic local content-addressed store, and the
+  opt-in Docker smoke test imports the same verified CAR into two disposable
+  Kubo 0.42.0 sidecars, fetches through their gateway path, re-verifies the CAR,
+  and checks it out. This proves local sidecar interoperability only; it is not
+  a public-swarm persistence test or an independent availability attestation.
+- Visual browser automation of the Electron governance page remains limited by
+  preload and live-provider dependencies. Renderer build and unit checks do not
+  replace a packaged Electron smoke test.
+
+GitHub is optional infrastructure, not canonical authority. IPFS supplies
+content addressing, not governance. No lead developer, maintainer key, AI
+agent, builder, staker, or identity class can bypass all four gates.

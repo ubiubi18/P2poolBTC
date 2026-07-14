@@ -1,6 +1,10 @@
+mod bitcoin_explorer_index;
 mod bitcoin_rpc;
 mod dashboard_api;
+mod explorer_api;
+mod fork_chain;
 mod frost_signer_daemon;
+mod governance_api;
 mod local_node;
 mod mining_adapter;
 mod p2p_node;
@@ -16,7 +20,10 @@ use pohw_core::dkg_transport::{
     decrypt_round2_package, dkg_package_hash, encrypt_round2_package, DkgMessageBody,
     DkgMessageEnvelope, DkgPeerIdentity, DkgRound1BroadcastBody, DkgSessionId,
 };
-use pohw_core::fork::{select_fork_point, ForkActivationManifest, ForkConfig, MainnetBlockRef};
+use pohw_core::fork::{
+    select_fork_point, ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
+    MainnetBlockRef, DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS,
+};
 use pohw_core::gossip::GossipEnvelope;
 use pohw_core::payout::{ParticipantAccount, PayoutSchedule};
 use pohw_core::sharechain::{
@@ -44,6 +51,7 @@ use pohw_core::{DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -59,6 +67,10 @@ const MAX_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS: u64 = 50_000;
 const MAX_OPTIONAL_SECRET_BYTES: usize = 512;
 const MAX_OPTIONAL_SECRET_FILE_BYTES: u64 = MAX_OPTIONAL_SECRET_BYTES as u64 + 2;
 const MAX_SECRET_KEY_FILE_BYTES: u64 = 68;
+pub(crate) const MAINNET_HANDOFF_PARTICIPANT_THRESHOLD: usize = 20;
+pub(crate) const MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS: u64 = 2;
+pub(crate) const MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS: usize = 3;
+pub(crate) const MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Parser)]
 #[command(name = "p2pool-node")]
@@ -82,6 +94,42 @@ enum Command {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
     },
+    MainnetHandoffEvidence {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS)]
+        max_snapshot_age_days: u64,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS)]
+        min_snapshot_voters: usize,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS)]
+        max_share_age_seconds: u64,
+    },
+    RunForkChainNode {
+        #[arg(long, default_value = ".pohw-p2pool/fork-chain")]
+        datadir: PathBuf,
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_bind_addr: SocketAddr,
+        #[arg(long)]
+        p2p_bind_addr: Option<SocketAddr>,
+        #[arg(long)]
+        allow_non_loopback_fork_p2p: bool,
+        #[arg(long = "peer-addr")]
+        peer_addrs: Vec<SocketAddr>,
+        #[arg(long, default_value_t = 5)]
+        sync_interval_seconds: u64,
+    },
+    ForkChainStatus {
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_addr: SocketAddr,
+        #[arg(long)]
+        allow_non_loopback_fork_rpc: bool,
+    },
     PrepareForkActivation {
         #[arg(long)]
         chain_name: String,
@@ -91,6 +139,8 @@ enum Command {
         post_fork_pow_limit_bits: String,
         #[arg(long, default_value_t = 600)]
         target_spacing_seconds: u64,
+        #[arg(long, default_value_t = DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS)]
+        bootstrap_handoff_hashrate_hps: u64,
         #[arg(long)]
         inherited_utxo_spending_enabled: bool,
         #[arg(long, default_value_t = 4096)]
@@ -233,6 +283,18 @@ enum Command {
         idena_rpc_url: String,
         #[arg(long, env = "IDENA_API_KEY_FILE")]
         idena_api_key_file: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_PUBLIC")]
+        public_explorer: bool,
+        #[arg(long, env = "POHW_EXPLORER_FORK_CHAIN_RPC_ADDR")]
+        explorer_fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long, env = "POHW_FORK_ACTIVATION_MANIFEST")]
+        explorer_fork_activation_manifest: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_BITCOIN_INDEX_URL")]
+        explorer_bitcoin_index_url: Option<String>,
+        #[arg(long, env = "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX")]
+        explorer_allow_remote_bitcoin_index: bool,
+        #[arg(long, env = "POHW_GOVERNANCE_DASHBOARD_STATE_FILE")]
+        governance_dashboard_state_file: Option<PathBuf>,
     },
     RunGossipMesh {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -285,6 +347,10 @@ enum Command {
         max_peers_per_ip_group: usize,
         #[arg(long)]
         admit_peer_work_templates: bool,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -556,7 +622,11 @@ enum Command {
         #[arg(long)]
         miner_id: String,
         #[arg(long)]
-        job_file: PathBuf,
+        job_file: Option<PathBuf>,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long)]
         share_target: Option<String>,
         #[arg(long)]
@@ -571,6 +641,8 @@ enum Command {
         stratum_password_file: Option<PathBuf>,
         #[arg(long)]
         block_candidate_dir: Option<PathBuf>,
+        #[arg(long)]
+        payout_candidate_dir: Option<PathBuf>,
         #[arg(long = "peer-addr")]
         peer_addrs: Vec<SocketAddr>,
         #[arg(long, default_value_t = mining_adapter::default_stratum_difficulty())]
@@ -588,9 +660,17 @@ enum Command {
         #[arg(long)]
         auto_submit_blocks: bool,
         #[arg(long)]
+        allow_mainnet_submit: bool,
+        #[arg(long)]
         payout_schedule_file: Option<PathBuf>,
         #[arg(long)]
         pohw_commitment_file: Option<PathBuf>,
+        #[arg(long)]
+        derive_pohw_payouts_from_state: bool,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS)]
+        derive_pohw_min_snapshot_voters: usize,
+        #[arg(long)]
+        snapshot_dir: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -644,6 +724,44 @@ enum Command {
         #[arg(long, default_value_t = mining_adapter::default_extranonce2_size())]
         extranonce2_size: usize,
     },
+    BuildDynamicPohwStratumJobRpc {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long)]
+        miner_id: String,
+        #[arg(long)]
+        pohw_commitment_file: PathBuf,
+        #[arg(long)]
+        job_out: PathBuf,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
+        rpc_url: String,
+        #[arg(long)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "BITCOIN_RPC_USER")]
+        rpc_user: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_PASSWORD")]
+        rpc_password: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
+        rpc_cookie_file: Option<PathBuf>,
+        #[arg(long, default_value_t = mining_adapter::default_extranonce2_size())]
+        extranonce2_size: usize,
+    },
+    BitcoinMiningReadiness {
+        #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
+        rpc_url: String,
+        #[arg(long)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "BITCOIN_RPC_USER")]
+        rpc_user: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_PASSWORD")]
+        rpc_password: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
+        rpc_cookie_file: Option<PathBuf>,
+    },
     BuildStratumBlockCandidate {
         #[arg(long)]
         job_file: PathBuf,
@@ -679,6 +797,14 @@ enum Command {
         rpc_password: Option<String>,
         #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
         rpc_cookie_file: Option<PathBuf>,
+    },
+    SubmitForkChainBlockCandidate {
+        #[arg(long)]
+        candidate_file: PathBuf,
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_addr: SocketAddr,
     },
     CreateWithdrawalRequest {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -749,6 +875,10 @@ enum Command {
         peer_addr: SocketAddr,
         #[arg(long, default_value_t = 256)]
         limit: usize,
+        #[arg(long)]
+        fork_chain_rpc_addr: Option<SocketAddr>,
+        #[arg(long)]
+        fork_chain_activation_manifest: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -1354,11 +1484,121 @@ async fn main() -> Result<()> {
             let status = local_node::local_node_status(&datadir)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
         }
+        Command::MainnetHandoffEvidence {
+            datadir,
+            snapshot_dir,
+            max_snapshot_age_days,
+            min_snapshot_voters,
+            max_share_age_seconds,
+        } => {
+            if min_snapshot_voters == 0 {
+                bail!("--min-snapshot-voters must be greater than zero");
+            }
+            let state = local_node::replay_state(&datadir)?;
+            let snapshot_status = local_node::latest_verified_snapshot(&snapshot_dir)?;
+            let verified = snapshot_status
+                .latest
+                .context("no verified Idena snapshot is available for mainnet handoff")?;
+            let today = Utc::now().date_naive();
+            let snapshot_age_days = (today - verified.snapshot.snapshot_day).num_days();
+            if snapshot_age_days < 0 {
+                bail!("latest verified Idena snapshot is dated in the future");
+            }
+            if u64::try_from(snapshot_age_days).unwrap_or(u64::MAX) > max_snapshot_age_days {
+                bail!(
+                    "latest verified Idena snapshot is too old for mainnet handoff: {} days",
+                    snapshot_age_days
+                );
+            }
+            let eligible_idena_addresses = verified
+                .snapshot
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.is_block_eligible())
+                .map(|leaf| leaf.idena_address.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if max_share_age_seconds == 0 || max_share_age_seconds > i64::MAX as u64 {
+                bail!("--max-share-age-seconds must be between 1 and {}", i64::MAX);
+            }
+            let now_unix = Utc::now().timestamp();
+            let minimum_created_at = now_unix
+                .checked_sub(
+                    i64::try_from(max_share_age_seconds).context("share age does not fit i64")?,
+                )
+                .context("share freshness boundary underflow")?;
+            let active_idena_addresses = state.recent_active_idena_addresses(minimum_created_at);
+            let eligible_active_idena_participant_count = active_idena_addresses
+                .intersection(&eligible_idena_addresses)
+                .count();
+            let snapshot_day = verified.snapshot.snapshot_day.to_string();
+            let snapshot_voter_idena_count = state.unique_snapshot_voter_idena_count(
+                &snapshot_day,
+                verified.snapshot.idena_height,
+                &verified.snapshot.score_root,
+            );
+            if snapshot_voter_idena_count < min_snapshot_voters {
+                bail!(
+                    "verified Idena snapshot has {} distinct identity voters; {} required",
+                    snapshot_voter_idena_count,
+                    min_snapshot_voters
+                );
+            }
+            let summary = state.summary();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "registered_miner_count": summary.registered_miner_count,
+                    "unique_registered_idena_count": summary.unique_registered_idena_count,
+                    "active_idena_participant_count": summary.active_idena_participant_count,
+                    "eligible_active_idena_participant_count": eligible_active_idena_participant_count,
+                    "eligible_snapshot_identity_count": eligible_idena_addresses.len(),
+                    "snapshot_day": snapshot_day,
+                    "snapshot_age_days": snapshot_age_days,
+                    "snapshot_voter_idena_count": snapshot_voter_idena_count,
+                    "max_share_age_seconds": max_share_age_seconds,
+                    "last_message_hash": summary.last_message_hash,
+                }))?
+            );
+        }
+        Command::RunForkChainNode {
+            datadir,
+            activation_manifest,
+            rpc_bind_addr,
+            p2p_bind_addr,
+            allow_non_loopback_fork_p2p,
+            peer_addrs,
+            sync_interval_seconds,
+        } => {
+            fork_chain::run_fork_chain_node(fork_chain::ForkChainNodeConfig {
+                datadir,
+                activation_manifest,
+                rpc_bind_addr,
+                p2p_bind_addr,
+                allow_non_loopback_p2p: allow_non_loopback_fork_p2p,
+                peer_addrs,
+                sync_interval_seconds,
+            })
+            .await?;
+        }
+        Command::ForkChainStatus {
+            activation_manifest,
+            rpc_addr,
+            allow_non_loopback_fork_rpc,
+        } => {
+            let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let client = fork_chain::ForkChainClient::new(
+                rpc_addr,
+                manifest.activation_id,
+                allow_non_loopback_fork_rpc,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&client.status().await?)?);
+        }
         Command::PrepareForkActivation {
             chain_name,
             launch_timestamp_utc,
             post_fork_pow_limit_bits,
             target_spacing_seconds,
+            bootstrap_handoff_hashrate_hps,
             inherited_utxo_spending_enabled,
             timestamp_search_window_blocks,
             allow_non_mainnet_rpc,
@@ -1388,6 +1628,7 @@ async fn main() -> Result<()> {
                     inherited_utxo_spending_enabled,
                     post_fork_pow_limit_bits,
                     target_spacing_seconds,
+                    bootstrap_handoff_hashrate_hps,
                     timestamp_search_window_blocks,
                     allow_non_mainnet_rpc,
                 },
@@ -1556,6 +1797,12 @@ async fn main() -> Result<()> {
             bitcoin_rpc_cookie_file,
             idena_rpc_url,
             idena_api_key_file,
+            public_explorer,
+            explorer_fork_chain_rpc_addr,
+            explorer_fork_activation_manifest,
+            explorer_bitcoin_index_url,
+            explorer_allow_remote_bitcoin_index,
+            governance_dashboard_state_file,
         } => {
             let bitcoin_rpc_configured = enable_bitcoin_rpc
                 || bitcoin_rpc_user.is_some()
@@ -1575,6 +1822,32 @@ async fn main() -> Result<()> {
                 dashboard_api_token_file,
                 "dashboard API token",
             )?;
+            let fork_chain_client = match (
+                explorer_fork_chain_rpc_addr,
+                explorer_fork_activation_manifest,
+            ) {
+                (Some(addr), Some(manifest_path)) => {
+                    let manifest = fork_chain::read_activation_manifest(&manifest_path)?;
+                    Some(fork_chain::ForkChainClient::new(
+                        addr,
+                        manifest.activation_id,
+                        false,
+                    )?)
+                }
+                (None, None) => None,
+                _ => bail!(
+                    "--explorer-fork-chain-rpc-addr and --explorer-fork-activation-manifest must be supplied together"
+                ),
+            };
+            let bitcoin_index_client = explorer_bitcoin_index_url
+                .as_deref()
+                .map(|url| {
+                    bitcoin_explorer_index::BitcoinExplorerIndexClient::new(
+                        url,
+                        explorer_allow_remote_bitcoin_index,
+                    )
+                })
+                .transpose()?;
             dashboard_api::run_dashboard_api_server(dashboard_api::DashboardApiConfig {
                 datadir,
                 snapshot_dir,
@@ -1597,6 +1870,10 @@ async fn main() -> Result<()> {
                 bitcoin_rpc_auth,
                 idena_rpc_url: idena_api_key_file.as_ref().map(|_| idena_rpc_url),
                 idena_api_key_file,
+                public_explorer,
+                fork_chain_client,
+                bitcoin_index_client,
+                governance_state_file: governance_dashboard_state_file,
             })
             .await?;
         }
@@ -1626,6 +1903,8 @@ async fn main() -> Result<()> {
             ban_seconds,
             max_peers_per_ip_group,
             admit_peer_work_templates,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -1641,15 +1920,32 @@ async fn main() -> Result<()> {
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
             }
+            let fork_chain_client = fork_chain_client_from_options(
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            )?;
+            if fork_chain_client.is_some()
+                && (expected_header_merkle_root_hex.is_some()
+                    || allow_unverified_merkle_root
+                    || allow_mutable_time)
+            {
+                bail!("Bitcoin template-policy flags cannot be used with fork-chain admission");
+            }
             let work_template_admission = if admit_peer_work_templates {
-                Some(p2p_node::WorkTemplateAdmissionConfig {
-                    bitcoin_rpc_client: bitcoin_rpc_client(
+                let bitcoin_rpc_client = if fork_chain_client.is_none() {
+                    Some(bitcoin_rpc_client(
                         rpc_url,
                         rpc_user,
                         rpc_password,
                         rpc_cookie_file,
                         allow_remote_rpc,
-                    )?,
+                    )?)
+                } else {
+                    None
+                };
+                Some(p2p_node::WorkTemplateAdmissionConfig {
+                    bitcoin_rpc_client,
+                    fork_chain_client,
                     validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
                         allow_mutable_time,
                         max_time_drift_seconds: max_template_time_drift_seconds,
@@ -1658,6 +1954,9 @@ async fn main() -> Result<()> {
                     },
                 })
             } else {
+                if fork_chain_client.is_some() {
+                    bail!("fork-chain admission options require --admit-peer-work-templates");
+                }
                 None
             };
             p2p_node::run_gossip_mesh(
@@ -2107,6 +2406,8 @@ async fn main() -> Result<()> {
             allow_example_mining_job,
             miner_id,
             job_file,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             share_target,
             idena_snapshot_id,
             idena_snapshot_proof_root,
@@ -2114,6 +2415,7 @@ async fn main() -> Result<()> {
             node_secret_key_file,
             stratum_password_file,
             block_candidate_dir,
+            payout_candidate_dir,
             peer_addrs,
             stratum_difficulty,
             extranonce2_size,
@@ -2122,8 +2424,12 @@ async fn main() -> Result<()> {
             refresh_job_from_rpc,
             job_refresh_interval_seconds,
             auto_submit_blocks,
+            allow_mainnet_submit,
             payout_schedule_file,
             pohw_commitment_file,
+            derive_pohw_payouts_from_state,
+            derive_pohw_min_snapshot_voters,
+            snapshot_dir,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -2131,7 +2437,29 @@ async fn main() -> Result<()> {
             rpc_cookie_file,
             append,
         } => {
-            let bitcoin_rpc_client = if refresh_job_from_rpc || auto_submit_blocks {
+            let fork_chain_client = match (
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            ) {
+                (Some(addr), Some(path)) => {
+                    let manifest = fork_chain::read_activation_manifest(&path)?;
+                    Some(fork_chain::ForkChainClient::new(
+                        addr,
+                        manifest.activation_id,
+                        false,
+                    )?)
+                }
+                (None, None) => None,
+                _ => bail!(
+                    "--fork-chain-rpc-addr and --fork-chain-activation-manifest must be supplied together"
+                ),
+            };
+            if fork_chain_client.is_some() && refresh_job_from_rpc {
+                bail!("--fork-chain-rpc-addr cannot be combined with --refresh-job-from-rpc");
+            }
+            let bitcoin_rpc_client = if fork_chain_client.is_none()
+                && (refresh_job_from_rpc || auto_submit_blocks || derive_pohw_payouts_from_state)
+            {
                 Some(bitcoin_rpc_client(
                     rpc_url,
                     rpc_user,
@@ -2142,16 +2470,61 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            let (payout_schedule, pohw_commitment) =
-                match (payout_schedule_file, pohw_commitment_file) {
-                    (Some(schedule_path), Some(commitment_path)) => (
-                        Some(read_payout_schedule_file(&schedule_path)?),
-                        Some(read_pohw_commitment_file(&commitment_path)?),
-                    ),
-                    (None, None) => (None, None),
-                    _ => bail!(
+            if auto_submit_blocks {
+                if let Some(client) = bitcoin_rpc_client.as_ref() {
+                    let chain_info = client.get_blockchain_info().await?;
+                    ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
+                    if chain_info.chain.eq_ignore_ascii_case("main") {
+                        ensure_bitcoin_mining_ready(&chain_info)?;
+                    }
+                }
+            }
+            let (payout_schedule, pohw_commitment, dynamic_pohw_payout) =
+                if derive_pohw_payouts_from_state {
+                    if payout_schedule_file.is_some() {
+                        bail!("--derive-pohw-payouts-from-state cannot be combined with --payout-schedule-file");
+                    }
+                    if !refresh_job_from_rpc && fork_chain_client.is_none() {
+                        bail!("--derive-pohw-payouts-from-state requires --refresh-job-from-rpc or --fork-chain-rpc-addr");
+                    }
+                    if fork_chain_client.is_none()
+                        && derive_pohw_min_snapshot_voters < MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+                    {
+                        bail!(
+                            "Bitcoin RPC dynamic payouts require at least {} snapshot voters",
+                            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+                        );
+                    }
+                    let commitment_path = pohw_commitment_file.context(
+                        "--derive-pohw-payouts-from-state requires --pohw-commitment-file",
+                    )?;
+                    let snapshot_dir = snapshot_dir
+                        .context("--derive-pohw-payouts-from-state requires --snapshot-dir")?;
+                    (
+                        None,
+                        None,
+                        Some(mining_adapter::DynamicPohwPayoutConfig {
+                            snapshot_dir,
+                            commitment_template: read_pohw_commitment_file(&commitment_path)?,
+                            min_snapshot_voters: derive_pohw_min_snapshot_voters,
+                        }),
+                    )
+                } else {
+                    if snapshot_dir.is_some() {
+                        bail!("--snapshot-dir requires --derive-pohw-payouts-from-state");
+                    }
+                    let (schedule, commitment) = match (payout_schedule_file, pohw_commitment_file)
+                    {
+                        (Some(schedule_path), Some(commitment_path)) => (
+                            Some(read_payout_schedule_file(&schedule_path)?),
+                            Some(read_pohw_commitment_file(&commitment_path)?),
+                        ),
+                        (None, None) => (None, None),
+                        _ => bail!(
                     "--payout-schedule-file and --pohw-commitment-file must be supplied together"
-                ),
+                    ),
+                    };
+                    (schedule, commitment, None)
                 };
             mining_adapter::run_mining_adapter(mining_adapter::MiningAdapterConfig {
                 datadir,
@@ -2167,6 +2540,7 @@ async fn main() -> Result<()> {
                 node_secret_key_file,
                 stratum_password_file,
                 block_candidate_dir,
+                payout_candidate_dir,
                 peer_addrs,
                 stratum_difficulty,
                 extranonce2_size,
@@ -2174,11 +2548,13 @@ async fn main() -> Result<()> {
                 idle_timeout_seconds: stratum_idle_timeout_seconds,
                 append,
                 bitcoin_rpc_client,
+                fork_chain_client,
                 refresh_job_from_rpc,
                 job_refresh_interval_seconds,
                 auto_submit_blocks,
                 payout_schedule,
                 pohw_commitment,
+                dynamic_pohw_payout,
             })
             .await?;
         }
@@ -2272,6 +2648,94 @@ async fn main() -> Result<()> {
                 }))?
             );
         }
+        Command::BuildDynamicPohwStratumJobRpc {
+            datadir,
+            snapshot_dir,
+            miner_id,
+            pohw_commitment_file,
+            job_out,
+            replace,
+            rpc_url,
+            allow_remote_rpc,
+            rpc_user,
+            rpc_password,
+            rpc_cookie_file,
+            extranonce2_size,
+        } => {
+            let commitment_template = read_pohw_commitment_file(&pohw_commitment_file)?;
+            let client = bitcoin_rpc_client(
+                rpc_url,
+                rpc_user,
+                rpc_password,
+                rpc_cookie_file,
+                allow_remote_rpc,
+            )?;
+            let material = client.mining_job_template().await?;
+            let built = mining_adapter::build_dynamic_pohw_stratum_job_from_template(
+                &datadir,
+                &snapshot_dir,
+                &miner_id,
+                &commitment_template,
+                &material,
+                extranonce2_size,
+                MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+            )?;
+            if replace {
+                write_json_file_replace_existing_regular(&job_out, &built.built.job)?;
+            } else {
+                write_json_file(&job_out, &built.built.job)?;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "job_out": display_path(&job_out),
+                    "job_id": built.built.job.job_id,
+                    "source_height": built.built.source_height,
+                    "source_previous_block_hash": built.built.source_previous_block_hash,
+                    "source_transaction_count": built.built.source_transaction_count,
+                    "coinbase_value_sats": built.built.source_coinbase_value_sats,
+                    "snapshot_day": built.snapshot.snapshot_day.to_string(),
+                    "snapshot_height": built.snapshot.idena_height,
+                    "payout_schedule_root": built.payout_schedule.payout_root,
+                    "pohw_commitment_hash": built.pohw_commitment.commitment_hash(),
+                    "coinbase_positive_output_sats": payout_schedule_coinbase_positive_output_sats(&built.payout_schedule)?,
+                    "extranonce1_bytes": built.built.extranonce1_bytes,
+                    "extranonce2_bytes": built.built.extranonce2_bytes,
+                    "note": built.built.note,
+                }))?
+            );
+        }
+        Command::BitcoinMiningReadiness {
+            rpc_url,
+            allow_remote_rpc,
+            rpc_user,
+            rpc_password,
+            rpc_cookie_file,
+        } => {
+            let client = bitcoin_rpc_client(
+                rpc_url,
+                rpc_user,
+                rpc_password,
+                rpc_cookie_file,
+                allow_remote_rpc,
+            )?;
+            let chain_info = client.get_blockchain_info().await?;
+            ensure_bitcoin_mining_ready(&chain_info)?;
+            let template = client.mining_job_template().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ready": true,
+                    "chain": chain_info.chain,
+                    "blocks": chain_info.blocks,
+                    "headers": chain_info.headers,
+                    "initialBlockDownload": chain_info.initial_block_download,
+                    "verificationProgress": chain_info.verificationprogress,
+                    "templateHeight": template.height,
+                    "templateTransactionCount": template.transactions.len(),
+                }))?
+            );
+        }
         Command::BuildStratumBlockCandidate {
             job_file,
             candidate_out,
@@ -2353,6 +2817,27 @@ async fn main() -> Result<()> {
                     "rpc_chain": chain_info.chain,
                     "rpc_blocks": chain_info.blocks,
                     "rpc_initial_block_download": chain_info.initial_block_download,
+                    "submit_status": outcome.status,
+                }))?
+            );
+        }
+        Command::SubmitForkChainBlockCandidate {
+            candidate_file,
+            activation_manifest,
+            rpc_addr,
+        } => {
+            let candidate = read_stratum_block_candidate_file(&candidate_file)?;
+            let block_hex = block_hex_for_stratum_candidate_submission(&candidate)?;
+            let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let client = fork_chain::ForkChainClient::new(rpc_addr, manifest.activation_id, false)?;
+            let outcome = client.submit_block(block_hex).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "candidate_file": display_path(&candidate_file),
+                    "job_id": candidate.job_id,
+                    "block_hash": candidate.block_hash,
+                    "coinbase_txid": candidate.coinbase_txid,
                     "submit_status": outcome.status,
                 }))?
             );
@@ -2460,6 +2945,8 @@ async fn main() -> Result<()> {
             datadir,
             peer_addr,
             limit,
+            fork_chain_rpc_addr,
+            fork_chain_activation_manifest,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -2477,14 +2964,31 @@ async fn main() -> Result<()> {
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
             }
-            let admission = p2p_node::WorkTemplateAdmissionConfig {
-                bitcoin_rpc_client: bitcoin_rpc_client(
+            let fork_chain_client = fork_chain_client_from_options(
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest,
+            )?;
+            if fork_chain_client.is_some()
+                && (expected_header_merkle_root_hex.is_some()
+                    || allow_unverified_merkle_root
+                    || allow_mutable_time)
+            {
+                bail!("Bitcoin template-policy flags cannot be used with fork-chain admission");
+            }
+            let bitcoin_rpc_client = if fork_chain_client.is_none() {
+                Some(bitcoin_rpc_client(
                     rpc_url,
                     rpc_user,
                     rpc_password,
                     rpc_cookie_file,
                     allow_remote_rpc,
-                )?,
+                )?)
+            } else {
+                None
+            };
+            let admission = p2p_node::WorkTemplateAdmissionConfig {
+                bitcoin_rpc_client,
+                fork_chain_client,
                 validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
                     allow_mutable_time,
                     max_time_drift_seconds: max_template_time_drift_seconds,
@@ -4917,6 +5421,26 @@ fn bitcoin_rpc_client(
     }
 }
 
+fn fork_chain_client_from_options(
+    rpc_addr: Option<SocketAddr>,
+    activation_manifest: Option<PathBuf>,
+) -> Result<Option<fork_chain::ForkChainClient>> {
+    match (rpc_addr, activation_manifest) {
+        (Some(addr), Some(path)) => {
+            let manifest = fork_chain::read_activation_manifest(&path)?;
+            Ok(Some(fork_chain::ForkChainClient::new(
+                addr,
+                manifest.activation_id,
+                false,
+            )?))
+        }
+        (None, None) => Ok(None),
+        _ => bail!(
+            "--fork-chain-rpc-addr and --fork-chain-activation-manifest must be supplied together"
+        ),
+    }
+}
+
 fn read_stratum_block_candidate_file(path: &Path) -> Result<mining_adapter::StratumBlockCandidate> {
     read_json_file(path)
 }
@@ -4939,6 +5463,32 @@ fn ensure_candidate_submit_chain_allowed(
     Ok(())
 }
 
+fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
+    if !chain_info.chain.eq_ignore_ascii_case("main") {
+        bail!(
+            "Bitcoin mining handoff requires mainnet RPC; got chain '{}'",
+            chain_info.chain
+        );
+    }
+    if chain_info.initial_block_download {
+        bail!("Bitcoin mainnet RPC is still in initial block download");
+    }
+    if chain_info.headers != chain_info.blocks {
+        bail!(
+            "Bitcoin mainnet RPC is not at its reported header tip: blocks={} headers={}",
+            chain_info.blocks,
+            chain_info.headers
+        );
+    }
+    if !chain_info.verificationprogress.is_finite() || chain_info.verificationprogress < 0.999_999 {
+        bail!(
+            "Bitcoin mainnet verification progress is not ready: {:.8}",
+            chain_info.verificationprogress
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct PrepareForkActivationInput {
     chain_name: String,
@@ -4946,6 +5496,7 @@ struct PrepareForkActivationInput {
     inherited_utxo_spending_enabled: bool,
     post_fork_pow_limit_bits: u32,
     target_spacing_seconds: u64,
+    bootstrap_handoff_hashrate_hps: u64,
     timestamp_search_window_blocks: u64,
     allow_non_mainnet_rpc: bool,
 }
@@ -4955,9 +5506,12 @@ async fn prepare_fork_activation(
     input: PrepareForkActivationInput,
 ) -> Result<ForkActivationManifest> {
     let chain_name = validate_fork_chain_name(&input.chain_name)?;
-    if input.target_spacing_seconds == 0 {
+    if input.target_spacing_seconds < 4 {
+        return Err(anyhow!("--target-spacing-seconds must be at least 4"));
+    }
+    if input.bootstrap_handoff_hashrate_hps == 0 {
         return Err(anyhow!(
-            "--target-spacing-seconds must be greater than zero"
+            "--bootstrap-handoff-hashrate-hps must be greater than zero"
         ));
     }
     if input.timestamp_search_window_blocks == 0
@@ -5006,6 +5560,8 @@ async fn prepare_fork_activation(
         inherited_utxo_spending_enabled: input.inherited_utxo_spending_enabled,
         post_fork_pow_limit_bits: input.post_fork_pow_limit_bits,
         target_spacing_seconds: input.target_spacing_seconds,
+        difficulty_algorithm: ForkDifficultyAlgorithm::BootstrapThenBitcoin2016V1,
+        bootstrap_handoff_hashrate_hps: input.bootstrap_handoff_hashrate_hps,
     };
 
     ForkActivationManifest::new(config, fork_point, launch_block).map_err(Into::into)
@@ -5862,9 +6418,25 @@ pub(crate) fn validate_protected_secret_file(path: &Path, label: &str) -> Result
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
+        let systemd_credential = std::env::var_os("CREDENTIALS_DIRECTORY")
+            .map(PathBuf::from)
+            .filter(|directory| path.parent() == Some(directory.as_path()))
+            .and_then(|directory| std::fs::symlink_metadata(directory).ok())
+            .filter(|directory_metadata| {
+                !directory_metadata.file_type().is_symlink()
+                    && directory_metadata.file_type().is_dir()
+            })
+            .is_some_and(|directory_metadata| {
+                systemd_credential_permissions_are_safe(
+                    metadata.uid(),
+                    mode,
+                    directory_metadata.uid(),
+                    directory_metadata.permissions().mode() & 0o777,
+                )
+            });
+        if mode & 0o077 != 0 && !systemd_credential {
             return Err(anyhow!(
                 "{label} file {} is too permissive ({mode:o}); run chmod 600 {}",
                 path.display(),
@@ -5873,6 +6445,16 @@ pub(crate) fn validate_protected_secret_file(path: &Path, label: &str) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn systemd_credential_permissions_are_safe(
+    file_uid: u32,
+    file_mode: u32,
+    directory_uid: u32,
+    directory_mode: u32,
+) -> bool {
+    file_uid == 0 && file_mode == 0o440 && directory_uid == 0 && directory_mode & 0o022 == 0
 }
 
 #[cfg(test)]
@@ -6198,6 +6780,40 @@ mod tests {
         let mut regtest = chain_info;
         regtest.chain = "regtest".to_string();
         assert!(ensure_candidate_submit_chain_allowed(&regtest, false).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_mining_readiness_requires_fully_verified_mainnet() {
+        let ready = BlockchainInfoResponse {
+            chain: "main".to_string(),
+            blocks: 900_000,
+            headers: 900_000,
+            initial_block_download: false,
+            verificationprogress: 1.0,
+            pruned: false,
+        };
+        assert!(ensure_bitcoin_mining_ready(&ready).is_ok());
+
+        let mut syncing = ready.clone();
+        syncing.initial_block_download = true;
+        assert!(ensure_bitcoin_mining_ready(&syncing)
+            .unwrap_err()
+            .to_string()
+            .contains("initial block download"));
+
+        let mut behind = ready.clone();
+        behind.headers += 1;
+        assert!(ensure_bitcoin_mining_ready(&behind)
+            .unwrap_err()
+            .to_string()
+            .contains("header tip"));
+
+        let mut wrong_network = ready;
+        wrong_network.chain = "regtest".to_string();
+        assert!(ensure_bitcoin_mining_ready(&wrong_network)
+            .unwrap_err()
+            .to_string()
+            .contains("requires mainnet"));
     }
 
     #[test]
@@ -6761,6 +7377,20 @@ mod tests {
             "unexpected error: {err:#}"
         );
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn systemd_credential_mode_requires_root_ownership_and_safe_directory() {
+        assert!(systemd_credential_permissions_are_safe(0, 0o440, 0, 0o755));
+        assert!(!systemd_credential_permissions_are_safe(
+            1000, 0o440, 0, 0o755
+        ));
+        assert!(!systemd_credential_permissions_are_safe(0, 0o640, 0, 0o755));
+        assert!(!systemd_credential_permissions_are_safe(
+            0, 0o440, 1000, 0o755
+        ));
+        assert!(!systemd_credential_permissions_are_safe(0, 0o440, 0, 0o775));
     }
 
     #[cfg(unix)]

@@ -1,0 +1,37 @@
+[Unit]
+Description=PoHW one-way 20-participant Bitcoin mainnet handoff
+Wants=network-online.target
+After=network-online.target pohw-gossip-mesh.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/p2pool
+EnvironmentFile=-/etc/pohw/p2pool.env
+Environment=POHW_WORKDIR=/opt/p2pool
+Environment=POHW_P2POOL_NODE_BIN=/usr/local/libexec/pohw/p2pool-node-mainnet-handoff
+Environment=POHW_MAINNET_HANDOFF_STATE_DIR=/var/lib/pohw-p2pool/mainnet-handoff
+ExecStart=/usr/bin/python3 /usr/local/libexec/pohw/pohw-mainnet-handoff.py
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadOnlyPaths=/opt/p2pool /usr/local/libexec/pohw /etc/pohw
+ReadWritePaths=/var/lib/pohw-p2pool -/srv/sharechain /etc/pohw

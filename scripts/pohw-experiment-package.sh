@@ -223,21 +223,34 @@ reject_forbidden_path() {
 
 for file in \
   .gitignore \
+  BETA-TESTING.md \
   Cargo.lock \
   Cargo.toml \
+  COMMUNITY-README.md \
+  LICENSE \
   README.md \
+  SECURITY.md \
   EXPERIMENT-0.md \
+  compatibility/experiment-0-activation.json \
   deploy/pohw-experiment.env.example
 do
   add_file "$file"
 done
 
+add_find .github/ISSUE_TEMPLATE \
+  \( -name '*.yml' -o -name '*.yaml' \)
+add_find compatibility \
+  \( -name '*.json' \)
 add_find crates \
   \( -name Cargo.toml -o -path '*/src/*.rs' \)
 add_find scripts \
   \( -name '*.sh' -o -name '*.py' -o -name '*.sql' \)
 add_find deploy \
-  \( -name '*.conf' -o -name '*.service' -o -name '*.path' -o -name '*.timer' -o -name '*.json' \)
+  \( -name '*.conf' -o -name '*.conf.example' -o -name '*.service' -o -name '*.path' \
+     -o -name '*.timer' -o -name '*.json' -o -name '*.json.example' \
+     -o -name '*.env.example' -o -name '*.Caddyfile.example' \)
+add_find docs \
+  \( -name '*.md' -o -name '*.png' \)
 add_find pohw_idena_rpc \
   \( -name '*.py' \)
 add_find tests \
@@ -266,86 +279,7 @@ while IFS= read -r rel; do
   cp -p "$REPO_ROOT/$rel" "$PACKAGE_ROOT/$rel"
 done < "$FILE_LIST"
 
-cat > "$PACKAGE_ROOT/QUICKSTART.md" <<'EOF'
-# PoHW P2Pool Experiment 0 Quickstart
-
-This bundle is for a no-value community dry run. It is not Bitcoin mainnet
-mining, not a token launch, not a bridge, and not a deposit system.
-
-## 1. Inspect And Build
-
-```sh
-tar -xzf pohw-experiment-0-*.tar.gz
-cd pohw-experiment-0-*
-cargo build --release -p p2pool-node
-```
-
-## 2. Create Local Config
-
-```sh
-scripts/pohw-experiment-init.sh \
-  --miner-id alice \
-  --bind-addr 127.0.0.1:40406
-```
-
-For LAN testing, use your own reachable WLAN IP for `--bind-addr` and
-`--advertise-addr`, then exchange peer addresses out of band. Keep Bitcoin RPC
-and Idena RPC on loopback.
-
-## 3. Prepare Fork Activation
-
-Agree on one launch timestamp with the group, set
-`POHW_FORK_LAUNCH_TIMESTAMP_UTC` in `.pohw-experiment.env`, then derive the
-manifest from your own Bitcoin Core RPC:
-
-```sh
-scripts/pohw-experiment-prepare-fork-activation.sh .pohw-experiment.env
-```
-
-Compare the resulting `activation_id` with the group before mining tests.
-
-## 4. Preflight And Start Gossip
-
-```sh
-scripts/pohw-experiment-preflight.sh .pohw-experiment.env
-scripts/pohw-experiment-start-gossip.sh .pohw-experiment.env
-```
-
-For a one-machine gossip plumbing check on a Pi, install
-`pohw-gossip-mesh-local-peer.service` and set the `POHW_LOCAL_GOSSIP_*`
-variables in `/etc/pohw/p2pool.env`. Use real participant peers for a
-decentralized dry run.
-
-## 5. Register, Vote, Report
-
-```sh
-scripts/pohw-experiment-register-miner.sh .pohw-experiment.env --idena-address 0x...
-# sign the printed challenge in Idena, then rerun with --idena-signature-hex
-scripts/pohw-experiment-publish-snapshot-vote.sh .pohw-experiment.env
-scripts/pohw-bootstrap-readiness.sh .pohw-experiment.env --mode real
-scripts/pohw-experiment-report.sh .pohw-experiment.env
-```
-
-If Bitcoin Core is still in initial block download, the bootstrap command exits
-cleanly with `bitcoin_not_ready` and does not append synthetic Bitcoin work.
-
-Share only the generated report `.tar.gz`. Never share `.pohw-experiment.env`,
-private keys, API keys, Bitcoin cookies, dashboard tokens, seed phrases, raw
-service logs, or chain data.
-
-## 6. Compare Reports
-
-```sh
-scripts/pohw-experiment-compare-reports.py \
-  --min-nodes 3 \
-  output/alice-report.tar.gz \
-  output/bob-report.tar.gz \
-  output/carol-report.tar.gz
-```
-
-Read `EXPERIMENT-0.md` for the complete runbook, success criteria, and stop
-conditions.
-EOF
+cp "$PACKAGE_ROOT/COMMUNITY-README.md" "$PACKAGE_ROOT/QUICKSTART.md"
 
 python3 - "$PACKAGE_ROOT" "$PACKAGE_NAME" "$STAMP" "$GIT_BRANCH" "$GIT_COMMIT" "$GIT_DIRTY" <<'PY'
 import json
@@ -367,6 +301,8 @@ manifest = {
     "git_commit": git_commit or None,
     "git_dirty": git_dirty == "true",
     "no_value_ack_required": "I_UNDERSTAND_NO_VALUE",
+    "mainnet_handoff_participant_threshold": 20,
+    "mainnet_handoff_ack_required": "I_UNDERSTAND_REAL_BITCOIN",
     "file_count": len(files),
     "files": files,
     "excluded_by_policy": [
