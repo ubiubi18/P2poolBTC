@@ -21,6 +21,8 @@ from typing import Any
 
 MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024
 MAX_REPORT_FILES = 200
+MAX_REPORT_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_REPORT_ARCHIVE_BYTES = 64 * 1024 * 1024
 REGISTRATION_PROOF_FILE = "miner-registration-envelope.json"
 REGISTRATION_PROOF_MAX_AGE_SECONDS = "0"
 REGISTRATION_PROOF_VERIFY_TIMEOUT_SECONDS = 120
@@ -653,21 +655,74 @@ def load_registration_proof(
     return proof
 
 
+def normalized_archive_member_path(member: tarfile.TarInfo) -> PurePosixPath:
+    name = member.name
+    if (
+        not name
+        or "\\" in name
+        or any(ord(character) < 32 for character in name)
+    ):
+        raise ValueError(f"unsafe archive path: {name}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe archive path: {name}")
+    parts = tuple(part for part in path.parts if part not in {"", "."})
+    if not parts:
+        if member.isdir():
+            return PurePosixPath(".")
+        raise ValueError(f"unsafe archive path: {name}")
+    if re.match(r"^[A-Za-z]:", parts[0]) or any(":" in part for part in parts):
+        raise ValueError(f"unsafe archive path: {name}")
+    return PurePosixPath(*parts)
+
+
 def validate_archive_members(archive: tarfile.TarFile) -> list[Issue]:
     issues: list[Issue] = []
     members = archive.getmembers()
     if len(members) > MAX_REPORT_FILES:
         issues.append(Issue("error", f"archive contains too many files: {len(members)}"))
+    seen: dict[str, str] = {}
+    total_bytes = 0
     for member in members:
-        path = PurePosixPath(member.name)
-        if path.is_absolute() or ".." in path.parts:
-            issues.append(Issue("error", f"unsafe archive path: {member.name}"))
+        try:
+            path = normalized_archive_member_path(member)
+        except ValueError as exc:
+            issues.append(Issue("error", str(exc)))
             continue
         if not (member.isfile() or member.isdir()):
             issues.append(Issue("error", f"archive contains unsupported entry: {member.name}"))
             continue
+        normalized = path.as_posix()
+        if normalized == ".":
+            continue
+        if normalized in seen:
+            issues.append(Issue("error", f"archive contains duplicate entry: {normalized}"))
+            continue
+        parent = path.parent
+        crosses_file = False
+        while parent != PurePosixPath("."):
+            if seen.get(parent.as_posix()) == "file":
+                issues.append(Issue("error", f"archive path crosses a file: {normalized}"))
+                crosses_file = True
+                break
+            parent = parent.parent
+        if crosses_file:
+            continue
+        if member.isfile() and any(
+            existing.startswith(f"{normalized}/") for existing in seen
+        ):
+            issues.append(Issue("error", f"archive file shadows a directory: {normalized}"))
+            continue
+        seen[normalized] = "file" if member.isfile() else "directory"
         if member.isfile() and member.size > MAX_REPORT_FILE_BYTES:
             issues.append(Issue("error", f"archive file too large: {member.name}"))
+        if member.isfile():
+            total_bytes += member.size
+            if total_bytes > MAX_REPORT_TOTAL_BYTES:
+                issues.append(
+                    Issue("error", "archive expands beyond the total size limit")
+                )
+                break
     return issues
 
 
@@ -675,6 +730,7 @@ def validate_directory_members(root: Path) -> list[Issue]:
     issues: list[Issue] = []
     file_count = 0
     member_count = 0
+    total_bytes = 0
     try:
         paths = root.rglob("*")
     except OSError as exc:
@@ -704,7 +760,51 @@ def validate_directory_members(root: Path) -> list[Issue]:
             break
         if stat_result.st_size > MAX_REPORT_FILE_BYTES:
             issues.append(Issue("error", f"report file too large: {rel}"))
+        total_bytes += stat_result.st_size
+        if total_bytes > MAX_REPORT_TOTAL_BYTES:
+            issues.append(
+                Issue("error", "report directory exceeds the total size limit")
+            )
+            break
     return issues
+
+
+def extract_validated_archive(archive: tarfile.TarFile, destination: Path) -> None:
+    for member in archive.getmembers():
+        relative = normalized_archive_member_path(member)
+        if relative == PurePosixPath("."):
+            continue
+        target = destination.joinpath(*relative.parts)
+        if member.isdir():
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"cannot read archive entry: {member.name}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(target, flags, 0o600)
+        try:
+            with source, os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                remaining = member.size
+                while remaining:
+                    chunk = source.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError(f"archive entry is truncated: {member.name}")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+                if source.read(1):
+                    raise ValueError(f"archive entry exceeds its declared size: {member.name}")
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def extract_archive(path: Path, temp_root: Path) -> tuple[Path | None, list[Issue]]:
@@ -716,7 +816,7 @@ def extract_archive(path: Path, temp_root: Path) -> tuple[Path | None, list[Issu
             issues.extend(validate_archive_members(archive))
             if any(issue.level == "error" for issue in issues):
                 return None, issues
-            archive.extractall(destination)
+            extract_validated_archive(archive, destination)
     except Exception as exc:  # noqa: BLE001 - user-facing archive validation.
         return None, [Issue("error", f"cannot read archive: {exc}")]
     issues.extend(validate_directory_members(destination))
@@ -774,6 +874,9 @@ def load_report(source: str, temp_root: Path, p2pool_cmd: list[str]) -> Report:
             return report
         report.root = find_report_root(path)
     elif tarfile.is_tarfile(path):
+        if path.stat().st_size > MAX_REPORT_ARCHIVE_BYTES:
+            report.issues.append(Issue("error", "report archive is too large"))
+            return report
         root, issues = extract_archive(path, temp_root)
         report.root = root
         report.issues.extend(issues)

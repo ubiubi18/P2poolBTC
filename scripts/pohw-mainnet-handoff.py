@@ -233,14 +233,14 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def atomic_write(path: Path, content: str, mode: int) -> None:
+def atomic_write(path: Path, content: str) -> None:
     if path.is_symlink():
         raise HandoffError(f"refusing symlinked handoff file: {path.name}")
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, mode)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         payload = content.encode("utf-8")
         offset = 0
@@ -253,12 +253,12 @@ def atomic_write(path: Path, content: str, mode: int) -> None:
     finally:
         os.close(descriptor)
     os.replace(temporary, path)
-    os.chmod(path, mode)
+    os.chmod(path, 0o600)
     fsync_directory(path.parent)
 
 
-def write_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
-    atomic_write(path, json.dumps(value, sort_keys=True, indent=2) + "\n", mode)
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    atomic_write(path, json.dumps(value, sort_keys=True, indent=2) + "\n")
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -276,13 +276,20 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def require_regular_file(path: Path, label: str) -> None:
+def require_regular_file(path: Path, label: str) -> os.stat_result:
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
         raise HandoffError(f"{label} is missing") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise HandoffError(f"{label} must be a regular file")
+    return metadata
+
+
+def require_private_regular_file(path: Path, label: str) -> None:
+    metadata = require_regular_file(path, label)
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise HandoffError(f"{label} must not be accessible by group or others")
 
 
 def run_command(
@@ -457,7 +464,7 @@ POHW_STRATUM_ALLOW_MAINNET_SUBMIT=true
 
 
 def write_mainnet_mode(config: Config) -> None:
-    atomic_write(config.mining_mode_file, expected_mainnet_mode(), 0o600)
+    atomic_write(config.mining_mode_file, expected_mainnet_mode())
 
 
 def remove_regular_file(path: Path, label: str, *, missing_ok: bool = True) -> bool:
@@ -477,9 +484,9 @@ def remove_regular_file(path: Path, label: str, *, missing_ok: bool = True) -> b
 def recreate_fork_marker(config: Config) -> None:
     config.fork_marker.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     if config.fork_marker.exists():
-        require_regular_file(config.fork_marker, "fork approval marker")
+        require_private_regular_file(config.fork_marker, "fork approval marker")
         return
-    atomic_write(config.fork_marker, "approved\n", 0o644)
+    atomic_write(config.fork_marker, "approved\n")
 
 
 def service_main_pid(config: Config, env: dict[str, str]) -> int:
@@ -632,7 +639,6 @@ def write_status(
     write_json(
         config.status_file,
         sanitized_status(phase, evidence, confirmations, detail),
-        mode=0o644,
     )
 
 
@@ -754,7 +760,7 @@ def activate_mainnet(
     env: dict[str, str],
     evidence: ParticipantEvidence,
 ) -> None:
-    require_regular_file(config.fork_marker, "fork approval marker")
+    require_private_regular_file(config.fork_marker, "fork approval marker")
     mainnet_preflight(config, env)
     write_status(
         config,

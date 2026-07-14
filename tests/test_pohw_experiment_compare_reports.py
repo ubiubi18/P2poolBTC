@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +19,38 @@ EXPECTED_ACTIVATION_ID = "eaa1046d1f672b49edcb0fe31ae17545da98ea73405d65a81ac668
 
 
 class ExperimentCompareReportsTest(unittest.TestCase):
+    def run_comparison(self, *reports: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(COMPARE_REPORTS),
+                "--min-nodes",
+                "0",
+                *map(str, reports),
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def write_archive_member(
+        self,
+        archive: tarfile.TarFile,
+        name: str,
+        content: bytes = b"test",
+        *,
+        entry_type: bytes | None = None,
+    ) -> None:
+        member = tarfile.TarInfo(name)
+        if entry_type is not None:
+            member.type = entry_type
+            member.linkname = "metadata.txt"
+            archive.addfile(member)
+            return
+        member.size = len(content)
+        archive.addfile(member, io.BytesIO(content))
+
     def write_forged_report(self, root: Path, idx: int, activation_id: str | None = None) -> Path:
         report = root / f"report-{idx}"
         report.mkdir()
@@ -211,6 +245,67 @@ class ExperimentCompareReportsTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("report directory contains symlink: status.json", result.stdout)
+
+    def test_archive_parent_traversal_is_rejected_without_writing_outside(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-report-archive-traversal-") as temp:
+            root = Path(temp)
+            archive_path = root / "report.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                self.write_archive_member(archive, "../outside.txt")
+
+            result = self.run_comparison(archive_path)
+
+            self.assertFalse((root / "outside.txt").exists())
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unsafe archive path: ../outside.txt", result.stdout)
+
+    def test_archive_windows_traversal_and_links_are_rejected(self) -> None:
+        cases = [
+            ("windows-traversal", "..\\outside.txt", None, "unsafe archive path"),
+            ("symbolic-link", "report-link", tarfile.SYMTYPE, "unsupported entry"),
+        ]
+        for case_name, member_name, entry_type, expected in cases:
+            with self.subTest(case=case_name):
+                with tempfile.TemporaryDirectory(prefix=f"pohw-report-{case_name}-") as temp:
+                    root = Path(temp)
+                    archive_path = root / "report.tar.gz"
+                    with tarfile.open(archive_path, "w:gz") as archive:
+                        self.write_archive_member(
+                            archive,
+                            member_name,
+                            entry_type=entry_type,
+                        )
+                    result = self.run_comparison(archive_path)
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stdout)
+
+    def test_archive_file_directory_collisions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-report-archive-collision-") as temp:
+            root = Path(temp)
+            archive_path = root / "report.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                self.write_archive_member(archive, "report")
+                self.write_archive_member(archive, "report/status.json")
+
+            result = self.run_comparison(archive_path)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("archive path crosses a file", result.stdout)
+
+    def test_safe_archive_is_extracted_for_comparison(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-report-safe-archive-") as temp:
+            root = Path(temp)
+            report = self.write_forged_report(root, 0)
+            archive_path = root / "report.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                archive.add(report, arcname="report")
+
+            result = self.run_comparison(archive_path)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS WITH WARNINGS", result.stdout)
 
     def test_matching_activation_manifests_are_accepted_for_debug_comparison(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-activation-match-") as temp:
