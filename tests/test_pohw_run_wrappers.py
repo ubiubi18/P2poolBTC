@@ -150,6 +150,52 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertNotIn("super-secret-rpc-password", args)
         self.assertIn("run-mining-adapter", args)
         self.assertIn("--refresh-job-from-rpc", args)
+
+    def test_mainnet_handoff_uses_dynamic_payouts_without_static_job_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-dynamic-mainnet-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            commitment = root / "pohw-commitment.json"
+            commitment.write_text("{}\n", encoding="utf-8")
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_MAINNET_HANDOFF_ACTIVE": "true",
+                    "POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE": "true",
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_STRATUM_ALLOW_MAINNET_SUBMIT": "true",
+                    "POHW_STRATUM_POHW_COMMITMENT_FILE": str(commitment),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_PAYOUT_CANDIDATE_DIR": str(root / "payout-candidates"),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-mining-adapter", args)
+        self.assertIn("--derive-pohw-payouts-from-state", args)
+        self.assertIn("--derive-pohw-min-snapshot-voters\n3", args)
+        self.assertIn("--snapshot-dir", args)
+        self.assertIn("--payout-candidate-dir", args)
+        self.assertIn("--pohw-commitment-file", args)
+        self.assertIn("--refresh-job-from-rpc", args)
+        self.assertIn("--auto-submit-blocks", args)
+        self.assertIn("--allow-mainnet-submit", args)
+        self.assertIn("--rpc-url\nhttp://127.0.0.1:8332", args)
+        self.assertNotIn("--payout-schedule-file", args)
+        self.assertNotIn("--job-file", args)
+        self.assertNotIn("build-pohw-stratum-job-rpc", args)
         self.assertIn("--job-refresh-interval-seconds", args)
 
     def test_mining_adapter_health_gate_blocks_rpc_job_refresh(self) -> None:
@@ -266,9 +312,41 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("run-mining-adapter", args)
         self.assertIn("--auto-submit-blocks", args)
+        self.assertNotIn("--allow-mainnet-submit", args)
         self.assertIn("--rpc-cookie-file", args)
         self.assertNotIn("build-stratum-job-rpc", args)
         self.assertNotIn("build-pohw-stratum-job-rpc", args)
+
+    def test_mining_adapter_mainnet_submission_requires_separate_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-mainnet-submit-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_STRATUM_ALLOW_MAINNET_SUBMIT": "true",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+            Path(env["POHW_STRATUM_JOB_FILE"]).write_text(
+                '{ "job_id": "live-job" }\n', encoding="utf-8"
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--auto-submit-blocks", args)
+        self.assertIn("--allow-mainnet-submit", args)
 
     def test_mining_adapter_rejects_conflicting_job_refresh_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-conflicting-jobs-") as temp:
@@ -291,14 +369,16 @@ class RunWrapperValidationTest(unittest.TestCase):
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Use either POHW_STRATUM_BUILD_JOB_FROM_RPC", result.stderr)
+        self.assertIn("Enable only one Bitcoin RPC job mode", result.stderr)
 
     def test_mining_adapter_uses_live_fork_templates_without_bitcoin_rpc(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-fork-") as temp:
             root = Path(temp)
             args_out = root / "args.txt"
             manifest = root / "fork-activation.json"
-            manifest.write_text("{}\n", encoding="utf-8")
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
             env = self.base_env(root)
             env.update(
                 {
@@ -320,15 +400,101 @@ class RunWrapperValidationTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
             args = args_out.read_text(encoding="utf-8")
 
-        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--fork-chain-rpc-addr", args)
         self.assertIn("--fork-chain-activation-manifest", args)
         self.assertIn("--auto-submit-blocks", args)
+        self.assertIn(
+            "--share-target\n7fffff0000000000000000000000000000000000000000000000000000000000",
+            args,
+        )
+        self.assertIn("--stratum-difficulty\n4.6565423739069247e-10", args)
+        self.assertNotIn("--allow-mainnet-submit", args)
         self.assertNotIn("--job-file", args)
         self.assertNotIn("--rpc-url", args)
         self.assertNotIn("must-not-be-forwarded", args)
+
+    def test_mining_adapter_derives_dynamic_payouts_from_fork_templates(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-fork-payout-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            commitment = root / "pohw-commitment.json"
+            manifest.write_bytes(
+                (REPO_ROOT / "compatibility" / "experiment-0-activation.json").read_bytes()
+            )
+            commitment.write_text("{}\n", encoding="utf-8")
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_FORK_CHAIN_RPC_ADDR": "127.0.0.1:40408",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE": "true",
+                    "POHW_STRATUM_DYNAMIC_MIN_SNAPSHOT_VOTERS": "1",
+                    "POHW_STRATUM_POHW_COMMITMENT_FILE": str(commitment),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_PAYOUT_CANDIDATE_DIR": str(root / "payout-candidates"),
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertIn("--fork-chain-rpc-addr", args)
+        self.assertIn("--derive-pohw-payouts-from-state", args)
+        self.assertIn("--derive-pohw-min-snapshot-voters\n1", args)
+        self.assertIn("--snapshot-dir", args)
+        self.assertIn("--payout-candidate-dir", args)
+        self.assertIn("--pohw-commitment-file", args)
+        self.assertIn("--auto-submit-blocks", args)
+        self.assertNotIn("--refresh-job-from-rpc", args)
+        self.assertNotIn("--allow-mainnet-submit", args)
+        self.assertNotIn("--rpc-url", args)
+        self.assertNotIn("--payout-schedule-file", args)
+
+    def test_mining_adapter_rejects_invalid_fork_pow_limit_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-fork-policy-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "fork-activation.json"
+            manifest.write_text(
+                '{"config":{"post_fork_pow_limit_bits":0}}\n', encoding="utf-8"
+            )
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_STRATUM_FORK_CHAIN_RPC_ADDR": "127.0.0.1:40408",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("negative or zero PoW limit", result.stderr)
+        self.assertFalse(args_out.exists())
 
     def test_fork_chain_runner_enforces_no_value_ack_and_peer_config(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-fork-wrapper-") as temp:

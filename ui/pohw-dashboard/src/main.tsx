@@ -31,7 +31,7 @@ type ServiceState = "connected" | "syncing" | "pending" | "warning";
 type TimeWindow = "24h" | "7d" | "epoch";
 type ProspectMode = "block-now" | "30d-ev";
 type SectionId = "overview" | "sharechain" | "idena" | "payouts" | "vault" | "next-step" | "audit-numbers";
-type AppView = "dashboard" | "explorer";
+type AppView = "dashboard" | "explorer" | "governance";
 type ExplorerTab = "overview" | "bitcoin" | "fork" | "sharechain" | "idena";
 type ExplorerLoadState = "loading" | "ready" | "unavailable";
 
@@ -114,6 +114,90 @@ interface DashboardApiResponse {
   account: PoolSnapshot;
 }
 
+interface GovernanceDashboardResponse {
+  apiVersion: string;
+  schemaVersion: number;
+  experimental: boolean;
+  status: "unconfigured" | "verified-local-snapshot";
+  safetyLabel: string;
+  governanceContractAddress: string | null;
+  currentCanonicalEcosystemCid: string | null;
+  identityMetrics: {
+    metricsRoot: string;
+    sourceEpoch: number;
+    replayCommitment: string;
+    independentAttestors: number;
+    requiredAttestors: number;
+    conflict: boolean;
+    certified: boolean;
+  } | null;
+  repositories: Array<{
+    name: string;
+    sourceTreeCid: string;
+  }>;
+  proposals: GovernanceProposal[];
+}
+
+interface GovernanceProposal {
+  proposalId: string;
+  proposalCid: string;
+  candidateEcosystemCid: string;
+  reviewRoundId: string;
+  reviewRoundState: "Open" | "Frozen" | "Claimed" | "Expired";
+  reviewRoundAgentAttestations: number;
+  reviewRoundBuildAttestations: number;
+  reviewRoundAvailabilityAttestations: number;
+  affectedRepositories: string[];
+  diffSummary: string;
+  riskClass: "normal" | "critical" | "consensus" | "migration";
+  bondAtoms: string;
+  agentReviewRoot: string;
+  buildAttestationRoot: string;
+  dataAvailabilityRoot: string;
+  aiReviews: {
+    validAttestations: number;
+    requiredAttestations: number;
+    distinctModelFamilies: number;
+    requiredModelFamilies: number;
+    distinctOwnerIdentities: number;
+    requiredOwnerIdentities: number;
+    unresolvedCriticalFindings: number;
+    passed: boolean;
+  };
+  builds: {
+    independentBuilders: number;
+    requiredBuilders: number;
+    distinctPlatforms: number;
+    requiredPlatforms: number;
+    matchingCoreArtifactDigests: boolean;
+    passed: boolean;
+  };
+  dataAvailability: {
+    independentAttestors: number;
+    requiredAttestors: number;
+    passed: boolean;
+  };
+  pos: {
+    yesWeight: string;
+    noWeight: string;
+    abstainWeight: string;
+    snapshottedRegisteredWeight: string;
+    turnoutQuorumBps: number;
+    yesThresholdBps: number;
+    passed: boolean;
+  };
+  pohw: {
+    distinctYesIdentities: number;
+    requiredYesIdentities: number;
+    verifiedOrHumanYesIdentities: number;
+    requiredVerifiedOrHumanYes: number;
+    passed: boolean;
+  };
+  challengeStatus: string;
+  executionStatus: string;
+  state: string;
+}
+
 interface ForkChainStatus {
   protocolVersion: number;
   chainName: string;
@@ -154,6 +238,14 @@ interface ExplorerOverview {
   sharechain: {
     appliedMessageCount: number;
     registeredMinerCount: number;
+    uniqueRegisteredIdenaCount: number;
+    activeIdenaParticipantCount: number;
+    eligibleActiveIdenaParticipantCount: number | null;
+    mainnetHandoffParticipantCount: number | null;
+    mainnetHandoffParticipantThreshold: number;
+    snapshotVoterIdenaCount: number | null;
+    mainnetHandoffSnapshotVoterThreshold: number;
+    mainnetHandoffMaxSnapshotAgeDays: number;
     bitcoinWorkTemplateCount: number;
     storedShareCount: number;
     activeShareCount: number;
@@ -523,10 +615,10 @@ const explorerApiBase = (
   dashboardEnv.VITE_POHW_EXPLORER_API_BASE ??
   "http://127.0.0.1:40407/api/v1"
 ).replace(/\/$/, "");
-const configuredDefaultView: AppView =
-  runtimeDashboardConfig.defaultView === "explorer" || dashboardEnv.VITE_POHW_DASHBOARD_DEFAULT_VIEW === "explorer"
-    ? "explorer"
-    : "dashboard";
+const configuredDefaultView: AppView = (() => {
+  const requested = runtimeDashboardConfig.defaultView ?? dashboardEnv.VITE_POHW_DASHBOARD_DEFAULT_VIEW;
+  return requested === "explorer" || requested === "governance" ? requested : "dashboard";
+})();
 const participantDashboardEnabled =
   runtimeDashboardConfig.participantDashboard ??
   !["0", "false", "no"].includes((dashboardEnv.VITE_POHW_PARTICIPANT_DASHBOARD ?? "true").toLowerCase());
@@ -722,7 +814,11 @@ const demoDashboardData: DashboardApiResponse = {
 const initialDashboardData = dashboardDemoMode ? demoDashboardData : offlineDashboardData;
 
 const initialAppView: AppView =
-  window.location.hash === "#explorer" || !participantDashboardEnabled ? "explorer" : configuredDefaultView;
+  window.location.hash === "#governance"
+    ? "governance"
+    : window.location.hash === "#explorer" || !participantDashboardEnabled
+      ? "explorer"
+      : configuredDefaultView;
 const emptyForkPage: ExplorerForkBlockPage = {
   state: "not_configured",
   tipHeight: null,
@@ -789,6 +885,8 @@ function App() {
   const [bitcoinBlocks, setBitcoinBlocks] = useState<ExplorerBitcoinBlockPage>(emptyBitcoinBlockPage);
   const [shares, setShares] = useState<ExplorerSharePage>(emptySharePage);
   const [explorerLoadState, setExplorerLoadState] = useState<ExplorerLoadState>("loading");
+  const [governance, setGovernance] = useState<GovernanceDashboardResponse | null>(null);
+  const [governanceLoadState, setGovernanceLoadState] = useState<ExplorerLoadState>("loading");
   const [loadingMoreFork, setLoadingMoreFork] = useState(false);
   const [loadingMoreShares, setLoadingMoreShares] = useState(false);
   const prospectMode: ProspectMode = "block-now";
@@ -829,6 +927,30 @@ function App() {
 
     loadDashboardData();
     const interval = globalThis.setInterval(loadDashboardData, 15_000);
+    return () => {
+      cancelled = true;
+      globalThis.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadGovernance() {
+      try {
+        const data = await fetchExplorerJson<GovernanceDashboardResponse>("/governance");
+        if (!cancelled) {
+          setGovernance(data);
+          setGovernanceLoadState("ready");
+        }
+      } catch {
+        if (!cancelled) {
+          setGovernance(null);
+          setGovernanceLoadState("unavailable");
+        }
+      }
+    }
+    void loadGovernance();
+    const interval = globalThis.setInterval(loadGovernance, 15_000);
     return () => {
       cancelled = true;
       globalThis.clearInterval(interval);
@@ -882,9 +1004,11 @@ function App() {
 
   useEffect(() => {
     const handleHashChange = () => {
-      setActiveView(
-        globalThis.location.hash === "#explorer" || !participantDashboardEnabled ? "explorer" : "dashboard"
-      );
+      setActiveView(globalThis.location.hash === "#governance"
+        ? "governance"
+        : globalThis.location.hash === "#explorer" || !participantDashboardEnabled
+          ? "explorer"
+          : "dashboard");
     };
     globalThis.addEventListener("hashchange", handleHashChange);
     return () => globalThis.removeEventListener("hashchange", handleHashChange);
@@ -893,7 +1017,7 @@ function App() {
   const changeView = (view: AppView) => {
     if (view === "dashboard" && !participantDashboardEnabled) return;
     setActiveView(view);
-    globalThis.history.replaceState(null, "", view === "explorer" ? "#explorer" : "#dashboard");
+    globalThis.history.replaceState(null, "", "#" + view);
   };
 
   const navigateToSection = (sectionId: SectionId, revealAudit = false) => {
@@ -979,7 +1103,13 @@ function App() {
           participantDashboardEnabled={participantDashboardEnabled}
         />
         <section className="workspace">
-          <TopBar activeView={activeView} explorerOverview={explorerOverview} explorerState={explorerLoadState} />
+          <TopBar
+            activeView={activeView}
+            explorerOverview={explorerOverview}
+            explorerState={explorerLoadState}
+            governance={governance}
+            governanceState={governanceLoadState}
+          />
           {activeView === "dashboard" ? (
             <div className="dashboard-grid">
               <section className="main-column">
@@ -1022,7 +1152,7 @@ function App() {
                 view={blockNowView}
               />
             </div>
-          ) : (
+          ) : activeView === "explorer" ? (
             <ExplorerWorkspace
               bitcoinBlocks={bitcoinBlocks}
               forkBlocks={forkBlocks}
@@ -1035,10 +1165,178 @@ function App() {
               overview={explorerOverview}
               shares={shares}
             />
+          ) : (
+            <GovernanceWorkspace data={governance} loadState={governanceLoadState} />
           )}
         </section>
       </main>
     </DashboardDataContext.Provider>
+  );
+}
+
+function GovernanceWorkspace({
+  data,
+  loadState
+}: {
+  data: GovernanceDashboardResponse | null;
+  loadState: ExplorerLoadState;
+}) {
+  const unavailable = loadState === "unavailable";
+  const configured = data?.status === "verified-local-snapshot";
+  return (
+    <section className="governance-workspace">
+      <header className="governance-header">
+        <div>
+          <span className="governance-kicker">Software governance</span>
+          <h1>Canonical ecosystem</h1>
+          <p>Sublinear locked IDNA stake with independent identity, review, build, and availability gates.</p>
+        </div>
+        <span className="governance-safety">{data?.safetyLabel ?? "EXPERIMENTAL / NO-VALUE"}</span>
+      </header>
+
+      {loadState === "loading" ? (
+        <div className="governance-empty"><RefreshCw className="spin" size={18} /><span>Loading verified snapshot</span></div>
+      ) : unavailable || !data ? (
+        <div className="governance-empty warning"><AlertTriangle size={18} /><span>Governance snapshot unavailable</span></div>
+      ) : !configured ? (
+        <div className="governance-empty"><Database size={18} /><span>No governance contract snapshot configured</span></div>
+      ) : (
+        <>
+          <section className="governance-canonical">
+            <div>
+              <span>Canonical ecosystem CID</span>
+              <code title={data.currentCanonicalEcosystemCid ?? undefined}>
+                {data.currentCanonicalEcosystemCid ?? "Unavailable"}
+              </code>
+            </div>
+            <div>
+              <span>Contract</span>
+              <code title={data.governanceContractAddress ?? undefined}>
+                {data.governanceContractAddress ?? "Not deployed"}
+              </code>
+            </div>
+            <div>
+              <span>Identity metrics</span>
+              <code title={data.identityMetrics?.metricsRoot}>
+                {data.identityMetrics
+                  ? shortHash(data.identityMetrics.metricsRoot) + " / "
+                    + data.identityMetrics.independentAttestors + "/"
+                    + data.identityMetrics.requiredAttestors
+                  : "Unavailable"}
+              </code>
+              <small>
+                {data.identityMetrics?.conflict
+                  ? "Conflicting operator quorums"
+                  : data.identityMetrics?.certified
+                    ? "Replay commitment certified"
+                    : "Certification pending"}
+              </small>
+            </div>
+          </section>
+
+          <section className="governance-repositories">
+            <div className="governance-section-heading">
+              <h2>Repository sources</h2>
+              <span>{data.repositories.length} pinned</span>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Repository</th><th>Canonical source CID</th></tr></thead>
+                <tbody>
+                  {data.repositories.map((repository) => (
+                    <tr key={repository.name}>
+                      <td data-label="Repository"><strong>{repository.name}</strong></td>
+                      <td data-label="Canonical source CID"><code title={repository.sourceTreeCid}>{repository.sourceTreeCid}</code></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="governance-proposals">
+            <div className="governance-section-heading">
+              <h2>Proposals</h2>
+              <span>{data.proposals.length} tracked</span>
+            </div>
+            {data.proposals.length === 0 ? (
+              <div className="governance-empty"><GitBranch size={18} /><span>No proposals in this snapshot</span></div>
+            ) : data.proposals.map((proposal) => (
+              <GovernanceProposalCard key={proposal.proposalId} proposal={proposal} />
+            ))}
+          </section>
+        </>
+      )}
+    </section>
+  );
+}
+
+function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) {
+  const gates = [
+    {
+      detail: proposal.pos.yesWeight + " yes / " + proposal.pos.noWeight + " no",
+      label: "PoS",
+      passed: proposal.pos.passed,
+      value: (proposal.pos.yesThresholdBps / 100).toFixed(2) + "% threshold"
+    },
+    {
+      detail: proposal.pohw.verifiedOrHumanYesIdentities + "/" + proposal.pohw.requiredVerifiedOrHumanYes + " Verified or Human",
+      label: "PoHW",
+      passed: proposal.pohw.passed,
+      value: proposal.pohw.distinctYesIdentities + "/" + proposal.pohw.requiredYesIdentities + " identities"
+    },
+    {
+      detail: proposal.aiReviews.distinctModelFamilies + "/" + proposal.aiReviews.requiredModelFamilies + " model families",
+      label: "PoAW",
+      passed: proposal.aiReviews.passed,
+      value: proposal.aiReviews.validAttestations + "/" + proposal.aiReviews.requiredAttestations + " reviews"
+    },
+    {
+      detail: proposal.builds.matchingCoreArtifactDigests ? "core digests match" : "digest mismatch",
+      label: "Verification",
+      passed: proposal.builds.passed,
+      value: proposal.builds.independentBuilders + "/" + proposal.builds.requiredBuilders + " builders"
+    },
+    {
+      detail: "independent eligible operators",
+      label: "Availability",
+      passed: proposal.dataAvailability.passed,
+      value: proposal.dataAvailability.independentAttestors + "/" + proposal.dataAvailability.requiredAttestors + " attestations"
+    }
+  ];
+  return (
+    <article className="governance-proposal">
+      <header>
+        <div>
+          <span className={"risk-label " + proposal.riskClass}>{proposal.riskClass}</span>
+          <h3>{proposal.diffSummary}</h3>
+          <code title={proposal.proposalId}>{shortHash(proposal.proposalId)}</code>
+        </div>
+        <div className="proposal-state">
+          <strong>{proposal.state}</strong>
+          <span>{formatIdnaAtoms(proposal.bondAtoms)} IDNA bond</span>
+        </div>
+      </header>
+      <div className="proposal-cids">
+        <span>Candidate <code title={proposal.candidateEcosystemCid}>{shortHash(proposal.candidateEcosystemCid)}</code></span>
+        <span>Review round <code title={proposal.reviewRoundId}>{shortHash(proposal.reviewRoundId)}</code> <strong>{proposal.reviewRoundState}</strong></span>
+        <span>Repositories <strong>{proposal.affectedRepositories.join(", ")}</strong></span>
+      </div>
+      <div className="governance-gates">
+        {gates.map((gate) => (
+          <div className={gate.passed ? "governance-gate passed" : "governance-gate pending"} key={gate.label}>
+            {gate.passed ? <CheckCircle2 size={17} /> : <Clock3 size={17} />}
+            <div><span>{gate.label}</span><strong>{gate.value}</strong><small>{gate.detail}</small></div>
+          </div>
+        ))}
+      </div>
+      <footer>
+        <span>Challenge <strong>{proposal.challengeStatus}</strong></span>
+        <span>Execution <strong>{proposal.executionStatus}</strong></span>
+        <span>Critical findings <strong>{proposal.aiReviews.unresolvedCriticalFindings}</strong></span>
+        <span>Frozen set <strong>{proposal.reviewRoundAgentAttestations} reviews / {proposal.reviewRoundBuildAttestations} builds / {proposal.reviewRoundAvailabilityAttestations} pins</strong></span>
+      </footer>
+    </article>
   );
 }
 
@@ -1383,7 +1681,8 @@ function ExplorerOverviewView({
     ["Fork height", forkStatus ? formatInt(forkStatus.tipHeight) : "Not connected", Blocks],
     ["Bitcoin index", overview?.bitcoinHistory?.indexedTipHeight == null ? "Not ready" : formatInt(overview.bitcoinHistory.indexedTipHeight), Database],
     ["Active shares", sharechain ? formatInt(sharechain.activeShareCount) : "Unavailable", GitBranch],
-    ["Pool miners", sharechain ? formatInt(sharechain.registeredMinerCount) : "Unavailable", Users],
+    ["Mainnet handoff", sharechain?.mainnetHandoffParticipantCount == null ? "Unavailable" : `${formatInt(sharechain.mainnetHandoffParticipantCount)} / ${formatInt(sharechain.mainnetHandoffParticipantThreshold)}`, Users],
+    ["Snapshot quorum", sharechain?.snapshotVoterIdenaCount == null ? "Unavailable" : `${formatInt(sharechain.snapshotVoterIdenaCount)} / ${formatInt(sharechain.mainnetHandoffSnapshotVoterThreshold)}`, ShieldCheck],
     ["Eligible identities", idena ? formatInt(idena.eligibleIdentityCount) : "Unavailable", ShieldCheck]
   ] as const;
   return (
@@ -2361,6 +2660,17 @@ function Navigation({
       </div>
       <nav>
         <button
+          aria-current={activeView === "governance" ? "page" : undefined}
+          aria-label="Open software governance"
+          className={activeView === "governance" ? "nav-item active" : "nav-item"}
+          onClick={() => onViewChange("governance")}
+          title="Governance"
+          type="button"
+        >
+          <GitBranch size={17} />
+          <span>Governance</span>
+        </button>
+        <button
           aria-current={activeView === "explorer" ? "page" : undefined}
           aria-label="Open network explorer"
           className={activeView === "explorer" ? "nav-item active" : "nav-item"}
@@ -2400,11 +2710,15 @@ function Navigation({
 function TopBar({
   activeView,
   explorerOverview,
-  explorerState
+  explorerState,
+  governance,
+  governanceState
 }: {
   activeView: AppView;
   explorerOverview: ExplorerOverview | null;
   explorerState: ExplorerLoadState;
+  governance: GovernanceDashboardResponse | null;
+  governanceState: ExplorerLoadState;
 }) {
   const { serviceStatuses } = useDashboardData();
   const explorerStatuses: ServiceStatus[] = [
@@ -2429,7 +2743,33 @@ function TopBar({
       detail: explorerState
     }
   ];
-  const statuses = activeView === "explorer" ? explorerStatuses : serviceStatuses;
+  const governanceStatuses: ServiceStatus[] = [
+    {
+      label: "Governance",
+      state: governance?.status === "verified-local-snapshot" ? "connected" : governanceState === "loading" ? "syncing" : "pending",
+      detail: governance?.status ?? governanceState
+    },
+    {
+      label: "Canonical CID",
+      state: governance?.currentCanonicalEcosystemCid ? "connected" : "pending",
+      detail: shortHash(governance?.currentCanonicalEcosystemCid)
+    },
+    {
+      label: "Proposals",
+      state: governance ? "connected" : "pending",
+      detail: governance ? governance.proposals.length + " tracked" : "unavailable"
+    },
+    {
+      label: "Mode",
+      state: "warning",
+      detail: "experimental / no-value"
+    }
+  ];
+  const statuses = activeView === "explorer"
+    ? explorerStatuses
+    : activeView === "governance"
+      ? governanceStatuses
+      : serviceStatuses;
   return (
     <header className="top-bar">
       <div className="network-title">
@@ -3269,6 +3609,18 @@ function shortHash(value?: string | null) {
 function formatIntegerString(value: string) {
   try {
     return new Intl.NumberFormat("en-US").format(BigInt(value));
+  } catch {
+    return value;
+  }
+}
+
+function formatIdnaAtoms(value: string) {
+  try {
+    const atoms = BigInt(value);
+    const unit = 1_000_000_000_000_000_000n;
+    const whole = atoms / unit;
+    const fraction = (atoms % unit).toString().padStart(18, "0").slice(0, 4).replace(/0+$/, "");
+    return fraction ? `${whole}.${fraction}` : whole.toString();
   } catch {
     return value;
   }

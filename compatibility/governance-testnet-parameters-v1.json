@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "idnaAtomsPerUnit": "1000000000000000000",
+  "stakeQuantumAtoms": "1000000000000",
+  "minimumActiveStakeAtoms": "1000000000000000000",
+  "statusBps": {
+    "Human": 10000,
+    "Verified": 8500,
+    "Newbie": 7000
+  },
+  "flipPriorReported": 1,
+  "flipPriorTotal": 20,
+  "flipTrustFloorBps": 4000,
+  "flipTrustCeilingBps": 10000,
+  "flipPenaltyScale": 15000,
+  "activationDelayEpochs": 1,
+  "unbondingDelayEpochs": 4,
+  "reviewPeriodBlocks": 40,
+  "votingPeriodBlocks": 120,
+  "challengePeriodBlocks": 60,
+  "timelockBlocks": 60,
+  "executionWindowBlocks": 600,
+  "minimumIdentityMetricsAttestations": 3,
+  "minimumReviewerBondAtoms": "1000000000000000000",
+  "minimumBuilderBondAtoms": "1000000000000000000",
+  "minimumDataAvailabilityBondAtoms": "1000000000000000000",
+  "normal": {
+    "turnoutQuorumBps": 2000,
+    "yesThresholdBps": 6667,
+    "minimumYesIdentities": 7,
+    "minimumVerifiedOrHumanYes": 3,
+    "minimumAgentAttestations": 3,
+    "minimumAgentFamilies": 2,
+    "minimumAgentOwners": 2,
+    "minimumBuilders": 2,
+    "minimumBuilderPlatforms": 1,
+    "minimumDataAvailabilityProviders": 2
+  },
+  "critical": {
+    "turnoutQuorumBps": 3000,
+    "yesThresholdBps": 7500,
+    "minimumYesIdentities": 12,
+    "minimumVerifiedOrHumanYes": 5,
+    "minimumAgentAttestations": 5,
+    "minimumAgentFamilies": 3,
+    "minimumAgentOwners": 3,
+    "minimumBuilders": 3,
+    "minimumBuilderPlatforms": 2,
+    "minimumDataAvailabilityProviders": 3
+  },
+  "proposalBondPolicy": {
+    "minimumBondAtoms": "10000000000000000000",
+    "rejectedReturnBps": 9000,
+    "staleProcessingFeeAtoms": "100000000000000000",
+    "expiredSlashBps": 2500
+  },
+  "objectiveSlashPolicy": {
+    "fraudulentProposalSlashBps": 5000,
+    "fraudulentReviewerSlashBps": 10000,
+    "fraudulentBuilderSlashBps": 10000,
+    "unavailableDataSlashBps": 5000,
+    "fraudulentActorStakeSlashBps": 500
+  }
+}

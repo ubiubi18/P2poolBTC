@@ -4,6 +4,7 @@ mod dashboard_api;
 mod explorer_api;
 mod fork_chain;
 mod frost_signer_daemon;
+mod governance_api;
 mod local_node;
 mod mining_adapter;
 mod p2p_node;
@@ -50,6 +51,7 @@ use pohw_core::{DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -65,6 +67,10 @@ const MAX_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS: u64 = 50_000;
 const MAX_OPTIONAL_SECRET_BYTES: usize = 512;
 const MAX_OPTIONAL_SECRET_FILE_BYTES: u64 = MAX_OPTIONAL_SECRET_BYTES as u64 + 2;
 const MAX_SECRET_KEY_FILE_BYTES: u64 = 68;
+pub(crate) const MAINNET_HANDOFF_PARTICIPANT_THRESHOLD: usize = 20;
+pub(crate) const MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS: u64 = 2;
+pub(crate) const MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS: usize = 3;
+pub(crate) const MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Parser)]
 #[command(name = "p2pool-node")]
@@ -87,6 +93,18 @@ enum Command {
     Status {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
+    },
+    MainnetHandoffEvidence {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS)]
+        max_snapshot_age_days: u64,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS)]
+        min_snapshot_voters: usize,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS)]
+        max_share_age_seconds: u64,
     },
     RunForkChainNode {
         #[arg(long, default_value = ".pohw-p2pool/fork-chain")]
@@ -275,6 +293,8 @@ enum Command {
         explorer_bitcoin_index_url: Option<String>,
         #[arg(long, env = "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX")]
         explorer_allow_remote_bitcoin_index: bool,
+        #[arg(long, env = "POHW_GOVERNANCE_DASHBOARD_STATE_FILE")]
+        governance_dashboard_state_file: Option<PathBuf>,
     },
     RunGossipMesh {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -621,6 +641,8 @@ enum Command {
         stratum_password_file: Option<PathBuf>,
         #[arg(long)]
         block_candidate_dir: Option<PathBuf>,
+        #[arg(long)]
+        payout_candidate_dir: Option<PathBuf>,
         #[arg(long = "peer-addr")]
         peer_addrs: Vec<SocketAddr>,
         #[arg(long, default_value_t = mining_adapter::default_stratum_difficulty())]
@@ -638,9 +660,17 @@ enum Command {
         #[arg(long)]
         auto_submit_blocks: bool,
         #[arg(long)]
+        allow_mainnet_submit: bool,
+        #[arg(long)]
         payout_schedule_file: Option<PathBuf>,
         #[arg(long)]
         pohw_commitment_file: Option<PathBuf>,
+        #[arg(long)]
+        derive_pohw_payouts_from_state: bool,
+        #[arg(long, default_value_t = MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS)]
+        derive_pohw_min_snapshot_voters: usize,
+        #[arg(long)]
+        snapshot_dir: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -693,6 +723,44 @@ enum Command {
         rpc_cookie_file: Option<PathBuf>,
         #[arg(long, default_value_t = mining_adapter::default_extranonce2_size())]
         extranonce2_size: usize,
+    },
+    BuildDynamicPohwStratumJobRpc {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long)]
+        miner_id: String,
+        #[arg(long)]
+        pohw_commitment_file: PathBuf,
+        #[arg(long)]
+        job_out: PathBuf,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
+        rpc_url: String,
+        #[arg(long)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "BITCOIN_RPC_USER")]
+        rpc_user: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_PASSWORD")]
+        rpc_password: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
+        rpc_cookie_file: Option<PathBuf>,
+        #[arg(long, default_value_t = mining_adapter::default_extranonce2_size())]
+        extranonce2_size: usize,
+    },
+    BitcoinMiningReadiness {
+        #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
+        rpc_url: String,
+        #[arg(long)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "BITCOIN_RPC_USER")]
+        rpc_user: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_PASSWORD")]
+        rpc_password: Option<String>,
+        #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
+        rpc_cookie_file: Option<PathBuf>,
     },
     BuildStratumBlockCandidate {
         #[arg(long)]
@@ -1416,6 +1484,82 @@ async fn main() -> Result<()> {
             let status = local_node::local_node_status(&datadir)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
         }
+        Command::MainnetHandoffEvidence {
+            datadir,
+            snapshot_dir,
+            max_snapshot_age_days,
+            min_snapshot_voters,
+            max_share_age_seconds,
+        } => {
+            if min_snapshot_voters == 0 {
+                bail!("--min-snapshot-voters must be greater than zero");
+            }
+            let state = local_node::replay_state(&datadir)?;
+            let snapshot_status = local_node::latest_verified_snapshot(&snapshot_dir)?;
+            let verified = snapshot_status
+                .latest
+                .context("no verified Idena snapshot is available for mainnet handoff")?;
+            let today = Utc::now().date_naive();
+            let snapshot_age_days = (today - verified.snapshot.snapshot_day).num_days();
+            if snapshot_age_days < 0 {
+                bail!("latest verified Idena snapshot is dated in the future");
+            }
+            if u64::try_from(snapshot_age_days).unwrap_or(u64::MAX) > max_snapshot_age_days {
+                bail!(
+                    "latest verified Idena snapshot is too old for mainnet handoff: {} days",
+                    snapshot_age_days
+                );
+            }
+            let eligible_idena_addresses = verified
+                .snapshot
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.is_block_eligible())
+                .map(|leaf| leaf.idena_address.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if max_share_age_seconds == 0 || max_share_age_seconds > i64::MAX as u64 {
+                bail!("--max-share-age-seconds must be between 1 and {}", i64::MAX);
+            }
+            let now_unix = Utc::now().timestamp();
+            let minimum_created_at = now_unix
+                .checked_sub(
+                    i64::try_from(max_share_age_seconds).context("share age does not fit i64")?,
+                )
+                .context("share freshness boundary underflow")?;
+            let active_idena_addresses = state.recent_active_idena_addresses(minimum_created_at);
+            let eligible_active_idena_participant_count = active_idena_addresses
+                .intersection(&eligible_idena_addresses)
+                .count();
+            let snapshot_day = verified.snapshot.snapshot_day.to_string();
+            let snapshot_voter_idena_count = state.unique_snapshot_voter_idena_count(
+                &snapshot_day,
+                verified.snapshot.idena_height,
+                &verified.snapshot.score_root,
+            );
+            if snapshot_voter_idena_count < min_snapshot_voters {
+                bail!(
+                    "verified Idena snapshot has {} distinct identity voters; {} required",
+                    snapshot_voter_idena_count,
+                    min_snapshot_voters
+                );
+            }
+            let summary = state.summary();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "registered_miner_count": summary.registered_miner_count,
+                    "unique_registered_idena_count": summary.unique_registered_idena_count,
+                    "active_idena_participant_count": summary.active_idena_participant_count,
+                    "eligible_active_idena_participant_count": eligible_active_idena_participant_count,
+                    "eligible_snapshot_identity_count": eligible_idena_addresses.len(),
+                    "snapshot_day": snapshot_day,
+                    "snapshot_age_days": snapshot_age_days,
+                    "snapshot_voter_idena_count": snapshot_voter_idena_count,
+                    "max_share_age_seconds": max_share_age_seconds,
+                    "last_message_hash": summary.last_message_hash,
+                }))?
+            );
+        }
         Command::RunForkChainNode {
             datadir,
             activation_manifest,
@@ -1658,6 +1802,7 @@ async fn main() -> Result<()> {
             explorer_fork_activation_manifest,
             explorer_bitcoin_index_url,
             explorer_allow_remote_bitcoin_index,
+            governance_dashboard_state_file,
         } => {
             let bitcoin_rpc_configured = enable_bitcoin_rpc
                 || bitcoin_rpc_user.is_some()
@@ -1728,6 +1873,7 @@ async fn main() -> Result<()> {
                 public_explorer,
                 fork_chain_client,
                 bitcoin_index_client,
+                governance_state_file: governance_dashboard_state_file,
             })
             .await?;
         }
@@ -2269,6 +2415,7 @@ async fn main() -> Result<()> {
             node_secret_key_file,
             stratum_password_file,
             block_candidate_dir,
+            payout_candidate_dir,
             peer_addrs,
             stratum_difficulty,
             extranonce2_size,
@@ -2277,8 +2424,12 @@ async fn main() -> Result<()> {
             refresh_job_from_rpc,
             job_refresh_interval_seconds,
             auto_submit_blocks,
+            allow_mainnet_submit,
             payout_schedule_file,
             pohw_commitment_file,
+            derive_pohw_payouts_from_state,
+            derive_pohw_min_snapshot_voters,
+            snapshot_dir,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -2306,28 +2457,74 @@ async fn main() -> Result<()> {
             if fork_chain_client.is_some() && refresh_job_from_rpc {
                 bail!("--fork-chain-rpc-addr cannot be combined with --refresh-job-from-rpc");
             }
-            let bitcoin_rpc_client =
-                if fork_chain_client.is_none() && (refresh_job_from_rpc || auto_submit_blocks) {
-                    Some(bitcoin_rpc_client(
-                        rpc_url,
-                        rpc_user,
-                        rpc_password,
-                        rpc_cookie_file,
-                        allow_remote_rpc,
-                    )?)
+            let bitcoin_rpc_client = if fork_chain_client.is_none()
+                && (refresh_job_from_rpc || auto_submit_blocks || derive_pohw_payouts_from_state)
+            {
+                Some(bitcoin_rpc_client(
+                    rpc_url,
+                    rpc_user,
+                    rpc_password,
+                    rpc_cookie_file,
+                    allow_remote_rpc,
+                )?)
+            } else {
+                None
+            };
+            if auto_submit_blocks {
+                if let Some(client) = bitcoin_rpc_client.as_ref() {
+                    let chain_info = client.get_blockchain_info().await?;
+                    ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
+                    if chain_info.chain.eq_ignore_ascii_case("main") {
+                        ensure_bitcoin_mining_ready(&chain_info)?;
+                    }
+                }
+            }
+            let (payout_schedule, pohw_commitment, dynamic_pohw_payout) =
+                if derive_pohw_payouts_from_state {
+                    if payout_schedule_file.is_some() {
+                        bail!("--derive-pohw-payouts-from-state cannot be combined with --payout-schedule-file");
+                    }
+                    if !refresh_job_from_rpc && fork_chain_client.is_none() {
+                        bail!("--derive-pohw-payouts-from-state requires --refresh-job-from-rpc or --fork-chain-rpc-addr");
+                    }
+                    if fork_chain_client.is_none()
+                        && derive_pohw_min_snapshot_voters < MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+                    {
+                        bail!(
+                            "Bitcoin RPC dynamic payouts require at least {} snapshot voters",
+                            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+                        );
+                    }
+                    let commitment_path = pohw_commitment_file.context(
+                        "--derive-pohw-payouts-from-state requires --pohw-commitment-file",
+                    )?;
+                    let snapshot_dir = snapshot_dir
+                        .context("--derive-pohw-payouts-from-state requires --snapshot-dir")?;
+                    (
+                        None,
+                        None,
+                        Some(mining_adapter::DynamicPohwPayoutConfig {
+                            snapshot_dir,
+                            commitment_template: read_pohw_commitment_file(&commitment_path)?,
+                            min_snapshot_voters: derive_pohw_min_snapshot_voters,
+                        }),
+                    )
                 } else {
-                    None
-                };
-            let (payout_schedule, pohw_commitment) =
-                match (payout_schedule_file, pohw_commitment_file) {
-                    (Some(schedule_path), Some(commitment_path)) => (
-                        Some(read_payout_schedule_file(&schedule_path)?),
-                        Some(read_pohw_commitment_file(&commitment_path)?),
-                    ),
-                    (None, None) => (None, None),
-                    _ => bail!(
+                    if snapshot_dir.is_some() {
+                        bail!("--snapshot-dir requires --derive-pohw-payouts-from-state");
+                    }
+                    let (schedule, commitment) = match (payout_schedule_file, pohw_commitment_file)
+                    {
+                        (Some(schedule_path), Some(commitment_path)) => (
+                            Some(read_payout_schedule_file(&schedule_path)?),
+                            Some(read_pohw_commitment_file(&commitment_path)?),
+                        ),
+                        (None, None) => (None, None),
+                        _ => bail!(
                     "--payout-schedule-file and --pohw-commitment-file must be supplied together"
-                ),
+                    ),
+                    };
+                    (schedule, commitment, None)
                 };
             mining_adapter::run_mining_adapter(mining_adapter::MiningAdapterConfig {
                 datadir,
@@ -2343,6 +2540,7 @@ async fn main() -> Result<()> {
                 node_secret_key_file,
                 stratum_password_file,
                 block_candidate_dir,
+                payout_candidate_dir,
                 peer_addrs,
                 stratum_difficulty,
                 extranonce2_size,
@@ -2356,6 +2554,7 @@ async fn main() -> Result<()> {
                 auto_submit_blocks,
                 payout_schedule,
                 pohw_commitment,
+                dynamic_pohw_payout,
             })
             .await?;
         }
@@ -2446,6 +2645,94 @@ async fn main() -> Result<()> {
                     "extranonce1_bytes": built.extranonce1_bytes,
                     "extranonce2_bytes": built.extranonce2_bytes,
                     "note": built.note,
+                }))?
+            );
+        }
+        Command::BuildDynamicPohwStratumJobRpc {
+            datadir,
+            snapshot_dir,
+            miner_id,
+            pohw_commitment_file,
+            job_out,
+            replace,
+            rpc_url,
+            allow_remote_rpc,
+            rpc_user,
+            rpc_password,
+            rpc_cookie_file,
+            extranonce2_size,
+        } => {
+            let commitment_template = read_pohw_commitment_file(&pohw_commitment_file)?;
+            let client = bitcoin_rpc_client(
+                rpc_url,
+                rpc_user,
+                rpc_password,
+                rpc_cookie_file,
+                allow_remote_rpc,
+            )?;
+            let material = client.mining_job_template().await?;
+            let built = mining_adapter::build_dynamic_pohw_stratum_job_from_template(
+                &datadir,
+                &snapshot_dir,
+                &miner_id,
+                &commitment_template,
+                &material,
+                extranonce2_size,
+                MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+            )?;
+            if replace {
+                write_json_file_replace_existing_regular(&job_out, &built.built.job)?;
+            } else {
+                write_json_file(&job_out, &built.built.job)?;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "job_out": display_path(&job_out),
+                    "job_id": built.built.job.job_id,
+                    "source_height": built.built.source_height,
+                    "source_previous_block_hash": built.built.source_previous_block_hash,
+                    "source_transaction_count": built.built.source_transaction_count,
+                    "coinbase_value_sats": built.built.source_coinbase_value_sats,
+                    "snapshot_day": built.snapshot.snapshot_day.to_string(),
+                    "snapshot_height": built.snapshot.idena_height,
+                    "payout_schedule_root": built.payout_schedule.payout_root,
+                    "pohw_commitment_hash": built.pohw_commitment.commitment_hash(),
+                    "coinbase_positive_output_sats": payout_schedule_coinbase_positive_output_sats(&built.payout_schedule)?,
+                    "extranonce1_bytes": built.built.extranonce1_bytes,
+                    "extranonce2_bytes": built.built.extranonce2_bytes,
+                    "note": built.built.note,
+                }))?
+            );
+        }
+        Command::BitcoinMiningReadiness {
+            rpc_url,
+            allow_remote_rpc,
+            rpc_user,
+            rpc_password,
+            rpc_cookie_file,
+        } => {
+            let client = bitcoin_rpc_client(
+                rpc_url,
+                rpc_user,
+                rpc_password,
+                rpc_cookie_file,
+                allow_remote_rpc,
+            )?;
+            let chain_info = client.get_blockchain_info().await?;
+            ensure_bitcoin_mining_ready(&chain_info)?;
+            let template = client.mining_job_template().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ready": true,
+                    "chain": chain_info.chain,
+                    "blocks": chain_info.blocks,
+                    "headers": chain_info.headers,
+                    "initialBlockDownload": chain_info.initial_block_download,
+                    "verificationProgress": chain_info.verificationprogress,
+                    "templateHeight": template.height,
+                    "templateTransactionCount": template.transactions.len(),
                 }))?
             );
         }
@@ -5176,6 +5463,32 @@ fn ensure_candidate_submit_chain_allowed(
     Ok(())
 }
 
+fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
+    if !chain_info.chain.eq_ignore_ascii_case("main") {
+        bail!(
+            "Bitcoin mining handoff requires mainnet RPC; got chain '{}'",
+            chain_info.chain
+        );
+    }
+    if chain_info.initial_block_download {
+        bail!("Bitcoin mainnet RPC is still in initial block download");
+    }
+    if chain_info.headers != chain_info.blocks {
+        bail!(
+            "Bitcoin mainnet RPC is not at its reported header tip: blocks={} headers={}",
+            chain_info.blocks,
+            chain_info.headers
+        );
+    }
+    if !chain_info.verificationprogress.is_finite() || chain_info.verificationprogress < 0.999_999 {
+        bail!(
+            "Bitcoin mainnet verification progress is not ready: {:.8}",
+            chain_info.verificationprogress
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct PrepareForkActivationInput {
     chain_name: String,
@@ -6467,6 +6780,40 @@ mod tests {
         let mut regtest = chain_info;
         regtest.chain = "regtest".to_string();
         assert!(ensure_candidate_submit_chain_allowed(&regtest, false).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_mining_readiness_requires_fully_verified_mainnet() {
+        let ready = BlockchainInfoResponse {
+            chain: "main".to_string(),
+            blocks: 900_000,
+            headers: 900_000,
+            initial_block_download: false,
+            verificationprogress: 1.0,
+            pruned: false,
+        };
+        assert!(ensure_bitcoin_mining_ready(&ready).is_ok());
+
+        let mut syncing = ready.clone();
+        syncing.initial_block_download = true;
+        assert!(ensure_bitcoin_mining_ready(&syncing)
+            .unwrap_err()
+            .to_string()
+            .contains("initial block download"));
+
+        let mut behind = ready.clone();
+        behind.headers += 1;
+        assert!(ensure_bitcoin_mining_ready(&behind)
+            .unwrap_err()
+            .to_string()
+            .contains("header tip"));
+
+        let mut wrong_network = ready;
+        wrong_network.chain = "regtest".to_string();
+        assert!(ensure_bitcoin_mining_ready(&wrong_network)
+            .unwrap_err()
+            .to_string()
+            .contains("requires mainnet"));
     }
 
     #[test]

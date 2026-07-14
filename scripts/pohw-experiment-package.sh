@@ -301,6 +301,8 @@ manifest = {
     "git_commit": git_commit or None,
     "git_dirty": git_dirty == "true",
     "no_value_ack_required": "I_UNDERSTAND_NO_VALUE",
+    "mainnet_handoff_participant_threshold": 20,
+    "mainnet_handoff_ack_required": "I_UNDERSTAND_REAL_BITCOIN",
     "file_count": len(files),
     "files": files,
     "excluded_by_policy": [

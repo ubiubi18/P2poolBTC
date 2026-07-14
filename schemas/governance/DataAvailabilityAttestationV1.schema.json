@@ -1,0 +1,22 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/DataAvailabilityAttestationV1.schema.json",
+  "title":"DataAvailabilityAttestationV1 canonical payload",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","candidateEcosystemCid","pinsetCid","providerId","operatorIdentity","verifiedCids","probeResultCid","available","observedAtBlockOrTimestamp","expiresAtBlock","bondAtoms","authentication"],
+  "properties":{
+    "schemaVersion":{"const":1},
+    "candidateEcosystemCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
+    "pinsetCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
+    "providerId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,80}$"},
+    "operatorIdentity":{"$ref":"common.schema.json#/$defs/Address"},
+    "verifiedCids":{"type":"array","minItems":1,"maxItems":4096,"uniqueItems":true,"items":{"$ref":"common.schema.json#/$defs/ContentCid"}},
+    "probeResultCid":{"$ref":"common.schema.json#/$defs/RawCid"},
+    "available":{"type":"boolean"},
+    "observedAtBlockOrTimestamp":{"type":"integer","minimum":0},
+    "expiresAtBlock":{"type":"integer","minimum":0},
+    "bondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
+    "authentication":{"const":"on-chain-submitter"}
+  }
+}

@@ -2,6 +2,7 @@ use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
 use crate::bitcoin_rpc::{BitcoinRpcAuth, BitcoinRpcClient};
 use crate::explorer_api;
 use crate::fork_chain::ForkChainClient;
+use crate::governance_api;
 use crate::local_node;
 use anyhow::{bail, Context, Result};
 use idena_lite_indexer::rpc::{EpochResponse, IdenaRpcClient, SyncingResponse};
@@ -62,6 +63,7 @@ pub struct DashboardApiConfig {
     pub public_explorer: bool,
     pub fork_chain_client: Option<ForkChainClient>,
     pub bitcoin_index_client: Option<BitcoinExplorerIndexClient>,
+    pub governance_state_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1067,6 +1069,18 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 }
             };
             json_http_response("200 OK", &overview, cors_origin.as_deref())
+        }
+        ("GET", "/api/v1/governance") => {
+            if !target.query.is_empty() {
+                return Ok(bad_explorer_request(cors_origin.as_deref()));
+            }
+            match governance_api::load_dashboard(config.governance_state_file.as_deref()) {
+                Ok(snapshot) => json_http_response("200 OK", &snapshot, cors_origin.as_deref()),
+                Err(err) => {
+                    eprintln!("warning: governance dashboard snapshot failed validation: {err:#}");
+                    Ok(explorer_unavailable(cors_origin.as_deref()))
+                }
+            }
         }
         ("GET", "/api/v1/fork/blocks") => {
             let (cursor, limit) = match explorer_pagination(&target.query) {
@@ -2570,6 +2584,18 @@ mod tests {
         assert!(!response.contains("idenaAddress"));
         assert!(!response.contains("payoutScript"));
 
+        let governance = handle_http_request(
+            "GET /api/v1/governance HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &config,
+        )
+        .await
+        .unwrap();
+        let governance = String::from_utf8(governance).unwrap();
+        assert!(governance.starts_with("HTTP/1.1 200 OK"));
+        assert!(governance.contains("pohw-governance-dashboard-v1"));
+        assert!(governance.contains("EXPERIMENTAL / NO-VALUE"));
+        assert!(governance.contains("\"status\": \"unconfigured\""));
+
         let response = handle_http_request(
             "GET /dashboard.json HTTP/1.1\r\nHost: localhost\r\n\r\n",
             &config,
@@ -2882,6 +2908,7 @@ mod tests {
             public_explorer: false,
             fork_chain_client: None,
             bitcoin_index_client: None,
+            governance_state_file: None,
         }
     }
 }

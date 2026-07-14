@@ -5,6 +5,19 @@ the no-value PoHW test chain. It inherits one Bitcoin mainnet block hash as its
 parent, but it does not modify Bitcoin Core and it never submits fork blocks to
 Bitcoin mainnet.
 
+For the canonical deployment this fork is temporary. Hosts that explicitly arm
+the controller described in
+[The 20-participant mainnet handoff](../README.md#the-20-participant-mainnet-handoff)
+stop this service and remove its dedicated datadir after 20 distinct verified
+Idena identities have contributed accepted active-chain work and Bitcoin
+mainnet mining passes preflight. The activation manifest and sharechain are
+preserved; only `POHW_FORK_CHAIN_DATADIR` is removed.
+
+The packaged systemd controller can remove a dedicated fork datadir below
+`/var/lib/pohw-p2pool` or the Hetzner profile's `/srv/sharechain`. It refuses
+symlinks, high-level filesystem paths, and directories without the fork
+node's regular `fork-chain.lock` marker.
+
 ## Consensus Contract
 
 Every node loads the same canonical `fork-activation.json`. The activation ID
@@ -235,6 +248,10 @@ To roll back the binary, stop both services, restore the previous release, and
 restart the fork node before Stratum. To reset this no-value experiment, stop
 both services and move the entire fork-chain datadir aside. Never reuse a block
 log with a different activation manifest.
+
+Do not use that manual reset procedure after the mainnet activation receipt
+exists. The handoff is one-way: restore mainnet mining configuration or stop
+mining, but do not silently recreate the retired canonical fork.
 
 ## Remaining Production Work
 

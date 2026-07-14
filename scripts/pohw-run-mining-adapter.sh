@@ -7,12 +7,16 @@ DATADIR="${POHW_DATADIR:-/mnt/ssd/pohw-p2pool}"
 BIND_ADDR="${POHW_STRATUM_BIND_ADDR:-127.0.0.1:3333}"
 JOB_FILE="${POHW_STRATUM_JOB_FILE:-$DATADIR/mining-job.json}"
 BLOCK_CANDIDATE_DIR="${POHW_STRATUM_BLOCK_CANDIDATE_DIR:-$DATADIR/block-candidates}"
+PAYOUT_CANDIDATE_DIR="${POHW_PAYOUT_CANDIDATE_DIR:-$DATADIR/payout-candidates}"
+SNAPSHOT_DIR="${POHW_SNAPSHOT_DIR:-$DATADIR/snapshots}"
 SHARE_TARGET="${POHW_STRATUM_SHARE_TARGET:-}"
 STRATUM_DIFFICULTY="${POHW_STRATUM_DIFFICULTY:-1}"
 EXTRANONCE2_SIZE="${POHW_STRATUM_EXTRANONCE2_SIZE:-4}"
 MAX_LINE_BYTES="${POHW_STRATUM_MAX_LINE_BYTES:-16384}"
 IDLE_TIMEOUT_SECONDS="${POHW_STRATUM_IDLE_TIMEOUT_SECONDS:-900}"
 JOB_REFRESH_INTERVAL_SECONDS="${POHW_STRATUM_JOB_REFRESH_INTERVAL_SECONDS:-5}"
+DYNAMIC_MIN_SNAPSHOT_VOTERS="${POHW_STRATUM_DYNAMIC_MIN_SNAPSHOT_VOTERS:-3}"
+BITCOIN_RPC_URL="${POHW_BITCOIN_RPC_URL:-http://127.0.0.1:8332}"
 FORK_CHAIN_RPC_ADDR="${POHW_STRATUM_FORK_CHAIN_RPC_ADDR:-}"
 FORK_CHAIN_ACTIVATION_MANIFEST="${POHW_FORK_ACTIVATION_MANIFEST:-}"
 FORK_CHAIN_MODE=false
@@ -24,6 +28,32 @@ if [[ -n "$FORK_CHAIN_RPC_ADDR" || -n "$FORK_CHAIN_ACTIVATION_MANIFEST" ]]; then
   fi
   FORK_CHAIN_MODE=true
 fi
+
+if ! [[ "$DYNAMIC_MIN_SNAPSHOT_VOTERS" =~ ^[1-9][0-9]{0,2}$ ]] \
+  || (( DYNAMIC_MIN_SNAPSHOT_VOTERS > 512 )); then
+  echo "POHW_STRATUM_DYNAMIC_MIN_SNAPSHOT_VOTERS must be an integer between 1 and 512." >&2
+  exit 1
+fi
+
+case "${POHW_MAINNET_HANDOFF_ACTIVE:-false}" in
+  true)
+    if [[ "$FORK_CHAIN_MODE" == "true" \
+      || "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" != "false" \
+      || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" != "false" \
+      || "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" != "true" \
+      || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" != "true" \
+      || "${POHW_STRATUM_ALLOW_MAINNET_SUBMIT:-false}" != "true" ]]; then
+      echo "Mainnet handoff mode requires dynamic payout-aware Bitcoin RPC jobs and explicit block submission." >&2
+      exit 1
+    fi
+    ;;
+  false)
+    ;;
+  *)
+    echo "POHW_MAINNET_HANDOFF_ACTIVE must be true or false." >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "${POHW_MINER_ID:-}" ]]; then
   echo "POHW_MINER_ID is required before starting the mining adapter." >&2
@@ -44,12 +74,26 @@ if [[ -z "${POHW_IDENA_SNAPSHOT_PROOF_ROOT:-}" ]]; then
   exit 1
 fi
 
-if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" && "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
-  echo "Use either POHW_STRATUM_BUILD_JOB_FROM_RPC or POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC, not both." >&2
+rpc_builder_count=0
+for enabled in \
+  "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" \
+  "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" \
+  "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}"; do
+  if [[ "$enabled" == "true" ]]; then
+    rpc_builder_count=$((rpc_builder_count + 1))
+  elif [[ "$enabled" != "false" ]]; then
+    echo "Bitcoin RPC job mode flags must be true or false." >&2
+    exit 1
+  fi
+done
+if (( rpc_builder_count > 1 )); then
+  echo "Enable only one Bitcoin RPC job mode." >&2
   exit 1
 fi
 
-if [[ "$FORK_CHAIN_MODE" == "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ) ]]; then
+if [[ "$FORK_CHAIN_MODE" == "true" \
+  && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" \
+    || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ) ]]; then
   echo "Fork-chain template mode cannot be combined with Bitcoin RPC job builders." >&2
   exit 1
 fi
@@ -70,7 +114,7 @@ configure_rpc_environment() {
   fi
 }
 
-if [[ "$FORK_CHAIN_MODE" != "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
+if [[ "$FORK_CHAIN_MODE" != "true" && ( "$rpc_builder_count" -gt 0 || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
   configure_rpc_environment
 fi
 
@@ -91,11 +135,72 @@ check_health_ready_for_rpc_job() {
     --max-age-seconds "$max_age_seconds"
 }
 
-if [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+derive_fork_share_policy() {
+  local policy
+  if ! policy="$(python3 - "$FORK_CHAIN_ACTIVATION_MANIFEST" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+metadata = os.lstat(path)
+if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit("fork activation manifest must be a regular non-symlink file")
+if metadata.st_size > 1024 * 1024:
+    raise SystemExit("fork activation manifest exceeds 1 MiB")
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags)
+with os.fdopen(fd, "r", encoding="utf-8") as stream:
+    manifest = json.load(stream)
+bits = manifest.get("config", {}).get("post_fork_pow_limit_bits")
+if isinstance(bits, bool) or not isinstance(bits, int) or not 0 <= bits <= 0xFFFFFFFF:
+    raise SystemExit("fork activation manifest has invalid post_fork_pow_limit_bits")
+exponent = bits >> 24
+mantissa = bits & 0x007FFFFF
+if bits & 0x00800000 or mantissa == 0:
+    raise SystemExit("fork activation manifest has a negative or zero PoW limit")
+if exponent <= 3:
+    target = mantissa >> (8 * (3 - exponent))
+else:
+    target = mantissa << (8 * (exponent - 3))
+if target <= 0 or target >= 1 << 256:
+    raise SystemExit("fork activation manifest PoW limit is outside the uint256 range")
+diff_one_target = 0xFFFF << (8 * (0x1D - 3))
+print(target.to_bytes(32, "big").hex())
+print(format(diff_one_target / target, ".17g"))
+PY
+  )"; then
+    echo "Failed to derive the fork Stratum share policy from the activation manifest." >&2
+    exit 1
+  fi
+  if [[ "$policy" != *$'\n'* ]]; then
+    echo "Failed to derive the fork Stratum share policy from the activation manifest." >&2
+    exit 1
+  fi
+  SHARE_TARGET="${policy%%$'\n'*}"
+  STRATUM_DIFFICULTY="${policy#*$'\n'}"
+  if [[ ! "$SHARE_TARGET" =~ ^[0-9a-f]{64}$ \
+    || ! "$STRATUM_DIFFICULTY" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
+    echo "Derived fork Stratum share policy has an invalid format." >&2
+    exit 1
+  fi
+}
+
+if [[ "$FORK_CHAIN_MODE" != "true" ]] && (( rpc_builder_count > 0 )); then
   check_health_ready_for_rpc_job
 fi
 
-if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+if [[ "$FORK_CHAIN_MODE" == "true" && -z "$SHARE_TARGET" ]]; then
+  derive_fork_share_policy
+fi
+
+if [[ "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" == "true" ]]; then
+  if [[ -z "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
+    echo "POHW_STRATUM_POHW_COMMITMENT_FILE is required for dynamic PoHW payouts." >&2
+    exit 1
+  fi
+elif [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
   if [[ -z "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" ]]; then
     echo "POHW_STRATUM_PAYOUT_SCHEDULE_FILE is required when building a PoHW Stratum job from RPC." >&2
     exit 1
@@ -112,9 +217,7 @@ if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
     --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
     --extranonce2-size "$EXTRANONCE2_SIZE"
   )
-  if [[ -n "${POHW_BITCOIN_RPC_URL:-}" ]]; then
-    build_args+=(--rpc-url "$POHW_BITCOIN_RPC_URL")
-  fi
+  build_args+=(--rpc-url "$BITCOIN_RPC_URL")
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     build_args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
   fi
@@ -129,9 +232,7 @@ elif [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" ]]; then
     --replace
     --extranonce2-size "$EXTRANONCE2_SIZE"
   )
-  if [[ -n "${POHW_BITCOIN_RPC_URL:-}" ]]; then
-    build_args+=(--rpc-url "$POHW_BITCOIN_RPC_URL")
-  fi
+  build_args+=(--rpc-url "$BITCOIN_RPC_URL")
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     build_args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
   fi
@@ -170,7 +271,7 @@ if [[ "$FORK_CHAIN_MODE" == "true" ]]; then
     --fork-chain-activation-manifest "$FORK_CHAIN_ACTIVATION_MANIFEST"
     --job-refresh-interval-seconds "$JOB_REFRESH_INTERVAL_SECONDS"
   )
-else
+elif [[ "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" != "true" ]]; then
   args+=(--job-file "$JOB_FILE")
 fi
 
@@ -186,6 +287,10 @@ if [[ -n "$BLOCK_CANDIDATE_DIR" ]]; then
   args+=(--block-candidate-dir "$BLOCK_CANDIDATE_DIR")
 fi
 
+if [[ "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" == "true" ]]; then
+  args+=(--payout-candidate-dir "$PAYOUT_CANDIDATE_DIR")
+fi
+
 if [[ "${POHW_STRATUM_ALLOW_NON_LOOPBACK:-false}" == "true" ]]; then
   args+=(--allow-non-loopback-stratum)
 fi
@@ -199,7 +304,14 @@ if [[ "${POHW_STRATUM_APPEND:-true}" != "true" ]]; then
 fi
 
 if [[ "$FORK_CHAIN_MODE" == "true" ]]; then
-  if [[ -n "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" || -n "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
+  if [[ "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" == "true" ]]; then
+    args+=(
+      --derive-pohw-payouts-from-state
+      --derive-pohw-min-snapshot-voters "$DYNAMIC_MIN_SNAPSHOT_VOTERS"
+      --snapshot-dir "$SNAPSHOT_DIR"
+      --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
+    )
+  elif [[ -n "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" || -n "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
     if [[ -z "${POHW_STRATUM_PAYOUT_SCHEDULE_FILE:-}" || -z "${POHW_STRATUM_POHW_COMMITMENT_FILE:-}" ]]; then
       echo "POHW_STRATUM_PAYOUT_SCHEDULE_FILE and POHW_STRATUM_POHW_COMMITMENT_FILE must be set together." >&2
       exit 1
@@ -209,12 +321,19 @@ if [[ "$FORK_CHAIN_MODE" == "true" ]]; then
       --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
     )
   fi
-elif [[ "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+elif (( rpc_builder_count > 0 )); then
   args+=(
     --refresh-job-from-rpc
     --job-refresh-interval-seconds "$JOB_REFRESH_INTERVAL_SECONDS"
   )
-  if [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
+  if [[ "${POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE:-false}" == "true" ]]; then
+    args+=(
+      --derive-pohw-payouts-from-state
+      --derive-pohw-min-snapshot-voters "$DYNAMIC_MIN_SNAPSHOT_VOTERS"
+      --snapshot-dir "$SNAPSHOT_DIR"
+      --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
+    )
+  elif [[ "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" ]]; then
     args+=(
       --payout-schedule-file "$POHW_STRATUM_PAYOUT_SCHEDULE_FILE"
       --pohw-commitment-file "$POHW_STRATUM_POHW_COMMITMENT_FILE"
@@ -226,10 +345,12 @@ if [[ "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ]]; then
   args+=(--auto-submit-blocks)
 fi
 
-if [[ "$FORK_CHAIN_MODE" != "true" && ( "${POHW_STRATUM_BUILD_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC:-false}" == "true" || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
-  if [[ -n "${POHW_BITCOIN_RPC_URL:-}" ]]; then
-    args+=(--rpc-url "$POHW_BITCOIN_RPC_URL")
-  fi
+if [[ "$FORK_CHAIN_MODE" != "true" && "${POHW_STRATUM_ALLOW_MAINNET_SUBMIT:-false}" == "true" ]]; then
+  args+=(--allow-mainnet-submit)
+fi
+
+if [[ "$FORK_CHAIN_MODE" != "true" && ( "$rpc_builder_count" -gt 0 || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
+  args+=(--rpc-url "$BITCOIN_RPC_URL")
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
   fi

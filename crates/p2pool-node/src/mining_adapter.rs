@@ -4,17 +4,22 @@ use crate::{
     fork_chain::ForkChainClient,
     local_node, publish_sharechain_message, random_nonce_hex, read_keypair_from_file,
     sign_hash_hex, validate_protected_secret_file, PublishSharechainMessageInput,
+    MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS, MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{Block, ScriptBuf, Transaction};
-use pohw_core::commitment::PohwCommitment;
+use chrono::{NaiveDate, Utc};
+use pohw_core::commitment::{
+    validate_pohw_commitment, PohwCommitment, PohwCommitmentParams, PohwCommitmentValidationContext,
+};
 use pohw_core::payout::PayoutSchedule;
 use pohw_core::sharechain::{BitcoinWorkTemplate, Share, SharechainMessage};
+use pohw_core::snapshot::Snapshot;
 use pohw_core::vault::vault_script_pubkey_hex;
-use pohw_core::Sats;
+use pohw_core::{Sats, DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +50,10 @@ const MAX_MERKLE_BRANCHES: usize = 512;
 const MAX_COINBASE_HEX_BYTES: usize = 512 * 1024;
 const MAX_COMPLETE_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BLOCK_CANDIDATE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PAYOUT_EVIDENCE_SNAPSHOT_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PAYOUT_EVIDENCE_SCHEDULE_JSON_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PAYOUT_EVIDENCE_COMMITMENT_JSON_BYTES: u64 = 256 * 1024;
+const MAX_PAYOUT_EVIDENCE_CANDIDATE_JSON_BYTES: u64 = 64 * 1024;
 const PACKAGED_EXAMPLE_JOB_ID: &str = "experiment-0-example";
 const STRATUM_EXTRANONCE1_BYTES: usize = 4;
 const MAX_COINBASE_OUTPUTS: usize = 1_000;
@@ -64,6 +73,7 @@ pub(crate) struct MiningAdapterConfig {
     pub node_secret_key_file: PathBuf,
     pub stratum_password_file: Option<PathBuf>,
     pub block_candidate_dir: Option<PathBuf>,
+    pub payout_candidate_dir: Option<PathBuf>,
     pub peer_addrs: Vec<SocketAddr>,
     pub stratum_difficulty: f64,
     pub extranonce2_size: usize,
@@ -77,6 +87,14 @@ pub(crate) struct MiningAdapterConfig {
     pub auto_submit_blocks: bool,
     pub payout_schedule: Option<PayoutSchedule>,
     pub pohw_commitment: Option<PohwCommitment>,
+    pub dynamic_pohw_payout: Option<DynamicPohwPayoutConfig>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DynamicPohwPayoutConfig {
+    pub snapshot_dir: PathBuf,
+    pub commitment_template: PohwCommitment,
+    pub min_snapshot_voters: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +127,28 @@ pub(crate) struct BuiltStratumJob {
     pub note: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BuiltDynamicPohwStratumJob {
+    pub built: BuiltStratumJob,
+    pub snapshot: Snapshot,
+    pub payout_schedule: PayoutSchedule,
+    pub pohw_commitment: PohwCommitment,
+}
+
+#[derive(Debug, Clone)]
+struct ActivePayoutEvidence {
+    snapshot: Snapshot,
+    payout_schedule: PayoutSchedule,
+    pohw_commitment: PohwCommitment,
+    reward_sats: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveStratumJob {
+    job: StratumJob,
+    payout_evidence: Option<ActivePayoutEvidence>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StratumBlockCandidate {
     pub job_id: String,
@@ -130,7 +170,7 @@ pub(crate) struct StratumBlockCandidate {
 
 struct AdapterState {
     config: MiningAdapterConfig,
-    job: RwLock<StratumJob>,
+    job: RwLock<ActiveStratumJob>,
     job_updates: broadcast::Sender<StratumJob>,
     mining_pubkey_hex: String,
     stratum_password: Option<String>,
@@ -159,6 +199,7 @@ struct AcceptedShareSummary {
     block_target: String,
     meets_block_target: bool,
     block_candidate_file: Option<PathBuf>,
+    payout_candidate_file: Option<PathBuf>,
     block_submit: Option<BlockSubmitSummary>,
     target: String,
     template_hash: String,
@@ -215,28 +256,97 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
     if config.payout_schedule.is_some() != config.pohw_commitment.is_some() {
         bail!("payout schedule and PoHW commitment must be supplied together");
     }
+    if config.dynamic_pohw_payout.is_some()
+        && (config.payout_schedule.is_some() || config.pohw_commitment.is_some())
+    {
+        bail!("dynamic PoHW payouts cannot be combined with a static payout schedule");
+    }
+    if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
+        if dynamic.min_snapshot_voters == 0 {
+            bail!("dynamic PoHW payouts require at least one snapshot voter");
+        }
+        if config.fork_chain_client.is_none()
+            && dynamic.min_snapshot_voters < MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+        {
+            bail!(
+                "Bitcoin RPC dynamic PoHW payouts require at least {} snapshot voters",
+                MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
+            );
+        }
+    }
+    if config.dynamic_pohw_payout.is_some()
+        && !config.refresh_job_from_rpc
+        && config.fork_chain_client.is_none()
+    {
+        bail!("dynamic PoHW payouts require Bitcoin RPC refresh or fork-chain templates");
+    }
+    if config.dynamic_pohw_payout.is_some() && config.payout_candidate_dir.is_none() {
+        bail!("dynamic PoHW payouts require --payout-candidate-dir");
+    }
+    if config.dynamic_pohw_payout.is_some() && !config.append {
+        bail!("dynamic PoHW payouts require local sharechain append");
+    }
+    if config.dynamic_pohw_payout.is_some()
+        && config.block_candidate_dir.is_some()
+        && config.block_candidate_dir == config.payout_candidate_dir
+    {
+        bail!("block candidate dir and payout candidate dir must be different");
+    }
     if config.payout_schedule.is_some()
         && !config.refresh_job_from_rpc
         && config.fork_chain_client.is_none()
     {
         bail!("payout schedule and PoHW commitment require a live template source");
     }
-    let job = if let Some(client) = config.fork_chain_client.as_ref() {
+    let active_job = if let Some(client) = config.fork_chain_client.as_ref() {
         let material = client.mining_template().await?;
-        build_job_for_template_source(
-            &material,
-            config.payout_schedule.as_ref(),
-            config.pohw_commitment.as_ref(),
+        if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
+            build_dynamic_active_job(
+                config.datadir.clone(),
+                dynamic.clone(),
+                config.miner_id.clone(),
+                material,
+                config.extranonce2_size,
+            )
+            .await?
+        } else {
+            ActiveStratumJob {
+                job: build_job_for_template_source(
+                    &material,
+                    config.payout_schedule.as_ref(),
+                    config.pohw_commitment.as_ref(),
+                    config.extranonce2_size,
+                )?
+                .job,
+                payout_evidence: None,
+            }
+        }
+    } else if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
+        let material = config
+            .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC is required for dynamic PoHW payouts")?
+            .mining_job_template()
+            .await?;
+        build_dynamic_active_job(
+            config.datadir.clone(),
+            dynamic.clone(),
+            config.miner_id.clone(),
+            material,
             config.extranonce2_size,
-        )?
-        .job
+        )
+        .await?
     } else {
         let job_file = config
             .job_file
             .as_deref()
             .context("--job-file is required without --fork-chain-rpc-addr")?;
-        read_stratum_job_file(job_file)?
+        ActiveStratumJob {
+            job: read_stratum_job_file(job_file)?,
+            payout_evidence: None,
+        }
     };
+    let job = &active_job.job;
     job.validate()?;
     job.validate_example_policy(config.allow_example_mining_job)?;
     let block_target = block_target_hex_from_job_nbits(&job.nbits)?;
@@ -263,7 +373,7 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
     let (job_updates, _) = broadcast::channel(16);
     let state = Arc::new(AdapterState {
         config,
-        job: RwLock::new(job),
+        job: RwLock::new(active_job),
         job_updates,
         mining_pubkey_hex,
         stratum_password,
@@ -337,27 +447,74 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
             .mining_job_template()
             .await?
     };
-    let built = build_job_for_template_source(
-        &material,
-        state.config.payout_schedule.as_ref(),
-        state.config.pohw_commitment.as_ref(),
-        state.config.extranonce2_size,
-    )?;
-    let job = built.job;
+    let active_job = if let Some(dynamic) = state.config.dynamic_pohw_payout.as_ref() {
+        build_dynamic_active_job(
+            state.config.datadir.clone(),
+            dynamic.clone(),
+            state.config.miner_id.clone(),
+            material,
+            state.config.extranonce2_size,
+        )
+        .await?
+    } else {
+        ActiveStratumJob {
+            job: build_job_for_template_source(
+                &material,
+                state.config.payout_schedule.as_ref(),
+                state.config.pohw_commitment.as_ref(),
+                state.config.extranonce2_size,
+            )?
+            .job,
+            payout_evidence: None,
+        }
+    };
+    let job = &active_job.job;
     job.validate()?;
     job.validate_example_policy(false)?;
     let block_target = block_target_hex_from_job_nbits(&job.nbits)?;
     ensure_share_target_not_stricter_than_block_target(&state.share_target, &block_target)?;
 
     let mut current = state.job.write().await;
-    if *current == job {
+    if current.job == *job {
         return Ok(None);
     }
     let job_id = job.job_id.clone();
-    *current = job.clone();
+    let notification_job = job.clone();
+    *current = active_job;
     drop(current);
-    let _ = state.job_updates.send(job);
+    let _ = state.job_updates.send(notification_job);
     Ok(Some(job_id))
+}
+
+async fn build_dynamic_active_job(
+    datadir: PathBuf,
+    dynamic: DynamicPohwPayoutConfig,
+    miner_id: String,
+    material: BitcoinMiningJobTemplate,
+    extranonce2_size: usize,
+) -> Result<ActiveStratumJob> {
+    let dynamic_job = tokio::task::spawn_blocking(move || {
+        build_dynamic_pohw_stratum_job_from_template(
+            &datadir,
+            &dynamic.snapshot_dir,
+            &miner_id,
+            &dynamic.commitment_template,
+            &material,
+            extranonce2_size,
+            dynamic.min_snapshot_voters,
+        )
+    })
+    .await
+    .context("dynamic PoHW payout derivation task failed")??;
+    Ok(ActiveStratumJob {
+        job: dynamic_job.built.job,
+        payout_evidence: Some(ActivePayoutEvidence {
+            snapshot: dynamic_job.snapshot,
+            payout_schedule: dynamic_job.payout_schedule,
+            pohw_commitment: dynamic_job.pohw_commitment,
+            reward_sats: dynamic_job.built.source_coinbase_value_sats,
+        }),
+    })
 }
 
 fn build_job_for_template_source(
@@ -424,8 +581,144 @@ pub(crate) fn build_pohw_stratum_job_from_template(
         extranonce2_size,
         coinbase1,
         coinbase2,
-        "PoHW payout-aware sharechain job derived from local Bitcoin getblocktemplate; still requires the fork/block-submit path for final block submission".to_string(),
+        "PoHW payout-aware sharechain job derived from Bitcoin getblocktemplate; target-meeting submission still requires explicit RPC submission opt-in".to_string(),
     )
+}
+
+pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
+    datadir: &Path,
+    snapshot_dir: &Path,
+    miner_id: &str,
+    commitment_template: &PohwCommitment,
+    material: &BitcoinMiningJobTemplate,
+    extranonce2_size: usize,
+    min_snapshot_voters: usize,
+) -> Result<BuiltDynamicPohwStratumJob> {
+    let state = local_node::replay_state_with_confirmed_payouts(datadir, Some(snapshot_dir))?;
+    let snapshot_status = local_node::latest_verified_snapshot(snapshot_dir)?;
+    let verified = snapshot_status
+        .latest
+        .context("no verified Idena snapshot is available for dynamic PoHW payouts")?;
+    validate_dynamic_payout_snapshot(
+        &state,
+        &verified.snapshot,
+        Utc::now().date_naive(),
+        min_snapshot_voters,
+    )?;
+
+    let normalized_miner_id = miner_id.to_ascii_lowercase();
+    let registration = state
+        .registrations()
+        .get(&normalized_miner_id)
+        .with_context(|| format!("miner {normalized_miner_id} is not registered"))?;
+    registration
+        .verify_idena_ownership_signature()
+        .context("dynamic PoHW payout miner has an invalid Idena ownership proof")?;
+    if !commitment_template
+        .miner_idena_address
+        .eq_ignore_ascii_case(&registration.idena_address)
+    {
+        bail!("PoHW commitment template miner identity does not match the registered miner");
+    }
+    let miner_leaf = verified
+        .snapshot
+        .leaves
+        .iter()
+        .find(|leaf| {
+            leaf.idena_address
+                .eq_ignore_ascii_case(&registration.idena_address)
+        })
+        .context("registered miner identity is absent from the latest verified snapshot")?;
+    if !miner_leaf.is_block_eligible() {
+        bail!("registered miner identity is not eligible in the latest verified snapshot");
+    }
+
+    let mut accounts = state.participant_accounts();
+    local_node::apply_snapshot_scores_to_accounts(&state, &mut accounts, &verified.snapshot)?;
+    let payout_schedule = state.expected_payout_schedule(
+        &accounts,
+        material.coinbase_value_sats,
+        DIRECT_PAYOUT_LIMIT,
+        MIN_DIRECT_PAYOUT_SATS,
+    )?;
+    let sharechain_tip = state
+        .best_share_tip()
+        .context("dynamic PoHW payouts require an active sharechain tip")?
+        .to_string();
+    let sharechain_state_root = state.accounting_state_root();
+    let snapshot_day = verified.snapshot.snapshot_day.to_string();
+    let pohw_commitment = PohwCommitment::new_pohw1(PohwCommitmentParams {
+        idena_snapshot_id: snapshot_day.clone(),
+        idena_score_root: verified.snapshot.score_root.clone(),
+        miner_idena_address: registration.idena_address.clone(),
+        identity_proof_root: verified.snapshot.identity_root.clone(),
+        sharechain_tip: sharechain_tip.clone(),
+        sharechain_state_root: Some(sharechain_state_root.clone()),
+        payout_schedule_root: payout_schedule.payout_root.clone(),
+        vault_epoch_id: commitment_template.vault_epoch_id,
+        frost_vault_key_xonly: commitment_template.frost_vault_key_xonly.clone(),
+    });
+    validate_pohw_commitment(
+        &pohw_commitment,
+        PohwCommitmentValidationContext {
+            idena_snapshot_id: &snapshot_day,
+            idena_score_root: &verified.snapshot.score_root,
+            miner_leaf,
+            identity_proof_root: &verified.snapshot.identity_root,
+            sharechain_tip: &sharechain_tip,
+            sharechain_state_root: Some(&sharechain_state_root),
+            payout_schedule_root: &payout_schedule.payout_root,
+            vault_epoch_id: commitment_template.vault_epoch_id,
+            frost_vault_key_xonly: &commitment_template.frost_vault_key_xonly,
+        },
+    )
+    .context("derived PoHW commitment failed validation")?;
+    let built = build_pohw_stratum_job_from_template(
+        material,
+        &payout_schedule,
+        &pohw_commitment,
+        extranonce2_size,
+    )?;
+    Ok(BuiltDynamicPohwStratumJob {
+        built,
+        snapshot: verified.snapshot,
+        payout_schedule,
+        pohw_commitment,
+    })
+}
+
+fn validate_dynamic_payout_snapshot(
+    state: &pohw_core::sharechain_state::SharechainReplayState,
+    snapshot: &Snapshot,
+    today: NaiveDate,
+    min_snapshot_voters: usize,
+) -> Result<()> {
+    if min_snapshot_voters == 0 {
+        bail!("dynamic PoHW payouts require at least one snapshot voter");
+    }
+    let snapshot_age_days = (today - snapshot.snapshot_day).num_days();
+    if snapshot_age_days < 0 {
+        bail!("latest verified Idena snapshot is dated in the future");
+    }
+    if u64::try_from(snapshot_age_days).unwrap_or(u64::MAX) > MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS
+    {
+        bail!(
+            "latest verified Idena snapshot is too old for dynamic PoHW payouts: {snapshot_age_days} days"
+        );
+    }
+    let snapshot_day = snapshot.snapshot_day.to_string();
+    let voter_count = state.unique_snapshot_voter_idena_count(
+        &snapshot_day,
+        snapshot.idena_height,
+        &snapshot.score_root,
+    );
+    if voter_count < min_snapshot_voters {
+        bail!(
+            "verified Idena snapshot has {voter_count} distinct identity voters; {} required",
+            min_snapshot_voters
+        );
+    }
+    Ok(())
 }
 
 fn build_stratum_job_from_parts(
@@ -867,7 +1160,7 @@ async fn handle_stratum_connection(
                 let job = match update {
                     Ok(job) => job,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        state.job.read().await.clone()
+                        state.job.read().await.job.clone()
                     }
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 };
@@ -926,7 +1219,7 @@ async fn handle_stratum_connection(
                     vec![json!(state.config.stratum_difficulty)],
                 )
                 .await?;
-                let job = state.job.read().await.clone();
+                let job = state.job.read().await.job.clone();
                 send_notification(&mut write_half, "mining.notify", job.notify_params()).await?;
             }
             "mining.authorize" => {
@@ -987,8 +1280,8 @@ async fn handle_stratum_connection(
                     .await?;
                     continue;
                 }
-                let job = state.job.read().await.clone();
-                match accept_submit(&state, &job, &submit, &extranonce1).await {
+                let active_job = state.job.read().await.clone();
+                match accept_submit(&state, &active_job, &submit, &extranonce1).await {
                     Ok(summary) => {
                         eprintln!(
                             "accepted Stratum share from {peer_addr}: worker={} hash={} share={} extranonce1={} extranonce2={} ntime={} nonce={} meets_block_target={}",
@@ -1007,17 +1300,28 @@ async fn handle_stratum_connection(
                                 path.display()
                             );
                         }
+                        if let Some(path) = &summary.payout_candidate_file {
+                            eprintln!(
+                                "persisted target-meeting payout evidence from {peer_addr}: {}",
+                                path.display()
+                            );
+                        }
                         if let Some(submission) = &summary.block_submit {
+                            let destination = if state.config.fork_chain_client.is_some() {
+                                "fork-chain RPC"
+                            } else {
+                                "Bitcoin RPC"
+                            };
                             if let Some(outcome) = &submission.outcome {
                                 eprintln!(
-                                    "submitted block candidate {} to Bitcoin RPC: status={} reject_reason={}",
+                                    "submitted block candidate {} to {destination}: status={} reject_reason={}",
                                     summary.work_hash,
                                     outcome.status,
                                     outcome.reject_reason.as_deref().unwrap_or("none")
                                 );
                             } else if let Some(error) = &submission.error {
                                 eprintln!(
-                                    "failed to submit block candidate {} to Bitcoin RPC: {}",
+                                    "failed to submit block candidate {} to {destination}: {}",
                                     summary.work_hash, error
                                 );
                             }
@@ -1211,10 +1515,11 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 async fn accept_submit(
     state: &AdapterState,
-    job: &StratumJob,
+    active_job: &ActiveStratumJob,
     submit: &SubmitWork,
     extranonce1: &str,
 ) -> Result<AcceptedShareSummary> {
+    let job = &active_job.job;
     if submit.job_id != job.job_id {
         bail!("unknown Stratum job id {}", submit.job_id);
     }
@@ -1239,6 +1544,35 @@ async fn accept_submit(
         state.config.block_candidate_dir.as_deref(),
         &block_candidate,
     )?;
+    let payout_candidate_file = match (
+        block_candidate.meets_block_target,
+        active_job.payout_evidence.as_ref(),
+    ) {
+        (true, Some(evidence)) => {
+            let candidate_dir = state
+                .config
+                .payout_candidate_dir
+                .as_deref()
+                .context("dynamic PoHW payout candidate dir is not configured")?;
+            let path =
+                persist_payout_confirmation_evidence(candidate_dir, &block_candidate, evidence)?;
+            for (message, label) in target_block_payout_messages(evidence) {
+                publish_sharechain_message(PublishSharechainMessageInput {
+                    datadir: state.config.datadir.clone(),
+                    message,
+                    node_secret_key_file: state.config.node_secret_key_file.clone(),
+                    message_out: None,
+                    envelope_out: None,
+                    append: true,
+                    peer_addrs: state.config.peer_addrs.clone(),
+                })
+                .await
+                .with_context(|| format!("failed to publish target block's {label}"))?;
+            }
+            Some(path)
+        }
+        _ => None,
+    };
     let block_submit = maybe_submit_block_candidate(state, &block_candidate).await;
 
     let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex(
@@ -1262,6 +1596,21 @@ async fn accept_submit(
     })
     .await?;
 
+    let (idena_snapshot_id, idena_snapshot_proof_root) = active_job
+        .payout_evidence
+        .as_ref()
+        .map(|evidence| {
+            (
+                evidence.snapshot.snapshot_day.to_string(),
+                evidence.snapshot.score_root.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                state.config.idena_snapshot_id.clone(),
+                state.config.idena_snapshot_proof_root.clone(),
+            )
+        });
     let mut share = Share {
         miner_id: state.config.miner_id.clone(),
         bitcoin_header_hex,
@@ -1269,8 +1618,8 @@ async fn accept_submit(
         nonce_hex: submit.nonce.clone(),
         work_hash,
         target: state.share_target.clone(),
-        idena_snapshot_id: state.config.idena_snapshot_id.clone(),
-        idena_snapshot_proof_root: state.config.idena_snapshot_proof_root.clone(),
+        idena_snapshot_id,
+        idena_snapshot_proof_root,
         hashrate_score_delta: Share::expected_hashrate_score_delta_for_target(&state.share_target)?,
         parent_share_hash: default_parent_share_hash(&state.config.datadir)?,
         mining_signature_hex: String::new(),
@@ -1303,6 +1652,7 @@ async fn accept_submit(
         block_target: block_candidate.block_target,
         meets_block_target: block_candidate.meets_block_target,
         block_candidate_file,
+        payout_candidate_file,
         block_submit,
         target: state.share_target.clone(),
         template_hash,
@@ -1310,6 +1660,21 @@ async fn accept_submit(
         template_publish,
         share_publish,
     })
+}
+
+fn target_block_payout_messages(
+    evidence: &ActivePayoutEvidence,
+) -> [(SharechainMessage, &'static str); 2] {
+    [
+        (
+            SharechainMessage::PayoutSchedule(evidence.payout_schedule.clone()),
+            "payout schedule",
+        ),
+        (
+            SharechainMessage::PohwCommitment(evidence.pohw_commitment.clone()),
+            "PoHW commitment",
+        ),
+    ]
 }
 
 async fn maybe_submit_block_candidate(
@@ -1364,6 +1729,137 @@ fn persist_target_block_candidate(
     ));
     write_block_candidate_file_create_new_or_matching(&path, candidate)?;
     Ok(Some(path))
+}
+
+#[derive(Serialize)]
+struct GeneratedPayoutConfirmationCandidate {
+    block_hash: String,
+    snapshot_file: PathBuf,
+    payout_schedule_file: PathBuf,
+    pohw_commitment_file: PathBuf,
+    reward_sats: u64,
+    direct_limit: usize,
+    min_direct_payout_sats: u64,
+}
+
+fn persist_payout_confirmation_evidence(
+    candidate_dir: &Path,
+    candidate: &StratumBlockCandidate,
+    evidence: &ActivePayoutEvidence,
+) -> Result<PathBuf> {
+    if !candidate.meets_block_target {
+        bail!("refusing to persist payout evidence for a non-target block candidate");
+    }
+    ensure_block_candidate_dir(candidate_dir)?;
+    validate_hex_exact("candidate block_hash", &candidate.block_hash, 32)?;
+    let block_hash = candidate.block_hash.to_ascii_lowercase();
+    let evidence_dir_name = format!("evidence-{block_hash}");
+    let evidence_dir = candidate_dir.join(&evidence_dir_name);
+    ensure_block_candidate_dir(&evidence_dir)?;
+
+    let snapshot_file = evidence_dir.join("snapshot.json");
+    let payout_schedule_file = evidence_dir.join("payout-schedule.json");
+    let pohw_commitment_file = evidence_dir.join("pohw-commitment.json");
+    write_json_create_new_or_matching(
+        &snapshot_file,
+        &evidence.snapshot,
+        "payout evidence snapshot",
+        MAX_PAYOUT_EVIDENCE_SNAPSHOT_JSON_BYTES,
+    )?;
+    write_json_create_new_or_matching(
+        &payout_schedule_file,
+        &evidence.payout_schedule,
+        "payout evidence schedule",
+        MAX_PAYOUT_EVIDENCE_SCHEDULE_JSON_BYTES,
+    )?;
+    write_json_create_new_or_matching(
+        &pohw_commitment_file,
+        &evidence.pohw_commitment,
+        "payout evidence commitment",
+        MAX_PAYOUT_EVIDENCE_COMMITMENT_JSON_BYTES,
+    )?;
+
+    let descriptor = GeneratedPayoutConfirmationCandidate {
+        block_hash: block_hash.clone(),
+        snapshot_file: PathBuf::from(&evidence_dir_name).join("snapshot.json"),
+        payout_schedule_file: PathBuf::from(&evidence_dir_name).join("payout-schedule.json"),
+        pohw_commitment_file: PathBuf::from(&evidence_dir_name).join("pohw-commitment.json"),
+        reward_sats: evidence.reward_sats,
+        direct_limit: DIRECT_PAYOUT_LIMIT,
+        min_direct_payout_sats: MIN_DIRECT_PAYOUT_SATS,
+    };
+    let descriptor_path = candidate_dir.join(format!("block-{block_hash}.json"));
+    write_json_create_new_or_matching(
+        &descriptor_path,
+        &descriptor,
+        "payout confirmation candidate",
+        MAX_PAYOUT_EVIDENCE_CANDIDATE_JSON_BYTES,
+    )?;
+    Ok(descriptor_path)
+}
+
+fn write_json_create_new_or_matching<T: Serialize>(
+    path: &Path,
+    value: &T,
+    label: &str,
+    max_bytes: u64,
+) -> Result<()> {
+    let mut bytes =
+        serde_json::to_vec_pretty(value).with_context(|| format!("failed to encode {label}"))?;
+    bytes.push(b'\n');
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        bail!("{label} exceeds the maximum size of {max_bytes} bytes");
+    }
+    validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(&bytes)
+                .with_context(|| format!("failed to write {label} {}", path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("failed to sync {label} {}", path.display()))?;
+            drop(file);
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).with_context(|| {
+                format!("failed to inspect existing {label} {}", path.display())
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "existing {label} path is not a regular file: {}",
+                    path.display()
+                );
+            }
+            if metadata.len() > max_bytes {
+                bail!(
+                    "existing {label} {} exceeds the maximum size",
+                    path.display()
+                );
+            }
+            let existing = fs::read(path)
+                .with_context(|| format!("failed to read existing {label} {}", path.display()))?;
+            if existing != bytes {
+                bail!(
+                    "existing {label} {} differs from current evidence",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to create {label} {}", path.display()))
+        }
+    }
 }
 
 fn ensure_block_candidate_dir(candidate_dir: &Path) -> Result<()> {
@@ -2195,9 +2691,15 @@ impl Drop for ConnectionGuard {
 mod tests {
     use super::*;
     use crate::bitcoin_rpc::BitcoinMiningJobTransaction;
+    use bitcoin::key::{Keypair, Secp256k1};
+    use bitcoin::secp256k1::{Message, PublicKey, SecretKey};
     use bitcoin::{absolute, transaction, Amount, OutPoint, Sequence, TxIn, TxOut, Txid, Witness};
     use pohw_core::commitment::PohwCommitmentParams;
     use pohw_core::payout::{DirectPayout, VaultAllocation};
+    use pohw_core::sharechain::{MinerRegistration, SnapshotVote};
+    use pohw_core::snapshot::{IdenaStatus, SnapshotLeaf};
+    use pohw_core::FORMULA_VERSION;
+    use tiny_keccak::{Hasher, Keccak};
 
     fn test_job() -> StratumJob {
         let mut job = build_stratum_job_from_template(&mining_job_material(), 4)
@@ -2286,6 +2788,193 @@ mod tests {
             transactions: Vec::new(),
             default_witness_commitment: None,
         }
+    }
+
+    fn test_keypair(byte: u8) -> Keypair {
+        let secret_key = SecretKey::from_slice(&[byte; 32]).unwrap();
+        Keypair::from_secret_key(&Secp256k1::new(), &secret_key)
+    }
+
+    fn sign_test_schnorr(hash: [u8; 32], keypair: &Keypair) -> String {
+        let signature =
+            Secp256k1::new().sign_schnorr_no_aux_rand(&Message::from_digest(hash), keypair);
+        hex::encode(signature.serialize())
+    }
+
+    fn test_keccak256(data: &[u8]) -> [u8; 32] {
+        let mut hasher = Keccak::v256();
+        let mut output = [0u8; 32];
+        hasher.update(data);
+        hasher.finalize(&mut output);
+        output
+    }
+
+    fn test_idena_signin_hash(challenge: &str) -> [u8; 32] {
+        test_keccak256(&test_keccak256(challenge.as_bytes()))
+    }
+
+    fn test_idena_address(secret_key: &SecretKey) -> String {
+        let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), secret_key);
+        let serialized = pubkey.serialize_uncompressed();
+        let hash = test_keccak256(&serialized[1..]);
+        format!("0x{}", hex::encode(&hash[12..]))
+    }
+
+    fn test_idena_signature(challenge: &str, secret_key: &SecretKey) -> String {
+        let signature = Secp256k1::new().sign_ecdsa_recoverable(
+            &Message::from_digest(test_idena_signin_hash(challenge)),
+            secret_key,
+        );
+        let (recovery_id, compact) = signature.serialize_compact();
+        let mut bytes = compact.to_vec();
+        bytes.push(u8::try_from(recovery_id.to_i32()).unwrap() + 27);
+        hex::encode(bytes)
+    }
+
+    fn signed_test_registration(
+        miner_id: &str,
+        mining_key_byte: u8,
+        claim_key_byte: u8,
+        idena_key_byte: u8,
+    ) -> (MinerRegistration, Keypair) {
+        let mining_keypair = test_keypair(mining_key_byte);
+        let claim_keypair = test_keypair(claim_key_byte);
+        let idena_secret = SecretKey::from_slice(&[idena_key_byte; 32]).unwrap();
+        let claim_xonly = claim_keypair.x_only_public_key().0.to_string();
+        let mut registration = MinerRegistration {
+            miner_id: miner_id.to_string(),
+            idena_address: test_idena_address(&idena_secret),
+            btc_payout_script_hex: format!("5120{claim_xonly}"),
+            claim_owner_pubkey_hex: claim_xonly,
+            mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            idena_signature_hex: String::new(),
+            mining_signature_hex: String::new(),
+        };
+        registration.idena_signature_hex =
+            test_idena_signature(&registration.idena_ownership_challenge(), &idena_secret);
+        registration.mining_signature_hex =
+            sign_test_schnorr(registration.signing_hash(), &mining_keypair);
+        (registration, mining_keypair)
+    }
+
+    fn test_share(miner_id: &str, mining_keypair: &Keypair) -> Share {
+        let target = "7fffff0000000000000000000000000000000000000000000000000000000000";
+        for nonce in 0..10_000u32 {
+            let mut header = [0u8; 80];
+            header[0..4].copy_from_slice(&1u32.to_le_bytes());
+            header[36..68].copy_from_slice(&[0x33; 32]);
+            header[68..72].copy_from_slice(&1_231_006_505u32.to_le_bytes());
+            header[72..76].copy_from_slice(&0x207f_ffffu32.to_le_bytes());
+            header[76..80].copy_from_slice(&nonce.to_le_bytes());
+            let mut share = Share {
+                miner_id: miner_id.to_string(),
+                bitcoin_header_hex: hex::encode(header),
+                bitcoin_template_hash: String::new(),
+                nonce_hex: String::new(),
+                work_hash: String::new(),
+                target: target.to_string(),
+                idena_snapshot_id: Utc::now().date_naive().to_string(),
+                idena_snapshot_proof_root: "11".repeat(32),
+                hashrate_score_delta: 1,
+                parent_share_hash: "00".repeat(32),
+                mining_signature_hex: String::new(),
+            };
+            share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
+            share.nonce_hex = share.recomputed_nonce_hex().unwrap();
+            share.work_hash = share.recomputed_work_hash().unwrap();
+            if share.work_hash.as_str() <= target {
+                share.mining_signature_hex =
+                    sign_test_schnorr(share.signing_hash(), mining_keypair);
+                return share;
+            }
+        }
+        panic!("test target did not yield a valid share");
+    }
+
+    fn append_dynamic_payout_fixture(
+        datadir: &Path,
+        snapshot_dir: &Path,
+    ) -> (MinerRegistration, PohwCommitment) {
+        let (miner, miner_keypair) = signed_test_registration("miner-a", 9, 19, 29);
+        let (voter_b, voter_b_keypair) = signed_test_registration("voter-b", 10, 20, 30);
+        let (voter_c, voter_c_keypair) = signed_test_registration("voter-c", 11, 21, 31);
+        for registration in [&miner, &voter_b, &voter_c] {
+            local_node::append_message(
+                datadir,
+                SharechainMessage::MinerRegistration(registration.clone()),
+            )
+            .unwrap();
+        }
+
+        let share = test_share(&miner.miner_id, &miner_keypair);
+        let mut template = BitcoinWorkTemplate::new_unsigned(
+            &share.miner_id,
+            share.bitcoin_header_prefix_hex().unwrap(),
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign_test_schnorr(template.signing_hash(), &miner_keypair);
+        local_node::accept_bitcoin_work_template(datadir, template.clone()).unwrap();
+        local_node::append_message(datadir, SharechainMessage::BitcoinWorkTemplate(template))
+            .unwrap();
+        local_node::append_message(datadir, SharechainMessage::Share(share)).unwrap();
+
+        let identity_root = "11".repeat(32);
+        let snapshot = Snapshot::build(
+            Utc::now().date_naive(),
+            1_000,
+            "aa".repeat(32),
+            identity_root.clone(),
+            FORMULA_VERSION,
+            [&miner, &voter_b, &voter_c]
+                .into_iter()
+                .map(|registration| SnapshotLeaf {
+                    idena_address: registration.idena_address.clone(),
+                    status: IdenaStatus::Human,
+                    pubkey: "02".repeat(33),
+                    validation_reward_score: 1,
+                    proposer_reward_score: 0,
+                    committee_reward_score: 0,
+                    ignored_invitation_score: 0,
+                    identity_root: identity_root.clone(),
+                    formula_version: FORMULA_VERSION,
+                })
+                .collect(),
+        );
+        fs::create_dir_all(snapshot_dir).unwrap();
+        fs::write(
+            snapshot_dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
+        for (registration, keypair) in [
+            (&miner, &miner_keypair),
+            (&voter_b, &voter_b_keypair),
+            (&voter_c, &voter_c_keypair),
+        ] {
+            let mut vote = SnapshotVote {
+                voter_miner_id: registration.miner_id.clone(),
+                snapshot_day: snapshot.snapshot_day.to_string(),
+                idena_height: snapshot.idena_height,
+                score_root: snapshot.score_root.clone(),
+                signature_hex: String::new(),
+            };
+            vote.signature_hex = sign_test_schnorr(vote.signing_hash(), keypair);
+            local_node::append_message(datadir, SharechainMessage::SnapshotVote(vote)).unwrap();
+        }
+
+        let template = PohwCommitment::new_pohw1(PohwCommitmentParams {
+            idena_snapshot_id: snapshot.snapshot_day.to_string(),
+            idena_score_root: snapshot.score_root,
+            miner_idena_address: miner.idena_address.clone(),
+            identity_proof_root: identity_root,
+            sharechain_tip: "00".repeat(32),
+            sharechain_state_root: Some("00".repeat(32)),
+            payout_schedule_root: "00".repeat(32),
+            vault_epoch_id: 1,
+            frost_vault_key_xonly: test_keypair(40).x_only_public_key().0.to_string(),
+        });
+        (miner, template)
     }
 
     fn non_coinbase_transaction(seed: u8) -> BitcoinMiningJobTransaction {
@@ -2451,6 +3140,176 @@ mod tests {
         assert!(err
             .to_string()
             .contains("does not match Bitcoin getblocktemplate coinbasevalue"));
+    }
+
+    #[test]
+    fn dynamic_pohw_jobs_follow_each_template_value_and_persist_exact_evidence() {
+        let root = temp_dir("dynamic-payouts");
+        let datadir = root.join("sharechain");
+        let snapshot_dir = root.join("snapshots");
+        let (_miner, commitment_template) = append_dynamic_payout_fixture(&datadir, &snapshot_dir);
+
+        let first_material = mining_job_material();
+        let first = build_dynamic_pohw_stratum_job_from_template(
+            &datadir,
+            &snapshot_dir,
+            "miner-a",
+            &commitment_template,
+            &first_material,
+            4,
+            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+        )
+        .unwrap();
+        let mut second_material = first_material.clone();
+        second_material.coinbase_value_sats = 75_000;
+        let second = build_dynamic_pohw_stratum_job_from_template(
+            &datadir,
+            &snapshot_dir,
+            "miner-a",
+            &commitment_template,
+            &second_material,
+            4,
+            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+        )
+        .unwrap();
+
+        let payout_total = |schedule: &PayoutSchedule| {
+            schedule
+                .direct_outputs
+                .iter()
+                .map(|output| output.amount_sats)
+                .sum::<u64>()
+                + schedule.vault_output_sats
+        };
+        assert_eq!(payout_total(&first.payout_schedule), 50_000);
+        assert_eq!(payout_total(&second.payout_schedule), 75_000);
+        assert_ne!(
+            first.payout_schedule.payout_root,
+            second.payout_schedule.payout_root
+        );
+        assert_ne!(first.built.job.job_id, second.built.job.job_id);
+        assert_eq!(
+            first.pohw_commitment.payout_schedule_root,
+            first.payout_schedule.payout_root
+        );
+        assert_eq!(
+            second.pohw_commitment.payout_schedule_root,
+            second.payout_schedule.payout_root
+        );
+
+        let candidate = (0u32..100_000)
+            .find_map(|nonce| {
+                let candidate = build_stratum_block_candidate(
+                    &first.built.job,
+                    "aabbccdd",
+                    "01020304",
+                    &first.built.job.ntime,
+                    &hex::encode(nonce.to_le_bytes()),
+                    4,
+                    false,
+                )
+                .unwrap();
+                candidate.meets_block_target.then_some(candidate)
+            })
+            .expect("easy test target must yield a candidate");
+        let evidence = ActivePayoutEvidence {
+            snapshot: first.snapshot.clone(),
+            payout_schedule: first.payout_schedule.clone(),
+            pohw_commitment: first.pohw_commitment.clone(),
+            reward_sats: first.built.source_coinbase_value_sats,
+        };
+        let messages = target_block_payout_messages(&evidence);
+        assert!(matches!(
+            &messages[0].0,
+            SharechainMessage::PayoutSchedule(schedule)
+                if schedule.payout_root == first.payout_schedule.payout_root
+        ));
+        assert!(matches!(
+            &messages[1].0,
+            SharechainMessage::PohwCommitment(commitment)
+                if commitment.payout_schedule_root == first.payout_schedule.payout_root
+        ));
+        let payout_candidate_dir = root.join("payout-candidates");
+        let descriptor_path =
+            persist_payout_confirmation_evidence(&payout_candidate_dir, &candidate, &evidence)
+                .unwrap();
+        assert_eq!(
+            persist_payout_confirmation_evidence(&payout_candidate_dir, &candidate, &evidence)
+                .unwrap(),
+            descriptor_path
+        );
+        let mut conflicting_evidence = evidence.clone();
+        conflicting_evidence.reward_sats += 1;
+        assert!(persist_payout_confirmation_evidence(
+            &payout_candidate_dir,
+            &candidate,
+            &conflicting_evidence
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("differs from current evidence"));
+        let descriptor: Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+        assert_eq!(descriptor["block_hash"], candidate.block_hash);
+        assert_eq!(descriptor["reward_sats"], 50_000);
+        let evidence_dir = payout_candidate_dir.join(format!(
+            "evidence-{}",
+            candidate.block_hash.to_ascii_lowercase()
+        ));
+        let persisted_snapshot: Snapshot =
+            serde_json::from_slice(&fs::read(evidence_dir.join("snapshot.json")).unwrap()).unwrap();
+        let persisted_schedule: PayoutSchedule =
+            serde_json::from_slice(&fs::read(evidence_dir.join("payout-schedule.json")).unwrap())
+                .unwrap();
+        let persisted_commitment: PohwCommitment =
+            serde_json::from_slice(&fs::read(evidence_dir.join("pohw-commitment.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted_snapshot, first.snapshot);
+        assert_eq!(persisted_schedule, first.payout_schedule);
+        assert_eq!(persisted_commitment, first.pohw_commitment);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dynamic_pohw_snapshot_requires_distinct_identity_voter_quorum() {
+        let state = pohw_core::sharechain_state::SharechainReplayState::default();
+        let snapshot = Snapshot::build(
+            Utc::now().date_naive(),
+            1_000,
+            "aa".repeat(32),
+            "11".repeat(32),
+            FORMULA_VERSION,
+            Vec::new(),
+        );
+
+        let err = validate_dynamic_payout_snapshot(
+            &state,
+            &snapshot,
+            Utc::now().date_naive(),
+            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("distinct identity voters"));
+    }
+
+    #[test]
+    fn dynamic_pohw_snapshot_rejects_zero_voter_requirement() {
+        let state = pohw_core::sharechain_state::SharechainReplayState::default();
+        let snapshot = Snapshot::build(
+            Utc::now().date_naive(),
+            1_000,
+            "aa".repeat(32),
+            "11".repeat(32),
+            FORMULA_VERSION,
+            Vec::new(),
+        );
+
+        let err = validate_dynamic_payout_snapshot(&state, &snapshot, Utc::now().date_naive(), 0)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("at least one snapshot voter"));
     }
 
     #[test]

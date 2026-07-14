@@ -4,9 +4,14 @@ use crate::fork_chain::{
     ForkChainClient, ForkChainStatus, ForkTransactionDetail, ForkTransactionPage, ForkUtxoPage,
 };
 use crate::local_node;
+use crate::{
+    MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS, MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS,
+    MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS, MAINNET_HANDOFF_PARTICIPANT_THRESHOLD,
+};
 use anyhow::{bail, Context, Result};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Network};
+use chrono::{NaiveDate, Utc};
 use pohw_core::sharechain_state::{SharechainReplaySummary, SharechainShareSummary};
 use pohw_core::snapshot::Snapshot;
 use serde::{Deserialize, Serialize};
@@ -156,6 +161,14 @@ impl From<ForkChainStatus> for ExplorerForkStatus {
 pub(crate) struct ExplorerSharechainOverview {
     pub applied_message_count: usize,
     pub registered_miner_count: usize,
+    pub unique_registered_idena_count: usize,
+    pub active_idena_participant_count: usize,
+    pub eligible_active_idena_participant_count: Option<usize>,
+    pub mainnet_handoff_participant_count: Option<usize>,
+    pub mainnet_handoff_participant_threshold: usize,
+    pub snapshot_voter_idena_count: Option<usize>,
+    pub mainnet_handoff_snapshot_voter_threshold: usize,
+    pub mainnet_handoff_max_snapshot_age_days: u64,
     pub bitcoin_work_template_count: usize,
     pub stored_share_count: usize,
     pub active_share_count: usize,
@@ -212,28 +225,73 @@ pub(crate) async fn build_overview(
 ) -> Result<ExplorerOverview> {
     let replay_datadir = datadir.to_path_buf();
     let replay_snapshot_dir = snapshot_dir.map(Path::to_path_buf);
-    let (summary, best_share_height, idena) = run_replay_work(move || {
-        let replay = local_node::replay_state_with_confirmed_payouts(
-            &replay_datadir,
-            replay_snapshot_dir.as_deref(),
-        )?;
-        let summary = replay.summary();
-        let best_share_height = replay.best_share_height();
-        let idena = match replay_snapshot_dir.as_deref() {
-            Some(snapshot_dir) => {
-                let status = local_node::latest_verified_snapshot(snapshot_dir)?;
-                status
-                    .latest
-                    .as_ref()
-                    .map(|latest| idena_overview(&latest.snapshot))
-                    .transpose()?
-                    .unwrap_or_else(|| unavailable_idena_overview("unavailable"))
-            }
-            None => unavailable_idena_overview("not_configured"),
-        };
-        Ok((summary, best_share_height, idena))
-    })
-    .await?;
+    let (summary, best_share_height, idena, eligible_active, handoff_participants, snapshot_voters) =
+        run_replay_work(move || {
+            let replay = local_node::replay_state_with_confirmed_payouts(
+                &replay_datadir,
+                replay_snapshot_dir.as_deref(),
+            )?;
+            let summary = replay.summary();
+            let best_share_height = replay.best_share_height();
+            let (idena, eligible_active, handoff_participants, snapshot_voters) =
+                match replay_snapshot_dir.as_deref() {
+                    Some(snapshot_dir) => {
+                        let status = local_node::latest_verified_snapshot(snapshot_dir)?;
+                        match status.latest.as_ref() {
+                            Some(latest) => {
+                                let eligible_addresses = latest
+                                    .snapshot
+                                    .leaves
+                                    .iter()
+                                    .filter(|leaf| leaf.is_block_eligible())
+                                    .map(|leaf| leaf.idena_address.to_ascii_lowercase())
+                                    .collect::<std::collections::BTreeSet<_>>();
+                                let freshness_boundary = Utc::now()
+                                    .timestamp()
+                                    .saturating_sub(MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS as i64);
+                                let eligible_active = replay
+                                    .recent_active_idena_addresses(freshness_boundary)
+                                    .intersection(&eligible_addresses)
+                                    .count();
+                                let snapshot_day = latest.snapshot.snapshot_day.to_string();
+                                let snapshot_voters = replay.unique_snapshot_voter_idena_count(
+                                    &snapshot_day,
+                                    latest.snapshot.idena_height,
+                                    &latest.snapshot.score_root,
+                                );
+                                let handoff_participants = mainnet_handoff_participant_count(
+                                    latest.snapshot.snapshot_day,
+                                    Utc::now().date_naive(),
+                                    eligible_active,
+                                    snapshot_voters,
+                                );
+                                (
+                                    idena_overview(&latest.snapshot)?,
+                                    Some(eligible_active),
+                                    handoff_participants,
+                                    Some(snapshot_voters),
+                                )
+                            }
+                            None => (unavailable_idena_overview("unavailable"), None, None, None),
+                        }
+                    }
+                    None => (
+                        unavailable_idena_overview("not_configured"),
+                        None,
+                        None,
+                        None,
+                    ),
+                };
+            Ok((
+                summary,
+                best_share_height,
+                idena,
+                eligible_active,
+                handoff_participants,
+                snapshot_voters,
+            ))
+        })
+        .await?;
     let fork = match fork_client {
         Some(client) => match client.status().await {
             Ok(status) => ExplorerForkOverview {
@@ -264,7 +322,13 @@ pub(crate) async fn build_overview(
         generated_at_unix: current_unix_timestamp()?,
         fork,
         bitcoin_history,
-        sharechain: sharechain_overview(&summary, best_share_height),
+        sharechain: sharechain_overview(
+            &summary,
+            best_share_height,
+            eligible_active,
+            handoff_participants,
+            snapshot_voters,
+        ),
         idena,
         limitations,
         safety_boundaries: vec![
@@ -825,10 +889,21 @@ fn paginate_shares(
 fn sharechain_overview(
     summary: &SharechainReplaySummary,
     best_share_height: Option<u64>,
+    eligible_active_idena_participant_count: Option<usize>,
+    mainnet_handoff_participant_count: Option<usize>,
+    snapshot_voter_idena_count: Option<usize>,
 ) -> ExplorerSharechainOverview {
     ExplorerSharechainOverview {
         applied_message_count: summary.applied_message_count,
         registered_miner_count: summary.registered_miner_count,
+        unique_registered_idena_count: summary.unique_registered_idena_count,
+        active_idena_participant_count: summary.active_idena_participant_count,
+        eligible_active_idena_participant_count,
+        mainnet_handoff_participant_count,
+        mainnet_handoff_participant_threshold: MAINNET_HANDOFF_PARTICIPANT_THRESHOLD,
+        snapshot_voter_idena_count,
+        mainnet_handoff_snapshot_voter_threshold: MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+        mainnet_handoff_max_snapshot_age_days: MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS,
         bitcoin_work_template_count: summary.bitcoin_work_template_count,
         stored_share_count: summary.stored_share_count,
         active_share_count: summary.active_share_count,
@@ -840,6 +915,20 @@ fn sharechain_overview(
         payout_schedule_count: summary.proposed_payout_schedule_count,
         pending_withdrawal_count: summary.pending_withdrawal_count,
     }
+}
+
+fn mainnet_handoff_participant_count(
+    snapshot_day: NaiveDate,
+    today: NaiveDate,
+    eligible_active: usize,
+    snapshot_voters: usize,
+) -> Option<usize> {
+    let snapshot_age_days = (today - snapshot_day).num_days();
+    (snapshot_age_days >= 0
+        && u64::try_from(snapshot_age_days).unwrap_or(u64::MAX)
+            <= MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS
+        && snapshot_voters >= MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS)
+        .then_some(eligible_active)
 }
 
 fn idena_overview(snapshot: &Snapshot) -> Result<ExplorerIdenaOverview> {
@@ -953,6 +1042,25 @@ mod tests {
         assert!(!encoded.contains("payout"));
         assert!(!encoded.contains("signature"));
         assert!(!encoded.contains("bitcoinHeader"));
+    }
+
+    #[test]
+    fn handoff_metric_requires_fresh_snapshot_and_voter_quorum() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
+        let fresh = NaiveDate::from_ymd_opt(2026, 7, 11).unwrap();
+        let stale = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let future = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
+
+        assert_eq!(
+            mainnet_handoff_participant_count(fresh, today, 20, 3),
+            Some(20)
+        );
+        assert_eq!(mainnet_handoff_participant_count(fresh, today, 20, 2), None);
+        assert_eq!(mainnet_handoff_participant_count(stale, today, 20, 3), None);
+        assert_eq!(
+            mainnet_handoff_participant_count(future, today, 20, 3),
+            None
+        );
     }
 
     #[test]

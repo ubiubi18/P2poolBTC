@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {"path": "lib/libidena_wasm_darwin_amd64.a", "sha256": "0451d1480827de6dc413712d461264d0f586287b6fd7e3c587e60ce374854767"},
+    {"path": "lib/libidena_wasm_darwin_arm64.a", "sha256": "b7fad0121df49ebe30286d7a8c3660ba198111f9ca3bcf414eaa422487186a90"},
+    {"path": "lib/libidena_wasm_linux_aarch64.a", "sha256": "3d636c192f34385d3c9dc5797acf29bd33ab1761b78fd65711cff11e64277c81"},
+    {"path": "lib/libidena_wasm_linux_amd64.a", "sha256": "0c8941ab8073a63946214a62c87b78a1e0f7731a3d81809588f1ae0088c8ee35"},
+    {"path": "lib/libidena_wasm_windows_amd64.a", "sha256": "38cd4e31d29e0acda2a2d7511722eef6e34e0ff922ab7f2b01d30a4107d3bcf7"},
+    {"path": "tests/testdata/sum.wasm", "sha256": "a47c236427f475ba8ced433c12ff1f01575496c3f53c2c4f60e10a1418e094ae"}
+  ]
+}

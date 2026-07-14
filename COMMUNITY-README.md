@@ -4,9 +4,14 @@ This is the short community guide for reproducing the software, joining the
 existing Experiment 0 network, connecting an Idena identity, and reporting a
 problem safely.
 
-Experiment 0 has no monetary value. It is not Bitcoin mainnet mining, does not
-accept deposits, and does not create transferable claims. Bitcoin and Idena
-consensus remain unchanged. The optional PoHW fork is a separate test chain.
+The Experiment 0 fork phase has no monetary value, accepts no deposits, and
+creates no transferable claims. Bitcoin and Idena consensus remain unchanged.
+The optional PoHW fork is a separate test chain. An explicitly armed operator
+switches to Bitcoin mainnet at 20 distinct active Idena identities; disconnect
+your miner before that threshold unless you accept real-Bitcoin submission
+risk. An armed host transitions automatically and deletes its dedicated local
+fork datadir after preflight. Read
+[the handoff policy](README.md#the-20-participant-mainnet-handoff).
 
 > [!IMPORTANT]
 > Join the existing network by default. Do not generate another activation
@@ -353,7 +358,10 @@ Stop the affected service and report immediately if:
 - a peer reports a different activation ID;
 - honest peers replay the same messages to different roots;
 - an unsigned or invalidly signed message is accepted;
-- Stratum submits to Bitcoin mainnet instead of the fork RPC;
+- before the documented handoff completes, Stratum submits to Bitcoin mainnet
+  instead of the fork RPC;
+- after handoff, the adapter lacks `--allow-mainnet-submit` or still has a fork
+  RPC argument;
 - a participant is asked for a key, seed phrase, cookie, API key, or deposit;
 - a report archive contains data that its owner did not intend to publish.
 

@@ -6,7 +6,14 @@ the roles and goals behind that process.
 
 P2poolBTC is looking for careful early testers who want to help check whether a Bitcoin pool can use Idena human-work accounting without a central operator.
 
-You are not mining real BTC in this test. You are helping prove that independent nodes can see the same registrations, snapshots, sharechain messages, and payout accounting.
+During the fork phase you are not mining real BTC. You are helping prove that
+independent nodes can see the same registrations, snapshots, sharechain
+messages, and payout accounting. The canonical deployment can switch to
+Bitcoin mainnet at 20 distinct active Idena identities; disconnect your miner
+before that threshold unless you explicitly accept real-Bitcoin submission
+risk. On an armed host this is automatic and deletes that host's dedicated fork
+datadir after mainnet preflight. See
+[the handoff policy](README.md#the-20-participant-mainnet-handoff).
 
 ## Who Can Help
 
@@ -32,7 +39,7 @@ You do not need to be an Idena expert to start. The dashboard and report tools s
 
 ## Safety Promise
 
-Experiment 0 is deliberately no-value:
+The Experiment 0 fork phase is deliberately no-value:
 
 - no real BTC payouts,
 - no user BTC deposits,
@@ -40,6 +47,10 @@ Experiment 0 is deliberately no-value:
 - no bridge,
 - no claim market,
 - no promise that test data survives.
+
+Those statements stop describing the mining target after an armed node's
+mainnet handoff completes. The software remains experimental and does not make
+the payout/vault path production-safe.
 
 Never share private keys, seed phrases, Idena API keys, Bitcoin RPC cookies, dashboard tokens, raw logs, or `.pohw-experiment.env`.
 

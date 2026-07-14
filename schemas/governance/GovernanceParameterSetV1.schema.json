@@ -1,0 +1,20 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/GovernanceParameterSetV1.schema.json",
+  "title":"GovernanceParameterSetV1","type":"object","additionalProperties":false,
+  "required":["schemaVersion","idnaAtomsPerUnit","stakeQuantumAtoms","minimumActiveStakeAtoms","statusBps","flipPriorReported","flipPriorTotal","flipTrustFloorBps","flipTrustCeilingBps","flipPenaltyScale","activationDelayEpochs","unbondingDelayEpochs","reviewPeriodBlocks","votingPeriodBlocks","challengePeriodBlocks","timelockBlocks","executionWindowBlocks","minimumIdentityMetricsAttestations","minimumReviewerBondAtoms","minimumBuilderBondAtoms","minimumDataAvailabilityBondAtoms","normal","critical","proposalBondPolicy","objectiveSlashPolicy"],
+  "properties":{
+    "schemaVersion":{"const":1},"idnaAtomsPerUnit":{"const":"1000000000000000000"},"stakeQuantumAtoms":{"const":"1000000000000"},
+    "minimumActiveStakeAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
+    "statusBps":{"type":"object","additionalProperties":false,"required":["Human","Verified","Newbie"],"properties":{"Human":{"const":10000},"Verified":{"const":8500},"Newbie":{"const":7000}}},
+    "flipPriorReported":{"const":1},"flipPriorTotal":{"const":20},"flipTrustFloorBps":{"const":4000},"flipTrustCeilingBps":{"const":10000},"flipPenaltyScale":{"const":15000},
+    "activationDelayEpochs":{"type":"integer","minimum":1},"unbondingDelayEpochs":{"type":"integer","minimum":2},
+    "reviewPeriodBlocks":{"type":"integer","minimum":1},"votingPeriodBlocks":{"type":"integer","minimum":1},"challengePeriodBlocks":{"type":"integer","minimum":1},"timelockBlocks":{"type":"integer","minimum":1},"executionWindowBlocks":{"type":"integer","minimum":1},
+    "minimumIdentityMetricsAttestations":{"type":"integer","minimum":2},
+    "minimumReviewerBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},"minimumBuilderBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},"minimumDataAvailabilityBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
+    "normal":{"$ref":"#/$defs/gates"},"critical":{"$ref":"#/$defs/gates"},
+    "proposalBondPolicy":{"type":"object","additionalProperties":false,"required":["minimumBondAtoms","rejectedReturnBps","staleProcessingFeeAtoms","expiredSlashBps"],"properties":{"minimumBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},"rejectedReturnBps":{"type":"integer","minimum":0,"maximum":10000},"staleProcessingFeeAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},"expiredSlashBps":{"type":"integer","minimum":0,"maximum":10000}}},
+    "objectiveSlashPolicy":{"type":"object","additionalProperties":false,"required":["fraudulentProposalSlashBps","fraudulentReviewerSlashBps","fraudulentBuilderSlashBps","unavailableDataSlashBps","fraudulentActorStakeSlashBps"],"properties":{"fraudulentProposalSlashBps":{"type":"integer","minimum":0,"maximum":10000},"fraudulentReviewerSlashBps":{"type":"integer","minimum":0,"maximum":10000},"fraudulentBuilderSlashBps":{"type":"integer","minimum":0,"maximum":10000},"unavailableDataSlashBps":{"type":"integer","minimum":0,"maximum":10000},"fraudulentActorStakeSlashBps":{"type":"integer","minimum":0,"maximum":10000}}}
+  },
+  "$defs":{"gates":{"type":"object","additionalProperties":false,"required":["turnoutQuorumBps","yesThresholdBps","minimumYesIdentities","minimumVerifiedOrHumanYes","minimumAgentAttestations","minimumAgentFamilies","minimumAgentOwners","minimumBuilders","minimumBuilderPlatforms","minimumDataAvailabilityProviders"],"properties":{"turnoutQuorumBps":{"type":"integer","minimum":1,"maximum":10000},"yesThresholdBps":{"type":"integer","minimum":1,"maximum":10000},"minimumYesIdentities":{"type":"integer","minimum":1},"minimumVerifiedOrHumanYes":{"type":"integer","minimum":1},"minimumAgentAttestations":{"type":"integer","minimum":1},"minimumAgentFamilies":{"type":"integer","minimum":1},"minimumAgentOwners":{"type":"integer","minimum":1},"minimumBuilders":{"type":"integer","minimum":1},"minimumBuilderPlatforms":{"type":"integer","minimum":1},"minimumDataAvailabilityProviders":{"type":"integer","minimum":2}}}}
+}

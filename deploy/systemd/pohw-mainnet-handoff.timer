@@ -1,0 +1,13 @@
+[Unit]
+Description=Check PoHW participant threshold for Bitcoin mainnet handoff
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=pohw-mainnet-handoff.service
+
+[Install]
+WantedBy=timers.target

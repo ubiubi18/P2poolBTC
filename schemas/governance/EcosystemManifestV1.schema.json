@@ -1,0 +1,18 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://pohw.example/schemas/governance/EcosystemManifestV1.schema.json",
+  "title":"EcosystemManifestV1",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","ecosystemId","parentEcosystemCid","repositories","compatibilityPins","toolchainLocks","governanceContractVersion","governanceParameterSetCid"],
+  "properties":{
+    "schemaVersion":{"const":1},
+    "ecosystemId":{"type":"string","pattern":"^[a-z0-9][a-z0-9._-]{2,79}$"},
+    "parentEcosystemCid":{"anyOf":[{"$ref":"common.schema.json#/$defs/DagCborCid"},{"type":"null"}]},
+    "repositories":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"RepositoryManifestV1.schema.json"}},
+    "compatibilityPins":{"type":"object","maxProperties":256,"propertyNames":{"pattern":"^[A-Za-z0-9._:/-]{1,120}$"},"additionalProperties":{"type":"object","maxProperties":256,"propertyNames":{"pattern":"^[A-Za-z0-9._:/-]{1,120}$"},"additionalProperties":{"type":"string","minLength":1,"maxLength":4096}}},
+    "toolchainLocks":{"type":"object","maxProperties":256,"propertyNames":{"pattern":"^[A-Za-z0-9._:/-]{1,120}$"},"additionalProperties":{"type":"string","minLength":1,"maxLength":4096}},
+    "governanceContractVersion":{"type":"string","pattern":"^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "governanceParameterSetCid":{"$ref":"common.schema.json#/$defs/DagCborCid"}
+  }
+}

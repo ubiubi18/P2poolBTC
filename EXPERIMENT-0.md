@@ -13,16 +13,30 @@ If you are joining as a beta tester for the first time, start with [Beta Testing
 > but only through the explicit [separate experiment](#start-a-separate-experiment-explicit-opt-in)
 > workflow near the end of this document.
 
+> [!WARNING]
+> **The canonical fork phase ends at 20 active Idena identities on hosts that
+> arm the mainnet handoff controller.** At that threshold the controller can
+> automatically stop and delete the local no-value fork datadir, derive payouts
+> for each live Bitcoin template, and start submitting target-meeting work to
+> Bitcoin mainnet. There is no second prompt after the controller is armed.
+> Mainnet blocks have real value. Operators who do not
+> accept that risk must stop their miner and leave the controller disabled.
+> See [The 20-participant mainnet handoff](README.md#the-20-participant-mainnet-handoff).
+
 The designated coordinator may bootstrap the first canonical fork seed without
 an upstream fork peer by initializing with `--bootstrap-first-seed`. That
 first-node exception permits only the consensus/P2P service to start. Stratum
 and block production remain stopped until at least one independently operated
 peer connects and verifies the same activation ID.
 
-Experiment 0 is a no-value, replay-only test of the decentralized P2Pool layer. It is not Bitcoin mainnet mining, not a token launch, not a bridge, and not a deposit system.
+Experiment 0 begins as a no-value test of the decentralized P2Pool layer. The
+fork phase is not Bitcoin mainnet mining, a token launch, a bridge, or a deposit
+system. An explicitly armed host transitions to Bitcoin mainnet after the
+canonical 20-participant condition; it still accepts no user deposits.
 
 The optional fork phase runs the repository's coinbase-only Experiment 0 chain.
-It is still no-value and does not alter or submit blocks to Bitcoin mainnet.
+Before the handoff completes, it is no-value and does not alter or submit
+blocks to Bitcoin mainnet.
 
 ## Why This Test Matters
 
@@ -42,15 +56,20 @@ Run several independent nodes that can:
 - dry-run FROST DKG/signing with test inputs,
 - produce shareable report bundles without leaking secrets.
 
-## Non-Value Rule
+## Fork-Phase Non-Value Rule
 
-Every participant must understand:
+Before the 20-participant handoff, every participant must understand:
 
 - no real BTC is paid,
 - no user BTC deposits are accepted,
 - no transferable claim or token exists,
 - test claims can be deleted,
 - the test can be shut down at any time.
+
+After the handoff, a miner connected to an armed node works on Bitcoin mainnet.
+That does not turn test claims into guaranteed payouts, and the unfinished
+vault path is not production-ready. Stop the miner before `20 / 20` if you do
+not explicitly accept real-Bitcoin submission risk.
 
 Set this in your local env file before running the helper scripts:
 
@@ -427,6 +446,8 @@ Experiment 0 is successful when at least three independent nodes:
 - report matching replay summaries after sync,
 - can produce matching snapshot roots once local Idena data is ready,
 - can complete a test-only FROST DKG/signing dry run without real funds.
+- independently report the same distinct active-Idena participant count and
+  the same 20-participant handoff policy.
 
 ## Stop Conditions
 
@@ -447,6 +468,6 @@ Stop and fix before expanding if:
 - no general post-fork transaction/script or UTXO consensus yet,
 - no inherited UTXO spending or adaptive post-fork DAA yet,
 - no long-running networked FROST signer daemon yet,
-- no real BTC payout flow,
+- no production-ready real BTC payout or vault flow,
 - no complete official-indexer-backed Idena reward replay for every category,
 - no production anti-eclipse review.

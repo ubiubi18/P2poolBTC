@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "constants": {
+    "idnaAtomsPerUnit": "1000000000000000000",
+    "stakeQuantumAtoms": "1000000000000",
+    "priorReported": 1,
+    "priorTotal": 20,
+    "flipTrustFloorBps": 4000,
+    "flipTrustCeilingBps": 10000,
+    "flipPenaltyScale": 15000,
+    "statusBps": {"Human": 10000, "Verified": 8500, "Newbie": 7000}
+  },
+  "flipTrustCases": [
+    {"name":"zero-history","finalized":"0","reported":"0","expectedReportedRateBps":500,"expectedTrustBps":9250},
+    {"name":"one-clean","finalized":"1","reported":"0","expectedReportedRateBps":476,"expectedTrustBps":9286},
+    {"name":"one-reported","finalized":"1","reported":"1","expectedReportedRateBps":952,"expectedTrustBps":8572},
+    {"name":"twenty-clean","finalized":"20","reported":"0","expectedReportedRateBps":250,"expectedTrustBps":9625},
+    {"name":"twenty-one-reported","finalized":"20","reported":"1","expectedReportedRateBps":500,"expectedTrustBps":9250},
+    {"name":"twenty-all-reported","finalized":"20","reported":"20","expectedReportedRateBps":5250,"expectedTrustBps":4000},
+    {"name":"hundred-ten-reported","finalized":"100","reported":"10","expectedReportedRateBps":916,"expectedTrustBps":8626},
+    {"name":"maximum-counters","finalized":"18446744073709551615","reported":"18446744073709551615","expectedReportedRateBps":9999,"expectedTrustBps":4000}
+  ],
+  "invalidFlipTrustCases": [
+    {"name":"reported-exceeds-finalized","finalized":"2","reported":"3"}
+  ],
+  "weightCases": [
+    {"name":"below-quantum","stakeAtoms":"999999999999","state":"Human","finalized":"0","reported":"0","expectedStakeScore":"0","expectedTrustBps":9250,"expectedWeight":"0"},
+    {"name":"one-idna-human","stakeAtoms":"1000000000000000000","state":"Human","finalized":"0","reported":"0","expectedStakeScore":"1000","expectedTrustBps":9250,"expectedWeight":"925"},
+    {"name":"one-idna-verified","stakeAtoms":"1000000000000000000","state":"Verified","finalized":"0","reported":"0","expectedStakeScore":"1000","expectedTrustBps":9250,"expectedWeight":"786"},
+    {"name":"one-idna-newbie","stakeAtoms":"1000000000000000000","state":"Newbie","finalized":"0","reported":"0","expectedStakeScore":"1000","expectedTrustBps":9250,"expectedWeight":"647"},
+    {"name":"thousand-idna-human","stakeAtoms":"1000000000000000000000","state":"Human","finalized":"100","reported":"10","expectedStakeScore":"31622","expectedTrustBps":8626,"expectedWeight":"27277"},
+    {"name":"thousand-idna-newbie","stakeAtoms":"1000000000000000000000","state":"Newbie","finalized":"100","reported":"10","expectedStakeScore":"31622","expectedTrustBps":8626,"expectedWeight":"19093"},
+    {"name":"ten-thousand-idna-low-trust","stakeAtoms":"10000000000000000000000","state":"Human","finalized":"20","reported":"20","expectedStakeScore":"100000","expectedTrustBps":4000,"expectedWeight":"40000"}
+  ],
+  "ageInvarianceCases": [
+    {
+      "stakeAtoms":"1000000000000000000","state":"Verified","finalized":"20","reported":"1","expectedTrustBps":9250,"expectedWeight":"786",
+      "ignoredMetadataA":{"age":1,"birthday":999,"generation":1,"completedEpochs":0},
+      "ignoredMetadataB":{"age":9999,"birthday":1,"generation":88,"completedEpochs":500}
+    }
+  ]
+}

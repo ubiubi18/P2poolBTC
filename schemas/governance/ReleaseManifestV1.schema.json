@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/ReleaseManifestV1.schema.json",
+  "title": "ReleaseManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "ecosystemCid",
+    "proposalId",
+    "version",
+    "sequence",
+    "artifacts",
+    "builderAttestationRoot",
+    "builderAttestationCids",
+    "minimumBuilderAttestations",
+    "minimumBuilderPlatforms",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "ecosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "proposalId": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "cid", "sha256", "size", "platform", "architecture", "minimumBuilderAttestations"],
+        "properties": {
+          "name": {"$ref": "common.schema.json#/$defs/PortableArtifactName"},
+          "cid": {"$ref": "common.schema.json#/$defs/RawCid"},
+          "sha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+          "size": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+          "platform": {"type": "string", "pattern": "^[a-z0-9._-]{1,31}$"},
+          "architecture": {"type": "string", "pattern": "^[a-z0-9._-]{1,31}$"},
+          "minimumBuilderAttestations": {"type": "integer", "minimum": 2, "maximum": 256}
+        }
+      }
+    },
+    "builderAttestationRoot": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "builderAttestationCids": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/DagCborCid"}
+    },
+    "minimumBuilderAttestations": {"type": "integer", "minimum": 2, "maximum": 256},
+    "minimumBuilderPlatforms": {"type": "integer", "minimum": 1, "maximum": 256},
+    "createdAt": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+  }
+}

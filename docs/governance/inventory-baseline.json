@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "recordedDate": "2026-07-13",
+  "compatibilityLockSha256": "e83f01033b1f2d5be1d404ef4c340fc9fd5736bf6ffd6c16c754167632807b98",
+  "repositories": [
+    {"name":"P2poolBTC","commit":"473525c39c00ef9a6abb2602a9186f796695c6fe","branch":"vibe/bootstrap-difficulty-handoff-master","dirty":true,"dirtyEntries":61},
+    {"name":"idena-go","commit":"7e03b62a9e9b7d946a556c3ff8cb52d90faab615","branch":"vibe/legacy-compat-release-train","dirty":false},
+    {"name":"idena-desktop","commit":"5d5bc47d90f90f21c8d19e2a99d783646f3ed02b","branch":"vibe/legacy-compat-release-train","dirty":false},
+    {"name":"idena-compat-stack","commit":"cdee81b675fc2378f7e932b16ec465981bd047e0","branch":"vibe/rc3-gate-attestation","dirty":false},
+    {"name":"idena-wasm-binding","commit":"f2919cb3a2765f8b808ab5ae197d6d948910f45d","branch":"vibe/legacy-compat-release-train","dirty":false},
+    {"name":"idena-wasm","commit":"bac21ef8e1bd1a54f867d7356eac1ba76dc7b8b3","branch":"vibe/legacy-compat-release-train","dirty":false},
+    {"name":"wasmer","commit":"b537fb88764706488628b57ae9d17e367b1cd64a","branch":"vibe/legacy-compat-release-train","dirty":false},
+    {"name":"idena-sdk-js-lite","commit":"567d3f45cc7b1cacc6bf59eb43b2a60dbdf92aff","branch":"vibe/legacy-compat-release-train","dirty":false}
+  ],
+  "lockedComponents": {
+    "idena-go": "aafb254786ac3c82308550a7a82642019f077d6b",
+    "idena-wasm-binding": "67ba065fdb02aa07cced2a43a261e481ca5b39d9",
+    "idena-wasm": "7e1138959f9f96f59d20efa11f2c27b134067541",
+    "wasmer": "1637dea03c0110f7dd800f2d9781193caf820074",
+    "idena-sdk-js-lite": "cc6e69b9b87aa381398b7839050a4640f46eb5ba"
+  },
+  "desktopSourcePins": {
+    "idena-go": "aafb254786ac3c82308550a7a82642019f077d6b",
+    "idena-wasm-binding": "67ba065fdb02aa07cced2a43a261e481ca5b39d9"
+  },
+  "observedToolchains": {
+    "git": "2.52.0",
+    "rust": "1.96.1",
+    "go": "1.26.1 darwin/arm64",
+    "node": "24.18.0",
+    "npm": "11.16.0",
+    "corepack": "0.35.0",
+    "pnpm": "11.11.0",
+    "python": "3.9.6",
+    "docker": "29.2.1",
+    "ipfs": null
+  }
+}

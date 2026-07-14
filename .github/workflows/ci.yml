@@ -62,17 +62,27 @@ jobs:
         with:
           node-version: "24.18.0"
       - name: Install dashboard dependencies
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard install --frozen-lockfile
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard install --frozen-lockfile
       - name: Audit dashboard dependencies
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard audit --prod
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard audit --prod
       - name: Build dashboard
-        run: corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+        run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
       - name: Install contract dependencies
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
       - name: Audit contract dependencies
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry audit --prod
       - name: Test contract
         run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+      - name: Install governance contract dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance install --frozen-lockfile
+      - name: Audit governance contract dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance audit --prod
+      - name: Build governance contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance build
+      - name: Test governance contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance test
+      - name: Verify governance contract lock
+        run: python3 scripts/pohw-governance-runtime-gate.py --verify-artifact-only
 
   secrets:
     runs-on: ubuntu-latest
