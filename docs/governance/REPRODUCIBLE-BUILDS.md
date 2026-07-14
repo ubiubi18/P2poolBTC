@@ -137,6 +137,6 @@ differences must be documented. Apple notarization and Windows signing remain
 external centralized constraints and are not solved by IPFS or DAO approval.
 
 The local fork lock records an exact contract artifact, but labels it
-`uncommitted-local-prototype` and `canonicalAuthorization: none`. It is not a
+`committed-experimental-prototype` and `canonicalAuthorization: none`. It is not a
 release. No installer or release is authorized until independent clean-room
 attestations and all governance gates exist.

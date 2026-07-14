@@ -129,8 +129,8 @@
   ],
   "governancePrototype": {
     "sourceRepository": "https://github.com/ubiubi18/P2poolBTC.git",
-    "baseCommit": "473525c39c00ef9a6abb2602a9186f796695c6fe",
-    "sourceStatus": "uncommitted-local-prototype",
+    "baseCommit": "9901588dce91ce0a186bebb975d699a919b7d216",
+    "sourceStatus": "committed-experimental-prototype",
     "canonicalAuthorization": "none",
     "contractVersion": "0.1.0",
     "contractArtifact": {

@@ -30,15 +30,15 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.GateError, "duplicate object key"):
                 MODULE.load_json(lock)
 
-    def test_uncommitted_prototype_cannot_pass_locked_source_gate(self):
+    def test_noncanonical_prototype_cannot_pass_locked_source_gate(self):
         lock = {
             "governancePrototype": {
-                "sourceStatus": "uncommitted-local-prototype",
+                "sourceStatus": "committed-experimental-prototype",
                 "baseCommit": "0" * 40,
             },
             "components": [],
         }
-        with self.assertRaisesRegex(MODULE.GateError, "uncommitted local prototype"):
+        with self.assertRaisesRegex(MODULE.GateError, "not a canonical locked source"):
             MODULE.verify_locked_sources(ROOT, lock, ROOT, {})
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")

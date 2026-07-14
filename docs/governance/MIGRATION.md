@@ -2,7 +2,7 @@
 
 ## Phase 0: local only
 
-The current state is an uncommitted local prototype. The legacy compatibility
+The current state is a committed experimental prototype. The legacy compatibility
 lock stays byte-for-byte unchanged. No contract address, initial canonical CID,
 genesis CID, activation height, or release is authorized.
 

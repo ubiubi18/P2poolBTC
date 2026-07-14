@@ -165,7 +165,7 @@ def verify_locked_sources(
     require(isinstance(prototype, dict), "lock is missing governancePrototype")
     require(
         prototype.get("sourceStatus") == "canonical-locked-source",
-        "lock still identifies the governance source as an uncommitted local prototype",
+        "governance source is not a canonical locked source",
     )
     p2pool_commit = prototype.get("baseCommit")
     require(isinstance(p2pool_commit, str) and COMMIT_RE.fullmatch(p2pool_commit) is not None, "invalid P2poolBTC base commit")

@@ -27,8 +27,9 @@ production `WasmVM`, compares outputs and gas, and exercises storage, attached
 payment, stake scheduling, and epoch activation. For release evidence add
 `--require-locked-sources` plus a `--component-repo NAME=/absolute/path` for
 every non-idena-go component. That mode deliberately fails while any worktree
-is dirty, any revision differs, or the fork lock still says
-`uncommitted-local-prototype`.
+is dirty, any revision differs, or the fork lock is not marked
+`canonical-locked-source`. The published prototype remains
+`committed-experimental-prototype` and therefore fails this release gate.
 
 The emulator exercises initialization, exact identity Merkle proofs,
 independently certified metrics roots, delayed stake activation, vote
