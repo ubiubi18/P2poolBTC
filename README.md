@@ -57,9 +57,13 @@ commitment. These are experimental fork coins, not Bitcoin mainnet funds.
 ## Start Here
 
 If you want to help test, start with the
-[Community Experiment 0 Guide](COMMUNITY-README.md). It gives the explicit
-five-step path to reproduce the build, join the existing experiment, connect an
-Idena identity, produce a readiness report, and report problems safely.
+[Community Experiment 0 Guide](COMMUNITY-README.md). Its source-first launcher
+builds locally with `Cargo.lock`, computes the deterministic source CID, opens a
+loopback wizard, and registers an Idena identity without trusting a prebuilt
+binary or a lead-developer signature.
+
+The detailed trust boundary and current limitations are in
+[Source-First Onboarding](docs/source-first-onboarding.md).
 
 [Beta Testing P2poolBTC](BETA-TESTING.md) explains the tester roles and safety
 boundaries in more detail.
@@ -110,6 +114,7 @@ Not done yet:
 crates/pohw-core          consensus/accounting/vault primitives
 crates/p2pool-node        local node, gossip, dashboard API, Bitcoin RPC checks
 crates/idena-lite-indexer local idena-go snapshot builder
+crates/pohw-agent        source verifier and loopback community join wizard
 ui/pohw-dashboard         React dashboard
 contracts/                Idena WASM snapshot registry
 deploy/systemd            Raspberry Pi service templates

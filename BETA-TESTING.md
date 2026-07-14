@@ -69,60 +69,26 @@ This shows the user journey and reward math with sample data only. It is for ori
 
 ## First Real Test Run
 
-Ask the experiment coordinator for:
-
-- the agreed git commit,
-- at least one current existing-network gossip peer,
-- at least one current existing-network fork peer if this round includes fork mining,
-- whether this round expects Idena snapshots, Bitcoin fork activation, or only gossip/report testing.
-
-Then run:
+Obtain the community-agreed source commit and current gossip, fork RPC, and
+fork P2P hints from independent participants. Build and launch locally:
 
 ```sh
-cargo build --release -p p2pool-node
+git clone https://github.com/ubiubi18/P2poolBTC.git
+cd P2poolBTC
+git checkout --detach '<community-agreed-commit>'
 
-scripts/pohw-experiment-init.sh \
-  --miner-id <your-name> \
-  --bind-addr <node-lan-ip>:40406 \
-  --advertise-addr <node-lan-ip>:40406 \
-  --peer-addrs <current-experiment-0-gossip-seed>:40406 \
-  --register-peers
+scripts/pohw-community-join.sh \
+  --gossip-peer '<gossip-host:port>' \
+  --fork-rpc-peer '<fork-rpc-host:port>' \
+  --fork-p2p-peer '<fork-p2p-host:port>'
 ```
 
-Open `.pohw-experiment.env`, set:
-
-```sh
-POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE
-POHW_EXPERIMENT_NETWORK_MODE=join-existing
-POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-13T00:52:48Z
-POHW_FORK_ACTIVATION_MANIFEST=/path/to/pohw-p2pool/fork-activation.json
-POHW_FORK_PEER_ADDRS=<current-experiment-0-fork-seed>:40409
-```
-
-The init script copies `compatibility/experiment-0-activation.json` to the
-configured manifest path in its default `join-existing` mode. If a different
-file already exists there, initialization stops; follow the network selection
-instructions in [Experiment 0](EXPERIMENT-0.md) rather than overwriting it.
-
-Preflight your node:
-
-```sh
-scripts/pohw-experiment-preflight.sh .pohw-experiment.env
-```
-
-Start gossip:
-
-```sh
-scripts/pohw-experiment-start-gossip.sh .pohw-experiment.env
-```
-
-Create a report bundle:
-
-```sh
-scripts/pohw-experiment-report.sh .pohw-experiment.env
-```
-
-Share only the generated `.tar.gz` report bundle with the group.
+The launcher accepts no prebuilt executable or maintainer signature. Compare
+the source CID it prints with independent participants, then use the local
+wizard to register your identity and start signed gossip. See the
+[Community Experiment 0 Guide](COMMUNITY-README.md) for fork-sync and mining
+progression. The older env/systemd flow below remains the advanced operator
+path.
 
 ## Optional: Pledge An Idena Identity
 
@@ -197,4 +163,5 @@ At least three independent testers should be able to:
 - Use the dashboard for a human-readable view of your local status.
 - Use report bundles for group comparison.
 
-If something feels confusing, that is useful beta feedback. Open an issue or tell the coordinator exactly where you got stuck and what command/output you saw.
+If something feels confusing, that is useful beta feedback. Open an issue and
+state exactly where you got stuck and what sanitized command/output you saw.

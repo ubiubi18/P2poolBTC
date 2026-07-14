@@ -2,7 +2,10 @@
 
 This is the detailed operator runbook for the first community experiment.
 
-If you are joining as a beta tester for the first time, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the roles, the shortest path to a first report bundle, and what feedback is useful.
+If you are joining as a beta tester for the first time, use the
+[source-first community guide](COMMUNITY-README.md). It builds locally and does
+not trust a prebuilt binary or lead-developer signature. This document is the
+advanced operator runbook.
 
 > [!IMPORTANT]
 > **The default workflow joins the canonical Experiment 0 network.** Do
@@ -23,7 +26,7 @@ If you are joining as a beta tester for the first time, start with [Beta Testing
 > accept that risk must stop their miner and leave the controller disabled.
 > See [The 20-participant mainnet handoff](README.md#the-20-participant-mainnet-handoff).
 
-The designated coordinator may bootstrap the first canonical fork seed without
+The designated first-seed operator may bootstrap the canonical fork seed without
 an upstream fork peer by initializing with `--bootstrap-first-seed`. That
 first-node exception permits only the consensus/P2P service to start. Stratum
 and block production remain stopped until at least one independently operated
@@ -95,10 +98,10 @@ network. The existing Experiment 0 network is pinned to:
 For the normal participant path:
 
 1. Use the canonical manifest tracked in this repository.
-2. Obtain current gossip and fork seed addresses from the coordinator's pinned
-   Experiment 0 announcement. Peer addresses can change; the activation ID
-   above cannot. The designated coordinator omits the fork seed only while
-   starting the first canonical seed.
+2. Obtain current gossip and fork seed addresses from several existing
+   participants. Peer addresses are transport hints and can change; the
+   activation ID above cannot. The designated first-seed operator omits the
+   fork seed only while starting the first canonical seed.
 3. Ordinary participants stop if no existing peer is reachable or if any peer
    reports a different activation ID. The first seed may wait with zero peers,
    but nobody mines until a second independent peer verifies the activation.
@@ -173,7 +176,7 @@ scripts/pohw-experiment-init.sh \
   --register-peers
 ```
 
-Only the designated coordinator starting the first canonical seed omits
+Only the designated first-seed operator starting the canonical seed omits
 `--fork-peer-addrs` and adds `--bootstrap-first-seed`. The generated temporary
 exception must be removed as soon as the second fork endpoint is known.
 
@@ -324,7 +327,7 @@ ordinary joiner. The first seed may remain online to accept its initial peer,
 but starting Stratum against that isolated tip would create a private branch
 even though the activation ID is correct.
 
-After the second endpoint is available, the coordinator sets
+After the second endpoint is available, the first-seed operator sets
 `POHW_FORK_BOOTSTRAP_FIRST_SEED=false`, configures that endpoint in
 `POHW_FORK_PEER_ADDRS`, and restarts the fork node. The runner rejects a stale
 first-seed exception when peers are configured. Configured peer IPs are also the

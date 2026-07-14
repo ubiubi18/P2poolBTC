@@ -52,7 +52,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -195,10 +195,16 @@ enum Command {
     VerifyMinerRegistrationEnvelope {
         #[arg(long)]
         envelope_file: PathBuf,
+        #[arg(long)]
+        message_file: Option<PathBuf>,
+        #[arg(long)]
+        datadir: Option<PathBuf>,
         #[arg(long, default_value_t = 300)]
         max_future_skew_seconds: i64,
         #[arg(long, default_value_t = 86_400)]
         max_age_seconds: i64,
+        #[arg(long)]
+        durable: bool,
     },
     AppendGossipEnvelope {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -416,6 +422,16 @@ enum Command {
         #[arg(long = "peer-addr")]
         peer_addrs: Vec<SocketAddr>,
     },
+    MiningSnapshotEvidence {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long)]
+        miner_id: Option<String>,
+        #[arg(long)]
+        min_snapshot_voters: usize,
+    },
     DeriveXonlyPubkey {
         #[arg(long)]
         secret_key_file: PathBuf,
@@ -453,6 +469,10 @@ enum Command {
         btc_payout_script_hex: Option<String>,
         #[arg(long)]
         idena_signature_hex: Option<String>,
+        #[arg(long)]
+        idena_signature_file: Option<PathBuf>,
+        #[arg(long)]
+        idena_signature_stdin: bool,
         #[arg(long)]
         message_out: Option<PathBuf>,
         #[arg(long)]
@@ -1696,15 +1716,35 @@ async fn main() -> Result<()> {
         }
         Command::VerifyMinerRegistrationEnvelope {
             envelope_file,
+            message_file,
+            datadir,
             max_future_skew_seconds,
             max_age_seconds,
+            durable,
         } => {
             let envelope = read_gossip_envelope_file(&envelope_file)?;
+            if let Some(message_file) = message_file {
+                let message = read_sharechain_message_file(&message_file)?;
+                if message != envelope.message {
+                    bail!("registration message file does not match the signed envelope");
+                }
+            }
             let registration = verified_miner_registration_from_envelope(
                 &envelope,
                 max_future_skew_seconds,
                 max_age_seconds,
+                durable,
             )?;
+            if let Some(datadir) = datadir {
+                let state = local_node::replay_state(&datadir)?;
+                let replayed = state
+                    .registrations()
+                    .get(&registration.miner_id.to_ascii_lowercase())
+                    .context("verified registration is absent from local sharechain replay")?;
+                if replayed != registration {
+                    bail!("local sharechain registration does not match the signed envelope");
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -1713,6 +1753,7 @@ async fn main() -> Result<()> {
                     "envelope_hash": envelope.envelope_hash(),
                     "peer_pubkey_xonly_hex": envelope.peer_pubkey_xonly_hex,
                     "message_hash": envelope.message.message_hash(),
+                    "registration_binding_hash": hex::encode(registration.signing_hash()),
                     "miner_registration": {
                         "miner_id": registration.miner_id,
                         "idena_address": registration.idena_address,
@@ -2046,6 +2087,20 @@ async fn main() -> Result<()> {
             let report = multinode_preflight(datadir, snapshot_dir, miner_id, peer_addrs).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::MiningSnapshotEvidence {
+            datadir,
+            snapshot_dir,
+            miner_id,
+            min_snapshot_voters,
+        } => {
+            let evidence = mining_snapshot_evidence(
+                &datadir,
+                &snapshot_dir,
+                miner_id.as_deref(),
+                min_snapshot_voters,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&evidence)?);
+        }
         Command::DeriveXonlyPubkey { secret_key_file } => {
             let keypair = read_keypair_from_file(&secret_key_file)?;
             println!("{}", keypair.x_only_public_key().0);
@@ -2087,11 +2142,19 @@ async fn main() -> Result<()> {
             node_secret_key_file,
             btc_payout_script_hex,
             idena_signature_hex,
+            idena_signature_file,
+            idena_signature_stdin,
             message_out,
             envelope_out,
             append,
             peer_addrs,
         } => {
+            let idena_signature_hex = read_optional_secret_with_stdin(
+                idena_signature_hex,
+                idena_signature_file,
+                idena_signature_stdin,
+                "Idena signature",
+            )?;
             let result = prepare_miner_registration(PrepareMinerRegistrationInput {
                 datadir,
                 miner_id,
@@ -4681,6 +4744,94 @@ async fn multinode_preflight(
     }))
 }
 
+fn mining_snapshot_evidence(
+    datadir: &Path,
+    snapshot_dir: &Path,
+    miner_id: Option<&str>,
+    min_snapshot_voters: usize,
+) -> Result<serde_json::Value> {
+    if min_snapshot_voters == 0 {
+        bail!("--min-snapshot-voters must be greater than zero");
+    }
+    let snapshot_status = local_node::latest_verified_snapshot(snapshot_dir)?;
+    if snapshot_status.invalid_file_count != 0 || snapshot_status.skipped_file_count != 0 {
+        bail!(
+            "snapshot directory is ambiguous: {} invalid and {} unscanned JSON files",
+            snapshot_status.invalid_file_count,
+            snapshot_status.skipped_file_count
+        );
+    }
+    let verified = snapshot_status
+        .latest
+        .context("no verified Idena snapshot is available for mining")?;
+    let snapshot = verified.snapshot;
+    let age_days = (Utc::now().date_naive() - snapshot.snapshot_day).num_days();
+    if age_days < 0 {
+        bail!("latest verified Idena snapshot is dated in the future");
+    }
+    if u64::try_from(age_days).unwrap_or(u64::MAX) > MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS {
+        bail!("latest verified Idena snapshot is too old for mining");
+    }
+
+    let state = local_node::replay_state(datadir)?;
+    let snapshot_id = snapshot.snapshot_day.to_string();
+    let voter_count = state.unique_snapshot_voter_idena_count(
+        &snapshot_id,
+        snapshot.idena_height,
+        &snapshot.score_root,
+    );
+    if voter_count < min_snapshot_voters {
+        bail!(
+            "verified Idena snapshot has {voter_count} distinct identity voters; {min_snapshot_voters} required"
+        );
+    }
+    let voter_count = u32::try_from(voter_count).context("snapshot voter count exceeds u32")?;
+
+    let (normalized_miner_id, miner_eligible, identity_status) = match miner_id {
+        Some(miner_id) => {
+            let normalized = miner_id.to_ascii_lowercase();
+            let registration = state
+                .registrations()
+                .get(&normalized)
+                .with_context(|| format!("miner {normalized} is not registered"))?;
+            registration
+                .verify_mining_signature()
+                .context("mining snapshot registration has an invalid mining signature")?;
+            registration
+                .verify_idena_ownership_signature()
+                .context("mining snapshot registration has an invalid Idena ownership proof")?;
+            let leaf = snapshot
+                .leaves
+                .iter()
+                .find(|leaf| {
+                    leaf.idena_address
+                        .eq_ignore_ascii_case(&registration.idena_address)
+                })
+                .context("registered miner identity is absent from the verified snapshot")?;
+            if !leaf.is_block_eligible() {
+                bail!("registered miner identity is not eligible in the verified snapshot");
+            }
+            (
+                Some(normalized),
+                Some(true),
+                Some(format!("{:?}", leaf.status)),
+            )
+        }
+        None => (None, None, None),
+    };
+
+    Ok(serde_json::json!({
+        "schema_version": "pohw-mining-snapshot-evidence/v1",
+        "snapshot_id": snapshot_id,
+        "proof_root": snapshot.score_root,
+        "source_height": snapshot.idena_height,
+        "distinct_voter_count": voter_count,
+        "miner_id": normalized_miner_id,
+        "miner_eligible": miner_eligible,
+        "identity_status": identity_status,
+    }))
+}
+
 #[derive(Debug)]
 struct PrepareMinerRegistrationInput {
     datadir: PathBuf,
@@ -5689,6 +5840,34 @@ fn read_optional_secret(
     }
 }
 
+fn read_optional_secret_with_stdin(
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+    secret_stdin: bool,
+    label: &str,
+) -> Result<Option<String>> {
+    if !secret_stdin {
+        return read_optional_secret(secret, secret_file, label);
+    }
+    if secret.is_some() || secret_file.is_some() {
+        bail!("{label}, {label} file, and stdin cannot be supplied together");
+    }
+    read_secret_from_reader(std::io::stdin(), label).map(Some)
+}
+
+fn read_secret_from_reader(reader: impl Read, label: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_OPTIONAL_SECRET_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label} from stdin"))?;
+    if bytes.len() as u64 > MAX_OPTIONAL_SECRET_FILE_BYTES {
+        bail!("{label} from stdin exceeds the safety limit");
+    }
+    let secret = String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))?;
+    validate_secret(secret, label)
+}
+
 fn validate_secret(secret: String, label: &str) -> Result<String> {
     let secret = secret.trim().to_string();
     if secret.is_empty() || secret.len() > MAX_OPTIONAL_SECRET_BYTES {
@@ -6320,12 +6499,14 @@ fn verified_miner_registration_from_envelope(
     envelope: &GossipEnvelope,
     max_future_skew_seconds: i64,
     max_age_seconds: i64,
+    durable: bool,
 ) -> Result<&MinerRegistration> {
-    envelope.verify_at(
-        current_unix_timestamp()?,
-        max_future_skew_seconds,
-        max_age_seconds,
-    )?;
+    let now = current_unix_timestamp()?;
+    if durable {
+        envelope.verify_durable_at(now, max_future_skew_seconds)?;
+    } else {
+        envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    }
     match &envelope.message {
         SharechainMessage::MinerRegistration(registration) => {
             registration.verify_mining_signature()?;
@@ -6470,6 +6651,20 @@ mod tests {
     fn test_keypair(byte: u8) -> Keypair {
         let secret_key = SecretKey::from_slice(&[byte; 32]).expect("valid test key");
         Keypair::from_secret_key(&bitcoin::key::Secp256k1::new(), &secret_key)
+    }
+
+    #[test]
+    fn stdin_secret_reader_is_bounded_and_conflict_checked() {
+        let secret = read_secret_from_reader(std::io::Cursor::new(b"0x1234\n"), "fixture")
+            .expect("read bounded secret");
+        assert_eq!(secret, "0x1234");
+        assert!(
+            read_optional_secret_with_stdin(Some("0x1234".to_string()), None, true, "fixture")
+                .is_err()
+        );
+
+        let oversized = vec![b'a'; (MAX_OPTIONAL_SECRET_FILE_BYTES + 1) as usize];
+        assert!(read_secret_from_reader(std::io::Cursor::new(oversized), "fixture").is_err());
     }
 
     fn signed_test_withdrawal_request(

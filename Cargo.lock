@@ -1481,6 +1481,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pohw-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cid",
+ "clap",
+ "governance-core",
+ "hex",
+ "libc",
+ "multihash-codetable",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pohw-core"
 version = "0.1.0"
 dependencies = [
