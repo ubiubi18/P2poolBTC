@@ -9,7 +9,7 @@ use bitcoin::hashes::{sha256, Hash as BitcoinHash};
 use bitcoin::pow::{CompactTarget, Target, Work};
 use bitcoin::{Address, Block, BlockHash, Network, OutPoint, Transaction, TxOut, Txid, Weight};
 use chrono::Utc;
-use crypto_bigint::{Encoding, U256 as CryptoU256, U512 as CryptoU512};
+use crypto_bigint::{NonZero, U256 as CryptoU256, U512 as CryptoU512};
 use fs2::FileExt;
 use pohw_core::fork::{
     ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
@@ -1246,7 +1246,10 @@ fn next_work_required_v1(
     let previous = CryptoU256::from_be_slice(&Target::from_compact(previous_bits).to_be_bytes());
     let previous_wide: CryptoU512 = previous.resize();
     let scaled = previous_wide.wrapping_mul(&CryptoU512::from_u64(actual_timespan));
-    let adjusted = scaled.wrapping_div(&CryptoU512::from_u64(target_timespan));
+    let target_timespan = NonZero::new(CryptoU512::from_u64(target_timespan))
+        .into_option()
+        .context("fork difficulty target timespan must be non-zero")?;
+    let adjusted = scaled.wrapping_div(&target_timespan);
 
     let pow_limit = CryptoU256::from_be_slice(
         &Target::from_compact(CompactTarget::from_consensus(pow_limit_bits)).to_be_bytes(),
@@ -1258,7 +1261,7 @@ fn next_work_required_v1(
         adjusted
     };
     let bounded: CryptoU256 = bounded.resize();
-    Ok(Target::from_be_bytes(bounded.to_be_bytes()).to_compact_lossy())
+    Ok(Target::from_be_bytes(bounded.to_be_bytes().into()).to_compact_lossy())
 }
 
 fn bootstrap_handoff_work(config: &ForkConfig) -> Work {
@@ -3086,6 +3089,21 @@ mod tests {
             Some(BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL - 1)
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_zero_difficulty_retarget_timespan() {
+        let err = next_work_required_v1(
+            CompactTarget::from_consensus(0x1d00_ffff),
+            1,
+            0,
+            0x1d00_ffff,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("fork difficulty target timespan must be non-zero"));
     }
 
     #[test]
