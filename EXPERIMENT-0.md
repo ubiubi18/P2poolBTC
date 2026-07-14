@@ -59,6 +59,52 @@ Run several independent nodes that can:
 - dry-run FROST DKG/signing with test inputs,
 - produce shareable report bundles without leaking secrets.
 
+## Public Five-Step Join Procedure
+
+The supported community path builds locally and joins the existing Experiment
+0 activation. It neither downloads a P2poolBTC executable nor trusts a release
+signature from a repository owner.
+
+1. Clone a fresh source mirror and check out the exact 40-character commit
+   agreed through multiple participant channels. `git status --short` must be
+   empty.
+2. Obtain current gossip, fork RPC, and fork P2P transport hints from an
+   existing participant. These hints are not authority; the locally tracked
+   activation manifest remains authoritative.
+3. Build and register through the loopback wizard:
+
+   ```sh
+   scripts/pohw-community-join.sh \
+     --gossip-peer '<gossip-host:port>' \
+     --fork-rpc-peer '<fork-rpc-host:port>' \
+     --fork-p2p-peer '<fork-p2p-host:port>' \
+     --explorer-url '<optional-https-explorer-url>'
+   ```
+
+4. After registration has propagated and fork sync is opened, stop the
+   registration-phase process and rerun the same command with `--launch-phase
+   fork-sync`.
+5. Only after an independently checked Idena snapshot and positive signed-vote
+   quorum are available, rerun with `--launch-phase mining`, `--snapshot-dir`,
+   and `--snapshot-min-voters`. Connect the miner only to the loopback Stratum
+   URL shown once by the wizard.
+
+Keep the launcher running and verify local progress from another terminal:
+
+```sh
+python3 scripts/pohw-community-status.py
+```
+
+The complete copy-pasteable walkthrough, Windows command, status meanings,
+explorer checks, and privacy-safe issue-reporting procedure are in the
+[Community Experiment 0 Guide](COMMUNITY-README.md).
+
+> [!NOTE]
+> Experiment 0 fork blocks do not appear in Bitcoin Core Qt or a Bitcoin Core
+> wallet. The no-value fork is a separate `p2pool-node` chain. Bitcoin Core
+> remains on mainnet and should continue to report `chain=main`; use the PoHW
+> status command and explorer for fork blocks, coinbase outputs, and shares.
+
 ## Fork-Phase Non-Value Rule
 
 Before the 20-participant handoff, every participant must understand:
@@ -441,16 +487,41 @@ if someone reuses the same chain name.
 
 ## Success Criteria
 
-Experiment 0 is successful when at least three independent nodes:
+An individual participant has completed the local join path when:
+
+- the wizard and `scripts/pohw-community-status.py` verify the same local
+  source receipt, binary digest, activation manifest, and signed registration;
+- fork-sync or mining mode reports the canonical activation ID and a running
+  fork node;
+- the local fork height agrees with the public explorer or another independent
+  node after synchronization;
+- their miner reports accepted work and their public miner ID appears on an
+  active share in another node's replay or the explorer;
+- a target-meeting fork block appears as active both locally and on another
+  node, with the same height and PoHW commitment.
+
+The participant has **not** proved successful mining merely because the miner
+connected, because an aggregate share count is nonzero, or because a hosted
+explorer loaded. These observations must be tied to their public miner ID and
+confirmed by an independent replay.
+
+The network experiment is successful when at least three independent nodes:
 
 - run the same git commit,
+- independently reproduce the same source CID from that source tree,
 - reach at least one peer,
 - accept and replay the same signed registrations,
 - report matching replay summaries after sync,
 - can produce matching snapshot roots once local Idena data is ready,
-- can complete a test-only FROST DKG/signing dry run without real funds.
+- can complete a test-only FROST DKG/signing dry run without real funds,
 - independently report the same distinct active-Idena participant count and
-  the same 20-participant handoff policy.
+  the same 20-participant handoff policy,
+- converge on the same cumulative-work fork tip after blocks are exchanged.
+
+Bitcoin Core wallet balances are not a success criterion. The Experiment 0
+fork is not loaded by Bitcoin Core, and current fork outputs are deliberately
+not spendable. Fork coinbase values are inspected in the PoHW explorer or the
+fork-chain RPC only.
 
 ## Stop Conditions
 

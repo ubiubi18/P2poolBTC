@@ -60,7 +60,14 @@ If you want to help test, start with the
 [Community Experiment 0 Guide](COMMUNITY-README.md). Its source-first launcher
 builds locally with `Cargo.lock`, computes the deterministic source CID, opens a
 loopback wizard, and registers an Idena identity without trusting a prebuilt
-binary or a lead-developer signature.
+binary or a lead-developer signature. While it runs, use
+`python3 scripts/pohw-community-status.py` for a sanitized local success check,
+then compare the reported fork height and your public miner ID with an
+independently operated explorer or peer.
+
+Experiment 0 fork blocks are not loaded into Bitcoin Core and do not appear in
+Bitcoin Core Qt or `bitcoin-cli getbalance`. Bitcoin Core stays on mainnet; the
+PoHW explorer and fork-chain RPC display the temporary no-value fork.
 
 The detailed trust boundary and current limitations are in
 [Source-First Onboarding](docs/source-first-onboarding.md).
@@ -777,7 +784,8 @@ cargo run -p p2pool-node -- propose-payout-schedule \
   --direct-limit 50
 ```
 
-Confirm a mined fork block payout with Bitcoin Core:
+Confirm a mined Bitcoin-mainnet block payout after an explicitly armed
+mainnet handoff:
 
 ```sh
 cargo run -p p2pool-node -- confirm-payout-from-block \
@@ -786,7 +794,7 @@ cargo run -p p2pool-node -- confirm-payout-from-block \
   --payout-schedule-file ./payout-schedule.json \
   --pohw-commitment-file ./pohw-commitment.json \
   --rpc-cookie-file ~/.bitcoin/.cookie \
-  --block-hash <fork-block-hash>
+  --block-hash <bitcoin-mainnet-block-hash>
 ```
 
 This verifies the coinbase outputs and `POHW1` commitment, then credits the replay log from the confirmed output total. Supplying `--reward-sats` is optional and must match the verified total.
@@ -797,7 +805,7 @@ Run the automatic confirmer:
 mkdir -p .pohw-p2pool/payout-candidates
 cat > .pohw-p2pool/payout-candidates/block-000001.json <<'JSON'
 {
-  "block_hash": "<fork-block-hash>",
+  "block_hash": "<bitcoin-mainnet-block-hash>",
   "snapshot_file": "../../snapshot.json",
   "payout_schedule_file": "../../payout-schedule.json",
   "pohw_commitment_file": "../../pohw-commitment.json",
@@ -811,7 +819,13 @@ cargo run -p p2pool-node -- run-payout-confirmer \
   --rpc-cookie-file ~/.bitcoin/.cookie
 ```
 
-Use `--once` for a single scan. The confirmer does not trust the candidate file: it verifies Bitcoin Core block confirmations, coinbase outputs, the `POHW1` commitment, and local replay before appending `confirmed-payouts.ndjson`. Relative paths in a candidate are resolved from the candidate file directory.
+Use `--once` for a single scan. This command is not an Experiment 0 fork
+viewer: it queries Bitcoin Core for a Bitcoin-mainnet block produced only
+after the separately armed mainnet handoff. The confirmer does not trust the
+candidate file: it verifies Bitcoin Core block confirmations, coinbase
+outputs, the `POHW1` commitment, and local replay before appending
+`confirmed-payouts.ndjson`. Relative paths in a candidate are resolved from
+the candidate file directory.
 
 Validate a vault input with Bitcoin Core:
 

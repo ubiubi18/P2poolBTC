@@ -179,6 +179,86 @@ After the explicit no-value confirmation, the wizard shows the loopback
 Stratum URL, worker name, and a locally generated password once. Point the
 miner at that URL. The adapter submits only to the local fork RPC.
 
+## How To Know You Succeeded
+
+Keep the source-first launcher running. In a second terminal, run this
+sanitized local check on macOS, Linux, or Raspberry Pi:
+
+```sh
+python3 scripts/pohw-community-status.py
+```
+
+On Windows with the Python launcher:
+
+```powershell
+py -3 .\scripts\pohw-community-status.py
+```
+
+If you selected a different agent datadir, add `--datadir '<same-path>'`. The
+command rechecks the source receipt, local binary digest, activation manifest,
+and signed registration before reading aggregate node state. It deliberately
+does not print identity addresses, signatures, peer endpoints, local paths,
+keys, passwords, wallet data, or block hashes. Exit code `0` means the local
+checks required for the selected phase are ready, `2` means setup is
+incomplete, and `1` means an integrity or command check failed.
+
+Use this success ladder. A later row does not replace the earlier checks:
+
+| Stage | What you see locally | Independent confirmation |
+| --- | --- | --- |
+| Source verified | Wizard says **Source build: Verified** and shows a source CID | At least two independent participants report the same full source CID and activation ID |
+| Identity registered | Wizard says **Idena ownership verified and registration created**; status says `Idena registration: VERIFIED` | Another node or the explorer eventually lists your public miner ID, without needing your Idena key |
+| Fork synchronized | Status says `Fork chain: RUNNING` and reports a fork height and active fork-block count | The height and active tip agree with the experiment explorer or another independently operated node after sync settles |
+| Miner connected | Your miner shows an authorized worker and receives jobs from the loopback Stratum URL | The miner begins reporting accepted shares without repeated authorization or stale-job failures |
+| Share credited | Local `active shares` increases after accepted work | The explorer **Sharechain** tab shows your public miner ID on an active share |
+| Fork block accepted | Local fork height and active fork-block count increase | The explorer **Fork blocks** tab shows the same active block and its PoHW commitment |
+| Idena gate passed | Mining phase starts without an eligibility or snapshot error | Explorer aggregate snapshot fields match the independently agreed snapshot; individual addresses remain private by default |
+
+A miner share is not necessarily a fork block. It is normal to see accepted
+shares before the fork height changes. Fork synchronization is also stronger
+than merely having a nonzero height: compare the current height with another
+node, and stop if equal input produces a different active tip or cumulative
+work.
+
+If an HTTPS explorer was supplied with `--explorer-url`, the wizard displays
+an **Open experiment explorer** link. In the explorer:
+
+1. **Overview** must show Fork, Sharechain, Idena, and API as connected or
+   verified as applicable.
+2. **Fork blocks** must show active blocks at the same height as the local
+   status command.
+3. **Sharechain** must eventually show your chosen public miner ID and an
+   active share after the miner submits accepted work.
+4. Opening a fork block shows its coinbase value, outputs, and PoHW commitment.
+   Those values are no-value test accounting, not spendable Bitcoin.
+
+Do not treat one hosted explorer as consensus. The local check plus one or more
+independently operated nodes is the meaningful confirmation.
+
+### Bitcoin Core Will Not Show Experiment 0 Coins
+
+Experiment 0 does **not** install or modify a Bitcoin Core fork. Its temporary
+coinbase-only chain is validated and stored by `p2pool-node`. Bitcoin Core,
+when present, remains a Bitcoin mainnet node and is not required for the basic
+community join flow.
+
+Consequently:
+
+- Bitcoin Core Qt will not show Experiment 0 transactions or a fork balance;
+- `bitcoin-cli getbalance`, `listunspent`, and wallet history will not show
+  Experiment 0 coinbase outputs;
+- `bitcoin-cli getblockcount` continues to report the Bitcoin mainnet height,
+  not the Experiment 0 fork height;
+- `bitcoin-cli getblockchaininfo` should continue to report `"chain":
+  "main"` on a mainnet node.
+
+See fork blocks and coinbase outputs through `pohw-community-status.py`, the
+PoHW explorer, or `p2pool-node fork-chain-status`. Current Experiment 0
+consensus disables spending both inherited and post-fork outputs, so the
+displayed fork coinbase is not a spendable wallet balance. If ordinary
+source-first onboarding appears to submit fork blocks to Bitcoin Core or arms
+Bitcoin-mainnet submission, stop immediately and report a security issue.
+
 ## What Is And Is Not Decentralized Yet
 
 No developer signature selects or installs the executable. Every participant
