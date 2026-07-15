@@ -30,6 +30,9 @@ declare function envEpoch(): u16;
 @external("env", "block_number")
 declare function envBlockNumber(): u64;
 
+@external("env", "epoch_block")
+declare function envEpochBlock(): u64;
+
 @external("env", "block_timestamp")
 declare function envBlockTimestamp(): i64;
 
@@ -151,6 +154,10 @@ export function currentEpoch(): u16 {
 
 export function currentBlock(): u64 {
   return envBlockNumber();
+}
+
+export function currentEpochBlock(): u64 {
+  return envEpochBlock();
 }
 
 export function currentTimestamp(): i64 {

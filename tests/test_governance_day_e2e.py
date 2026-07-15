@@ -17,6 +17,9 @@ PARAMETER_LOCK = ROOT / "compatibility" / "governance-day-parameters.lock.json"
 LOCAL_CANDIDATE_LOCK = (
     ROOT / "compatibility" / "governance-day-local-candidate-lock.json"
 )
+FORK_CANDIDATE_LOCK = (
+    ROOT / "compatibility" / "governance-day-fork-candidate-lock.json"
+)
 
 
 class GovernanceDayE2ETests(unittest.TestCase):
@@ -45,6 +48,7 @@ class GovernanceDayE2ETests(unittest.TestCase):
         self.assertFalse(record["automaticInstall"])
         self.assertFalse(record["automaticRollback"])
         self.assertEqual(record["integrationPatch"]["size"], len(patch_bytes))
+        self.assertNotIn(b".env.e2e", patch_bytes)
         self.assertEqual(
             record["integrationPatch"]["sha256"],
             hashlib.sha256(patch_bytes).hexdigest(),
@@ -53,6 +57,10 @@ class GovernanceDayE2ETests(unittest.TestCase):
         self.assertEqual(record["sourcePackage"]["status"], "packaged-local-candidate")
         self.assertFalse(record["sourcePackage"]["policyRelaxed"])
         self.assertEqual(record["sourcePackage"]["removedForbiddenPath"], ".env.e2e")
+        self.assertEqual(
+            record["sourcePackage"]["redactionMechanism"],
+            "harness-policy-removal-before-packaging",
+        )
 
     def test_local_candidate_lock_cannot_authorize_deployment(self):
         lock = json.loads(LOCAL_CANDIDATE_LOCK.read_text(encoding="utf-8"))
@@ -61,8 +69,32 @@ class GovernanceDayE2ETests(unittest.TestCase):
         self.assertFalse(lock["authorizedForRelease"])
         self.assertFalse(lock["canonicalReferenceChangePermitted"])
         self.assertIsNone(lock["source"]["candidateSourceCid"])
-        self.assertFalse(lock["governanceProfile"]["normalRiskEnabled"])
-        self.assertFalse(lock["governanceProfile"]["epochAnchorAuthenticated"])
+        profile = lock["governanceProfile"]
+        self.assertTrue(profile["normalRiskEnabled"])
+        self.assertEqual(
+            profile["normalRiskClassifier"],
+            "pohw-objective-risk-classifier-v2",
+        )
+        self.assertTrue(profile["scopeCountersDerivedFromVerifiedSourceTransitions"])
+        self.assertTrue(profile["epochAnchorAuthenticated"])
+        self.assertEqual(
+            profile["epochAnchorRequiresSeparateForkProfile"],
+            "compatibility/governance-day-fork-candidate-lock.json",
+        )
+        fork = json.loads(FORK_CANDIDATE_LOCK.read_text(encoding="utf-8"))
+        self.assertFalse(fork["activation"]["enabled"])
+        self.assertTrue(fork["forkProfile"]["consensusChangesAllowed"])
+        self.assertTrue(
+            all(
+                component.get("candidateCommit") is None
+                and component.get("candidateSourceStatus")
+                == "deterministic-patched-source-uncommitted"
+                and isinstance(component.get("candidateSourceCid"), str)
+                and component["candidateSourceCid"].startswith("bafy")
+                for component in fork["components"]
+                if "patch" in component
+            )
+        )
         self.assertIsNone(lock["idenaAiIntegration"]["sourcePackagingBlocker"])
         self.assertRegex(lock["idenaAiIntegration"]["canonicalSourceCid"], r"^bafy")
         self.assertFalse(lock["executionPolicy"]["automaticInstall"])

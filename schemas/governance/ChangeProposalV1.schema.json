@@ -5,9 +5,10 @@
   "description":"proposalId, proposalCid, proposalSha256, and carSha256 are derived envelope fields. The canonical DAG-CBOR payload consists of the remaining fields.",
   "type":"object",
   "additionalProperties":false,
-  "required":["schemaVersion","proposalId","proposalCid","proposalSha256","carSha256","governanceParameterSetCid","parentCanonicalEcosystemCid","candidateEcosystemCid","affectedRepositories","changedFileCount","patchBytes","sourcePackageBytes","descriptionBytes","migrationOperationCount","baseSourceCids","candidateSourceCids","patchCid","reviewRoundId","proposerAddress","proposalBondAtoms","riskClass","rationaleCid","migrationNotesCid","testPlanCid","rollbackManifestCid","rollbackInstructionsCid","releaseManifestCid","criticalFindingWaiverCid","agentReviewRoot","buildAttestationRoot","dataAvailabilityRoot","creationBlock","creationEpoch","stakingEpoch","identityMetricsEpoch","candidateIdentityMetricsRoot","candidateIdentityMetricsEpoch","votingStart","votingEnd","challengeEnd"],
+  "required":["schemaVersion","proposalId","proposalCid","proposalSha256","carSha256","scopeEvidenceCid","governanceParameterSetCid","parentCanonicalEcosystemCid","candidateEcosystemCid","affectedRepositories","changedFileCount","patchBytes","sourcePackageBytes","descriptionBytes","migrationOperationCount","baseSourceCids","candidateSourceCids","patchCid","reviewRoundId","proposerAddress","proposalBondAtoms","riskClass","rationaleCid","migrationNotesCid","testPlanCid","rollbackManifestCid","rollbackInstructionsCid","releaseManifestCid","criticalFindingWaiverCid","agentReviewRoot","buildAttestationRoot","dataAvailabilityRoot","creationBlock","creationEpoch","stakingEpoch","identityMetricsEpoch","candidateIdentityMetricsRoot","candidateIdentityMetricsEpoch","votingStart","votingEnd","challengeEnd"],
   "properties":{
-    "schemaVersion":{"const":1},
+    "schemaVersion":{"const":2},
+    "scopeEvidenceCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
     "proposalId":{"$ref":"common.schema.json#/$defs/Sha256"},
     "proposalCid":{"$ref":"common.schema.json#/$defs/DagCborCid"},
     "proposalSha256":{"$ref":"common.schema.json#/$defs/Sha256"},

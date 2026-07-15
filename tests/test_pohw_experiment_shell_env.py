@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -31,10 +30,6 @@ PRIVATE_MACHINE_DATA_RE = re.compile(
     r")\b|/Users/[A-Za-z0-9._-]+\b|" + NOTEBOOK_HOST_PATTERN,
     re.IGNORECASE,
 )
-
-
-def shell_assignment(name: str, value: object) -> str:
-    return f"{name}={shlex.quote(str(value))}"
 
 
 class ExperimentShellEnvValidationTest(unittest.TestCase):
@@ -189,7 +184,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={snapshot_dir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -222,7 +217,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={snapshot_dir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -250,7 +245,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output}",
@@ -277,7 +272,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
@@ -310,7 +305,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -354,7 +349,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -418,7 +413,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -452,7 +447,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_FORK_ACTIVATION_MANIFEST={link_parent / 'existing' / 'fork-activation.json'}",
@@ -479,7 +474,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_FORK_ACTIVATION_MANIFEST={manifest_dir}",
@@ -511,7 +506,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_P2POOL_NODE_BIN={fake_bin}",
@@ -544,7 +539,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         f"POHW_P2POOL_NODE_BIN={fake_bin}",
@@ -572,7 +567,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         "POHW_EXPERIMENT_NETWORK_MODE=join-existing",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-13T00:52:48Z",
                         f"POHW_FORK_ACTIVATION_MANIFEST={manifest}",
@@ -598,7 +593,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "",
@@ -641,7 +636,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -673,7 +668,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -704,7 +699,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -735,7 +730,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -767,7 +762,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         "POHW_EXPERIMENT_NETWORK_MODE=create-separate",
                         "POHW_FORK_LAUNCH_TIMESTAMP_UTC=2026-07-05T00:00:00Z",
@@ -1170,7 +1165,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
                         "POHW_MINER_ID=alice",
@@ -1276,6 +1271,122 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertIn("--registry-anchor-file\n" + str(anchor), anchored_args)
         self.assertIn("sign idena_ownership_challenge", anchored.stderr)
 
+    def test_register_miner_wrapper_forwards_signature_through_stdin(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-registry-stdin-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            args_out = root / "args.txt"
+            stdin_out = root / "stdin.txt"
+            fake = root / "p2pool-node"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$POHW_FAKE_ARGS_OUT\"\n"
+                "IFS= read -r signature\n"
+                "printf '%s\\n' \"$signature\" > \"$POHW_FAKE_STDIN_OUT\"\n"
+                "printf '%s\\n' '{\"status\":\"registration_ready\"}'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            anchor = root / "registry-anchor.json"
+            anchor.write_text("{}\n", encoding="utf-8")
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        f"POHW_WORKDIR={REPO_ROOT}",
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        f"POHW_P2POOL_NODE_BIN={fake}",
+                        "POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE",
+                        "POHW_MINER_ID=alice",
+                        "POHW_IDENA_ADDRESS=0x1111111111111111111111111111111111111111",
+                        "POHW_MINER_REGISTRY_EXPERIMENT_ID=p2poolbtc-experiment-1",
+                        f"POHW_MINER_REGISTRY_ANCHOR_FILE={anchor}",
+                        "",
+                    ]
+                ),
+            )
+            env = dict(os.environ)
+            env["POHW_FAKE_ARGS_OUT"] = str(args_out)
+            env["POHW_FAKE_STDIN_OUT"] = str(stdin_out)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "scripts" / "pohw-experiment-register-miner.sh"),
+                    str(env_file),
+                    "--idena-signature-stdin",
+                    "--output-dir",
+                    str(root / "registration"),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                input="0xpublic-signature\n",
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            forwarded_args = args_out.read_text(encoding="utf-8") if args_out.exists() else ""
+            forwarded_stdin = stdin_out.read_text(encoding="utf-8") if stdin_out.exists() else ""
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--idena-signature-stdin", forwarded_args)
+        self.assertNotIn("0xpublic-signature", forwarded_args)
+        self.assertEqual(forwarded_stdin, "0xpublic-signature\n")
+
+    def test_public_registration_omits_peer_endpoints_and_errors(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-registration-redaction-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            fake = root / "p2pool-node"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' '{\"status\":\"registration_ready\",\"peer_results\":[{\"peer_addr\":\"203.0.113.77:40406\",\"accepted\":true,\"outcome\":\"accepted\",\"error\":null},{\"peer_addr\":\"198.51.100.8:40406\",\"accepted\":false,\"outcome\":\"rejected\",\"error\":\"connect 198.51.100.8 failed\"}],\"message_out\":\"/private/message.json\"}'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        f"POHW_WORKDIR={REPO_ROOT}",
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        f"POHW_P2POOL_NODE_BIN={fake}",
+                        "POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE",
+                        "POHW_MINER_ID=alice",
+                        "POHW_IDENA_ADDRESS=0x1111111111111111111111111111111111111111",
+                        "",
+                    ]
+                ),
+            )
+            output = root / "registration"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "scripts" / "pohw-experiment-register-miner.sh"),
+                    str(env_file),
+                    "--output-dir",
+                    str(output),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            public = (output / "registration-public.json").read_text(encoding="utf-8")
+            private = (output / "registration-local-private.json").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("peer_results", public)
+        self.assertNotIn("203.0.113.77", public)
+        self.assertNotIn("198.51.100.8", public)
+        self.assertNotIn("connect", public)
+        self.assertIn('"accepted": 1', public)
+        self.assertIn('"attempted": 2', public)
+        self.assertIn('"not_accepted": 1', public)
+        self.assertIn('"message_out": "<redacted>"', public)
+        self.assertIn("203.0.113.77", private)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_register_miner_rejects_symlinked_registry_anchor(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-registry-anchor-link-") as temp:
@@ -1331,7 +1442,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={nested_output}",
@@ -1407,7 +1518,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={existing_output}",
@@ -1475,7 +1586,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
@@ -1513,7 +1624,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
@@ -1552,7 +1663,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
@@ -1591,7 +1702,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={root / 'datadir'}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={output_root}",
@@ -1649,7 +1760,7 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
                 env_file,
                 "\n".join(
                     [
-                        shell_assignment("POHW_WORKDIR", REPO_ROOT),
+                        f"POHW_WORKDIR={REPO_ROOT}",
                         f"POHW_DATADIR={datadir}",
                         f"POHW_SNAPSHOT_DIR={root / 'snapshots'}",
                         f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",

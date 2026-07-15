@@ -48,13 +48,15 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("manifest verified", result.stdout)
 
-    def test_launch_policy_blocks_unverified_registry_deployment(self):
+    def test_launch_policy_blocks_every_unfinished_public_join_gate(self):
         policy = json.loads(LAUNCH_POLICY_PATH.read_text(encoding="utf-8"))
-        manifest_bytes = MANIFEST_PATH.read_bytes()
 
         self.assertEqual(policy["activation_id"], self.manifest["activation_id"])
-        self.assertEqual(policy["fork_manifest_sha256"], hashlib.sha256(manifest_bytes).hexdigest())
-        self.assertEqual(policy["status"], "blocked-pending-idena-registry-deployment")
+        self.assertEqual(
+            policy["fork_manifest_sha256"],
+            hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(policy["status"], "blocked-release-readiness")
         self.assertIsNone(policy["registry_deployment"])
         self.assertEqual(policy["idena_anchor_policy_schema"], 2)
         self.assertEqual(
@@ -69,6 +71,20 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertTrue(gates["checkpoint_vote_identity_callback_required"])
         self.assertTrue(gates["production_idena_wasm_runtime_gate_required"])
         self.assertFalse(gates["bound_policy_replacement_allowed"])
+
+        readiness = policy["public_join_readiness"]
+        self.assertFalse(readiness["exact_source_commit_published"])
+        self.assertFalse(readiness["canonical_source_cid_published"])
+        self.assertFalse(readiness["deterministic_car_digest_published"])
+        self.assertFalse(readiness["release_build_evidence_published"])
+        self.assertEqual(readiness["required_independent_registry_build_operators"], 2)
+        self.assertEqual(readiness["verified_independent_registry_build_operators"], 1)
+        self.assertGreaterEqual(readiness["matching_registry_builds_observed"], 2)
+        self.assertTrue(readiness["external_security_review_required"])
+        self.assertFalse(readiness["external_security_review_passed"])
+        self.assertFalse(readiness["registry_deployment_finalized"])
+        self.assertFalse(readiness["immutable_v2_anchor_policy_published"])
+        self.assertFalse(readiness["independent_second_node_rehearsal_passed"])
 
         candidate_binding = policy["registry_source_candidate"]
         candidate_path = ROOT / candidate_binding["path"]
@@ -123,6 +139,35 @@ class Experiment1ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(self.validator.ManifestError, "CMake flags"):
             self.validator.validate(tampered, ROOT, verify_patch=False)
 
+    def test_manifest_requires_exact_current_patch_digest(self):
+        patch_path = ROOT / self.manifest["build"]["patch_path"]
+        self.assertEqual(
+            self.manifest["build"]["patch_sha256"],
+            hashlib.sha256(patch_path.read_bytes()).hexdigest(),
+        )
+
+        tampered = copy.deepcopy(self.manifest)
+        tampered["build"]["patch_sha256"] = self.validator.ACTIVATION_PATCH_SHA256
+        with self.assertRaisesRegex(self.validator.ManifestError, "exact released patch"):
+            self.validator.validate(tampered, ROOT, verify_patch=False)
+
+    def test_test_only_patch_revision_preserves_activation_id(self):
+        activation_era = copy.deepcopy(self.manifest)
+        activation_era["build"]["patch_sha256"] = self.validator.ACTIVATION_PATCH_SHA256
+
+        self.assertNotEqual(
+            self.manifest["build"]["patch_sha256"],
+            self.validator.ACTIVATION_PATCH_SHA256,
+        )
+        self.assertEqual(
+            self.validator.activation_id(self.manifest),
+            self.validator.EXPECTED_ACTIVATION_ID,
+        )
+        self.assertEqual(
+            self.validator.activation_id(activation_era),
+            self.manifest["activation_id"],
+        )
+
     def test_full_script_surface_and_inherited_spends_are_mandatory(self):
         consensus = self.manifest["consensus"]
         self.assertTrue(consensus["all_upstream_transaction_and_script_rules_enabled"])
@@ -176,6 +221,12 @@ class Experiment1ManifestTests(unittest.TestCase):
             "ComputePoHWBlockVersion",
             "consensusParams.fPowAllowMinDifficultyBlocks || consensusParams.pohw_experiment",
             "POHW_update_time_refreshes_template_difficulty",
+            "feature_pohw_replay.py",
+            "pohw_replay_test",
+            "-testactivationheight=pohw-replay@",
+            "self.setup_clean_chain = True",
+            'assert_equal(unprotected_result["reject-reason"], REPLAY_REJECT_REASON)',
+            'assert_equal(protected_result["allowed"], True)',
         ):
             self.assertIn(marker, patch)
 
@@ -327,6 +378,23 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertLess(height_check, lock_call)
         self.assertLess(lock_call, copy_call)
         self.assertIn("source blocks or chainstate contains a symlink", source)
+
+    def test_first_seed_runbook_requires_a_verified_checkpoint_source(self):
+        runbook = (ROOT / "EXPERIMENT-1.md").read_text(encoding="utf-8")
+
+        self.assertIn("--first-fork-block", runbook)
+        self.assertIn("--trusted-fork-peer", runbook)
+        self.assertIn("requires exactly one explicit checkpoint source", runbook)
+        self.assertIn("networking disabled", runbook)
+        self.assertIn("DNS seeds, fixed seeds", runbook)
+        self.assertIn("exclusive `connect=`", runbook)
+        bootstrap = runbook.index("pohw-bootstrap-bitcoin-core-fork.sh")
+        checkpoint = runbook.index("--first-fork-block", bootstrap)
+        start = runbook.index(
+            "systemctl enable --now bitcoind-pohw-experiment-1.service",
+            checkpoint,
+        )
+        self.assertLess(checkpoint, start)
 
 
 if __name__ == "__main__":

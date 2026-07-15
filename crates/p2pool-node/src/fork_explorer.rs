@@ -1,4 +1,7 @@
 use crate::bitcoin_rpc::{BitcoinRpcClient, BlockchainInfoResponse, PohwExperimentInfoResponse};
+use crate::fork_address_index::{
+    ForkAddressIndex, ForkAddressIndexLimits, ForkAddressIndexStats, ResolvedPreviousOutput,
+};
 use crate::fork_chain::{
     ForkAddressSummary, ForkAddressTransactionPage, ForkBlockPage, ForkBlockSummary,
     ForkChainClient, ForkChainStatus, ForkPreviousOutput, ForkTransactionDetail,
@@ -8,7 +11,7 @@ use crate::fork_chain::{
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
-use bitcoin::{Address, Block, Network, OutPoint, Transaction, TxOut};
+use bitcoin::{Address, Block, BlockHash, Network, OutPoint, Transaction, TxOut, Txid};
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
@@ -16,8 +19,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const EXPERIMENT_1_ACTIVATION_PATCH_SHA256: &str =
+    "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4";
+const EXPERIMENT_1_CURRENT_PATCH_SHA256: &str =
+    "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab";
 const MAX_BLOCK_HEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRANSACTION_INPUTS: usize = 10_000;
 const CORE_EXPLORER_PROTOCOL_VERSION: u16 = 1;
@@ -32,6 +42,8 @@ pub(crate) enum ExplorerForkClient {
 pub(crate) struct PohwCoreExplorerClient {
     rpc: BitcoinRpcClient,
     profile: PohwCoreProfile,
+    address_index_limits: Option<ForkAddressIndexLimits>,
+    address_index: Option<Arc<Mutex<Option<ForkAddressIndex>>>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,7 +130,27 @@ struct ValidatedChain {
 
 impl ExplorerForkClient {
     pub(crate) fn supports_address_index(&self) -> bool {
-        matches!(self, Self::Legacy(_))
+        match self {
+            Self::Legacy(_) => true,
+            Self::PohwCore(client) => client.address_index.is_some(),
+        }
+    }
+
+    pub(crate) async fn prepare_address_index(&self) -> Result<()> {
+        if let Self::PohwCore(client) = self {
+            client.prepare_address_index().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn address_index_stats(&self) -> Result<Option<ForkAddressIndexStats>> {
+        match self {
+            Self::Legacy(_) => Ok(None),
+            Self::PohwCore(client) if client.address_index.is_some() => {
+                client.address_index_stats().await.map(Some)
+            }
+            Self::PohwCore(_) => Ok(None),
+        }
     }
 
     pub(crate) async fn status(&self) -> Result<ForkChainStatus> {
@@ -181,9 +213,7 @@ impl ExplorerForkClient {
     pub(crate) async fn address_summary(&self, address: String) -> Result<ForkAddressSummary> {
         match self {
             Self::Legacy(client) => client.address_summary(address).await,
-            Self::PohwCore(_) => bail!(
-                "Experiment 1 fork address history requires the optional host transaction index"
-            ),
+            Self::PohwCore(client) => client.address_summary(&address).await,
         }
     }
 
@@ -195,9 +225,11 @@ impl ExplorerForkClient {
     ) -> Result<ForkAddressTransactionPage> {
         match self {
             Self::Legacy(client) => client.address_transactions(address, cursor, limit).await,
-            Self::PohwCore(_) => bail!(
-                "Experiment 1 fork address history requires the optional host transaction index"
-            ),
+            Self::PohwCore(client) => {
+                client
+                    .address_transactions(&address, cursor, usize::from(limit))
+                    .await
+            }
         }
     }
 
@@ -209,18 +241,30 @@ impl ExplorerForkClient {
     ) -> Result<ForkUtxoPage> {
         match self {
             Self::Legacy(client) => client.address_utxos(address, cursor, limit).await,
-            Self::PohwCore(_) => {
-                bail!("Experiment 1 fork address UTXOs require the optional host transaction index")
+            Self::PohwCore(client) => {
+                client
+                    .address_utxos(&address, cursor, usize::from(limit))
+                    .await
             }
         }
     }
 }
 
 impl PohwCoreExplorerClient {
-    pub(crate) fn from_manifest(rpc: BitcoinRpcClient, path: &Path) -> Result<Self> {
+    pub(crate) fn from_manifest(
+        rpc: BitcoinRpcClient,
+        path: &Path,
+        address_index_limits: Option<ForkAddressIndexLimits>,
+    ) -> Result<Self> {
         let profile = read_profile(path)?;
         validate_profile(&profile)?;
-        Ok(Self { rpc, profile })
+        let address_index = address_index_limits.map(|_| Arc::new(Mutex::new(None)));
+        Ok(Self {
+            rpc,
+            profile,
+            address_index_limits,
+            address_index,
+        })
     }
 
     async fn validate_chain(&self) -> Result<ValidatedChain> {
@@ -305,6 +349,211 @@ impl PohwCoreExplorerClient {
         Ok(())
     }
 
+    async fn prepare_address_index(&self) -> Result<()> {
+        if self.address_index.is_none() {
+            return Ok(());
+        }
+        let chain = self.validate_chain().await?;
+        self.with_address_index(&chain, |_| Ok(())).await
+    }
+
+    async fn address_index_stats(&self) -> Result<ForkAddressIndexStats> {
+        let chain = self.validate_chain().await?;
+        self.with_address_index(&chain, ForkAddressIndex::stats)
+            .await
+    }
+
+    async fn address_summary(&self, address: &str) -> Result<ForkAddressSummary> {
+        let chain = self.validate_chain().await?;
+        self.with_address_index(&chain, |index| Ok(index.address_summary(address)))
+            .await
+    }
+
+    async fn address_transactions(
+        &self,
+        address: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ForkAddressTransactionPage> {
+        let chain = self.validate_chain().await?;
+        self.with_address_index(&chain, |index| {
+            Ok(index.address_transactions(address, cursor, limit))
+        })
+        .await
+    }
+
+    async fn address_utxos(
+        &self,
+        address: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ForkUtxoPage> {
+        let chain = self.validate_chain().await?;
+        self.with_address_index(&chain, |index| {
+            Ok(index.address_utxos(address, cursor, limit))
+        })
+        .await
+    }
+
+    async fn with_address_index<T, F>(&self, chain: &ValidatedChain, query: F) -> Result<T>
+    where
+        F: FnOnce(&ForkAddressIndex) -> Result<T>,
+    {
+        let storage = self.address_index.as_ref().context(
+            "Experiment 1 fork address history requires the optional bounded host index",
+        )?;
+        let mut state = storage.lock().await;
+        self.refresh_address_index(chain, &mut state).await?;
+        let result = query(
+            state
+                .as_ref()
+                .context("fork address index did not produce a snapshot")?,
+        )?;
+        drop(state);
+        self.require_same_tip(chain).await?;
+        Ok(result)
+    }
+
+    async fn refresh_address_index(
+        &self,
+        chain: &ValidatedChain,
+        state: &mut Option<ForkAddressIndex>,
+    ) -> Result<()> {
+        if state.as_ref().is_some_and(|index| {
+            index.tip_height() == Some(chain.info.blocks)
+                && index
+                    .tip_hash()
+                    .is_some_and(|hash| hash.to_string() == chain.tip_hash)
+        }) {
+            return Ok(());
+        }
+        let limits = self
+            .address_index_limits
+            .context("fork address-index limits are not configured")?;
+        let inherited_tip_hash = BlockHash::from_str(&self.profile.fork_point.inherited_tip_hash)
+            .context("manifest inherited tip hash is invalid")?;
+
+        let can_extend = if let Some(existing) = state.as_ref() {
+            match (existing.tip_height(), existing.tip_hash()) {
+                (Some(height), Some(hash)) if height < chain.info.blocks => {
+                    self.block_hash(height).await? == hash.to_string()
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let mut candidate = if can_extend {
+            state
+                .as_ref()
+                .expect("extendable address index exists")
+                .clone()
+        } else {
+            ForkAddressIndex::new(
+                self.profile.fork_point.first_fork_height,
+                inherited_tip_hash,
+                limits,
+            )
+        };
+        let start_height = candidate
+            .tip_height()
+            .map(|height| height.saturating_add(1))
+            .unwrap_or(self.profile.fork_point.first_fork_height);
+        for height in start_height..=chain.info.blocks {
+            let block_hash = self.block_hash(height).await?;
+            let block = self.raw_block(&block_hash).await?;
+            let previous_outputs = self
+                .resolve_block_previous_outputs(&candidate, &block)
+                .await
+                .with_context(|| {
+                    format!("failed to resolve fork address-index inputs at height {height}")
+                })?;
+            candidate
+                .append_block(height, &block, &previous_outputs)
+                .with_context(|| format!("failed to index fork addresses at height {height}"))?;
+        }
+        self.require_same_tip(chain).await?;
+        *state = Some(candidate);
+        Ok(())
+    }
+
+    async fn resolve_block_previous_outputs(
+        &self,
+        index: &ForkAddressIndex,
+        block: &Block,
+    ) -> Result<BTreeMap<OutPoint, ResolvedPreviousOutput>> {
+        let mut result = BTreeMap::new();
+        let mut block_outputs = BTreeMap::<OutPoint, TxOut>::new();
+        let mut transaction_cache = BTreeMap::<Txid, Transaction>::new();
+        for transaction in &block.txdata {
+            if transaction.input.len() > MAX_TRANSACTION_INPUTS {
+                bail!("transaction exceeds the fork address-index input limit");
+            }
+            if !transaction.is_coinbase() {
+                for input in &transaction.input {
+                    let (output, inherited) = if let Some(output) =
+                        index.output(&input.previous_output)
+                    {
+                        (output.clone(), false)
+                    } else if let Some(output) = block_outputs.get(&input.previous_output) {
+                        (output.clone(), false)
+                    } else {
+                        let previous = if let Some(previous) =
+                            transaction_cache.get(&input.previous_output.txid)
+                        {
+                            previous.clone()
+                        } else {
+                            let previous =
+                                self.raw_transaction(input.previous_output.txid)
+                                    .await
+                                    .context("failed to fetch an inherited previous transaction")?;
+                            transaction_cache.insert(input.previous_output.txid, previous.clone());
+                            previous
+                        };
+                        let output = previous
+                            .output
+                            .get(input.previous_output.vout as usize)
+                            .cloned()
+                            .context("inherited previous transaction output is missing")?;
+                        (output, true)
+                    };
+                    if result
+                        .insert(
+                            input.previous_output,
+                            ResolvedPreviousOutput { output, inherited },
+                        )
+                        .is_some()
+                    {
+                        bail!("fork address index observed a duplicate block input");
+                    }
+                }
+            }
+            let txid = transaction.compute_txid();
+            for (vout, output) in transaction.output.iter().enumerate() {
+                block_outputs.insert(
+                    OutPoint {
+                        txid,
+                        vout: u32::try_from(vout).context("fork output index exceeds u32")?,
+                    },
+                    output.clone(),
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    async fn raw_transaction(&self, txid: Txid) -> Result<Transaction> {
+        let raw: String = self
+            .rpc
+            .call("getrawtransaction", json!([txid.to_string(), false]))
+            .await?;
+        let transaction: Transaction = decode_hex_consensus(&raw, "previous transaction")?;
+        if transaction.compute_txid() != txid {
+            bail!("Bitcoin Core returned a different previous transaction");
+        }
+        Ok(transaction)
+    }
+
     async fn status(&self) -> Result<ForkChainStatus> {
         let chain = self.validate_chain().await?;
         let tip_header = self.block_header(&chain.tip_hash).await?;
@@ -360,7 +609,7 @@ impl PohwCoreExplorerClient {
                     .consensus
                     .proof_of_work
                     .post_handoff_retarget_interval;
-                interval - (active_fork_blocks % interval)
+                blocks_until_retarget(chain.info.blocks, interval)
             }),
             transaction_upgrade_id: Some("experiment-1-full-consensus".to_string()),
             transaction_activation_height: Some(self.profile.fork_point.first_fork_height),
@@ -544,7 +793,7 @@ impl PohwCoreExplorerClient {
         }
         let previous = self.previous_outputs(transaction).await?;
         let active = self.block_hash(header.height).await? == block_hash;
-        let detail = transaction_detail(
+        let mut detail = transaction_detail(
             transaction,
             &block_hash,
             header.height,
@@ -552,6 +801,29 @@ impl PohwCoreExplorerClient {
             transaction_index,
             &previous,
         )?;
+        if active && self.address_index.is_some() {
+            let spends = self
+                .with_address_index(&chain, |index| {
+                    Ok(transaction
+                        .output
+                        .iter()
+                        .enumerate()
+                        .map(|(vout, _)| {
+                            u32::try_from(vout).ok().and_then(|vout| {
+                                index.spend(&OutPoint {
+                                    txid: transaction.compute_txid(),
+                                    vout,
+                                })
+                            })
+                        })
+                        .collect::<Vec<_>>())
+                })
+                .await?;
+            for (output, spent_by) in detail.outputs.iter_mut().zip(spends) {
+                output.spent_by = spent_by;
+            }
+            detail.spend_state_complete = true;
+        }
         self.require_same_tip(&chain).await?;
         Ok(Some(detail))
     }
@@ -614,6 +886,11 @@ impl PohwCoreExplorerClient {
         }
         Ok(block)
     }
+}
+
+fn blocks_until_retarget(tip_height: u64, interval: u64) -> u64 {
+    debug_assert!(interval > 0, "validated retarget interval must be nonzero");
+    interval - (tip_height % interval)
 }
 
 fn read_profile(path: &Path) -> Result<PohwCoreProfile> {
@@ -681,10 +958,25 @@ fn validate_activation_id(manifest: &Value) -> Result<()> {
         .context("Experiment 1 manifest has no activation ID")?;
     normalize_hash(declared, "activation id")?;
     let mut payload = manifest.clone();
-    payload
+    let payload_object = payload
         .as_object_mut()
-        .expect("manifest root was validated")
-        .remove("activation_id");
+        .expect("manifest root was validated");
+    payload_object.remove("activation_id");
+    let build = payload_object
+        .get_mut("build")
+        .and_then(Value::as_object_mut)
+        .context("Experiment 1 manifest has no build object")?;
+    let current_patch = build
+        .get("patch_sha256")
+        .and_then(Value::as_str)
+        .context("Experiment 1 manifest has no patch digest")?;
+    if current_patch != EXPERIMENT_1_CURRENT_PATCH_SHA256 {
+        bail!("Experiment 1 manifest does not bind the reviewed current patch");
+    }
+    build.insert(
+        "patch_sha256".to_string(),
+        Value::String(EXPERIMENT_1_ACTIVATION_PATCH_SHA256.to_string()),
+    );
     let mut canonical = Vec::new();
     write_canonical_json(&payload, &mut canonical)?;
     let mut tagged = Vec::with_capacity(TAG.len() + canonical.len());
@@ -849,6 +1141,7 @@ fn transaction_detail(
         total_input_sats,
         total_output_sats,
         fee_sats,
+        spend_state_complete: false,
         inputs,
         outputs,
     })
@@ -1037,6 +1330,36 @@ mod tests {
             .join("compatibility/experiment-1-full-consensus.json");
         let profile = read_profile(&path).expect("profile loads");
         validate_profile(&profile).expect("profile is supported");
+    }
+
+    #[test]
+    fn experiment_1_manifest_rejects_a_substituted_current_patch_digest() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("compatibility/experiment-1-full-consensus.json");
+        let payload = fs::read(path).expect("read manifest");
+        let mut manifest = serde_json::from_slice::<StrictJson>(&payload)
+            .expect("strict manifest")
+            .0;
+        manifest["build"]["patch_sha256"] = Value::String("00".repeat(32));
+        let error = validate_activation_id(&manifest).expect_err("substituted patch must fail");
+        assert!(error
+            .to_string()
+            .contains("does not bind the reviewed current patch"));
+    }
+
+    #[test]
+    fn retarget_countdown_uses_absolute_core_height() {
+        let interval = 2_016;
+        assert_eq!(blocks_until_retarget(958_017, interval), 1_599);
+        assert_eq!(blocks_until_retarget(959_615, interval), 1);
+    }
+
+    #[test]
+    fn retarget_countdown_resets_after_boundary_block() {
+        let interval = 2_016;
+        assert_eq!(blocks_until_retarget(959_616, interval), interval);
+        assert_eq!(blocks_until_retarget(959_617, interval), interval - 1);
     }
 
     #[test]

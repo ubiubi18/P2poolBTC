@@ -1,5 +1,5 @@
 diff --git a/src/bitcoin-cli.cpp b/src/bitcoin-cli.cpp
-index 909ed09faaca8d9082d2d5837d8e1474c099b7c7..7b879cb887bd99a706987bc9d29d0ddb8cde8111 100644
+index 909ed09fa..7b879cb88 100644
 --- a/src/bitcoin-cli.cpp
 +++ b/src/bitcoin-cli.cpp
 @@ -75,6 +75,7 @@ static void SetupCliArgs(ArgsManager& argsman)
@@ -29,10 +29,24 @@ index 909ed09faaca8d9082d2d5837d8e1474c099b7c7..7b879cb887bd99a706987bc9d29d0ddb
              return " testnet4";
          case ChainType::TESTNET:
 diff --git a/src/chainparams.cpp b/src/chainparams.cpp
-index 32c3bff734820bd24bde2b3fa640b99e22328fe9..43dafae3e7c7157858d69ff2c0a678e6b14c7f44 100644
+index 32c3bff73..31f6f7317 100644
 --- a/src/chainparams.cpp
 +++ b/src/chainparams.cpp
-@@ -119,6 +119,8 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+@@ -59,7 +59,12 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+         }
+
+         const auto deployment_name{arg.substr(0, found)};
+-        if (const auto buried_deployment = GetBuriedDeployment(deployment_name)) {
++        if (deployment_name == "pohw-replay") {
++            if (*height == 0) {
++                throw std::runtime_error("pohw-replay activation height must be greater than zero");
++            }
++            options.pohw_replay_marker_activation_height = *height;
++        } else if (const auto buried_deployment = GetBuriedDeployment(deployment_name)) {
+             options.activation_heights[*buried_deployment] = *height;
+         } else {
+             throw std::runtime_error(strprintf("Invalid name (%s) for -testactivationheight=name@height.", arg));
+@@ -119,6 +124,8 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
      switch (chain) {
      case ChainType::MAIN:
          return CChainParams::Main();
@@ -42,7 +56,7 @@ index 32c3bff734820bd24bde2b3fa640b99e22328fe9..43dafae3e7c7157858d69ff2c0a678e6
          return CChainParams::TestNet();
      case ChainType::TESTNET4:
 diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
-index d816d1af91c35437fd7b47f46b27983c0e553fb7..a31cb01487460de03e61975839ec59b219a08cb7 100644
+index d816d1af9..cb4354793 100644
 --- a/src/chainparamsbase.cpp
 +++ b/src/chainparamsbase.cpp
 @@ -6,6 +6,7 @@
@@ -53,6 +67,15 @@ index d816d1af91c35437fd7b47f46b27983c0e553fb7..a31cb01487460de03e61975839ec59b2
  #include <tinyformat.h>
  #include <util/chaintype.h>
  
+@@ -16,7 +17,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, pohw-replay). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
 @@ -42,6 +43,8 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const ChainType chain)
      switch (chain) {
      case ChainType::MAIN:
@@ -63,7 +86,7 @@ index d816d1af91c35437fd7b47f46b27983c0e553fb7..a31cb01487460de03e61975839ec59b2
          return std::make_unique<CBaseChainParams>("testnet3", 18332);
      case ChainType::TESTNET4:
 diff --git a/src/chainparamsbase.h b/src/chainparamsbase.h
-index 1407f196f3b8df79f6fed76c457d2692c0678914..fa17306bdef3aebaac745d8f581efa6382b45234 100644
+index 1407f196f..fa17306bd 100644
 --- a/src/chainparamsbase.h
 +++ b/src/chainparamsbase.h
 @@ -52,6 +52,6 @@ const CBaseChainParams& BaseParams();
@@ -75,7 +98,7 @@ index 1407f196f3b8df79f6fed76c457d2692c0678914..fa17306bdef3aebaac745d8f581efa63
  
  #endif // BITCOIN_CHAINPARAMSBASE_H
 diff --git a/src/common/args.cpp b/src/common/args.cpp
-index 5c8589cf4402015993c3ef1a415ac770faed8fae..c7cbaf9750eae3a4f01a1841ec2f519955ea651c 100644
+index 5c8589cf4..c7cbaf975 100644
 --- a/src/common/args.cpp
 +++ b/src/common/args.cpp
 @@ -155,6 +155,7 @@ std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
@@ -87,15 +110,16 @@ index 5c8589cf4402015993c3ef1a415ac770faed8fae..c7cbaf9750eae3a4f01a1841ec2f5199
          ChainTypeToString(ChainType::SIGNET),
          ChainTypeToString(ChainType::TESTNET),
 diff --git a/src/consensus/params.h b/src/consensus/params.h
-index 93ee071fdc16adc70e020bd6dafaadf4988174ec..f1325cbab0c392728fe37442b3c8b65f669b5c48 100644
+index 93ee071fd..c3193f487 100644
 --- a/src/consensus/params.h
 +++ b/src/consensus/params.h
-@@ -110,6 +110,14 @@ struct Params {
+@@ -110,6 +110,15 @@ struct Params {
      std::array<BIP9Deployment,MAX_VERSION_BITS_DEPLOYMENTS> vDeployments;
      /** Proof of work parameters */
      uint256 powLimit;
 +    /** P2poolBTC Experiment 1 parameters; inert on every upstream chain. */
 +    bool pohw_experiment{false};
++    bool pohw_replay_test{false}; //!< Regtest-only functional-test switch.
 +    int pohw_fork_height{std::numeric_limits<int>::max()};
 +    int pohw_replay_marker_activation_height{std::numeric_limits<int>::max()};
 +    uint256 pohw_fork_hash{};
@@ -106,7 +130,7 @@ index 93ee071fdc16adc70e020bd6dafaadf4988174ec..f1325cbab0c392728fe37442b3c8b65f
      /**
        * Enforce BIP94 timewarp attack mitigation. On testnet4 this also enforces
 diff --git a/src/consensus/tx_verify.cpp b/src/consensus/tx_verify.cpp
-index 4efed70fd411bf6f237f7f3a00c83de284fa8982..0b657cebe693c99e673fe26af6cb2e1a8d08f7df 100644
+index 4efed70fd..0b657cebe 100644
 --- a/src/consensus/tx_verify.cpp
 +++ b/src/consensus/tx_verify.cpp
 @@ -8,12 +8,16 @@
@@ -161,7 +185,7 @@ index 4efed70fd411bf6f237f7f3a00c83de284fa8982..0b657cebe693c99e673fe26af6cb2e1a
  {
      // are the actual inputs available?
 diff --git a/src/consensus/tx_verify.h b/src/consensus/tx_verify.h
-index ed44d435c1b994efd1bcd9a687baff0766a9cc27..12d998223f6ea96563b6d37d36eed954e99cd22c 100644
+index ed44d435c..12d998223 100644
 --- a/src/consensus/tx_verify.h
 +++ b/src/consensus/tx_verify.h
 @@ -12,6 +12,7 @@
@@ -197,7 +221,7 @@ index ed44d435c1b994efd1bcd9a687baff0766a9cc27..12d998223f6ea96563b6d37d36eed954
  
  /** Auxiliary functions for transaction validation (ideally should not be exposed) */
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436b66fd979 100644
+index 64809a759..b41af7093 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
 @@ -12,6 +12,7 @@
@@ -254,7 +278,19 @@ index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436
  /**
   * Testnet (v3): public test network which is reset from time to time.
   */
-@@ -703,6 +743,11 @@ std::unique_ptr<const CChainParams> CChainParams::Main()
+@@ -578,6 +618,11 @@ public:
+         consensus.fPowAllowMinDifficultyBlocks = true;
+         consensus.enforce_BIP94 = opts.enforce_bip94;
+         consensus.fPowNoRetargeting = true;
++        if (opts.pohw_replay_marker_activation_height) {
++            consensus.pohw_replay_test = true;
++            consensus.pohw_fork_height = *opts.pohw_replay_marker_activation_height - 1;
++            consensus.pohw_replay_marker_activation_height = *opts.pohw_replay_marker_activation_height;
++        }
+
+         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = 0;
+@@ -703,6 +748,11 @@ std::unique_ptr<const CChainParams> CChainParams::Main()
      return std::make_unique<const CMainParams>();
  }
  
@@ -266,7 +302,7 @@ index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436
  std::unique_ptr<const CChainParams> CChainParams::TestNet()
  {
      return std::make_unique<const CTestNetParams>();
-@@ -727,6 +772,7 @@ std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
+@@ -727,6 +777,7 @@ std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
  std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
  {
      const auto mainnet_msg = CChainParams::Main()->MessageStart();
@@ -274,7 +310,7 @@ index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436
      const auto testnet_msg = CChainParams::TestNet()->MessageStart();
      const auto testnet4_msg = CChainParams::TestNet4()->MessageStart();
      const auto regtest_msg = CChainParams::RegTest({})->MessageStart();
-@@ -734,6 +780,8 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
+@@ -734,6 +785,8 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
  
      if (std::ranges::equal(message, mainnet_msg)) {
          return ChainType::MAIN;
@@ -284,7 +320,7 @@ index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436
          return ChainType::TESTNET;
      } else if (std::ranges::equal(message, testnet4_msg)) {
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index f7209bee1b068ac9956e41f19cbd1d14da57086e..f5869b8cd69c13546362bc9d6d06d5c739609168 100644
+index f7209bee1..67891bd0c 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
 @@ -88,6 +88,13 @@ public:
@@ -301,7 +337,15 @@ index f7209bee1b068ac9956e41f19cbd1d14da57086e..f5869b8cd69c13546362bc9d6d06d5c7
      uint16_t GetDefaultPort() const { return nDefaultPort; }
      std::vector<int> GetAvailableSnapshotHeights() const;
  
-@@ -157,6 +164,7 @@ public:
+@@ -150,6 +157,7 @@ public:
+     struct RegTestOptions {
+         std::unordered_map<Consensus::DeploymentPos, VersionBitsParameters> version_bits_parameters{};
+         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
++        std::optional<int> pohw_replay_marker_activation_height{};
+         bool fastprune{false};
+         bool enforce_bip94{false};
+     };
+@@ -157,6 +165,7 @@ public:
      static std::unique_ptr<const CChainParams> RegTest(const RegTestOptions& options);
      static std::unique_ptr<const CChainParams> SigNet(const SigNetOptions& options);
      static std::unique_ptr<const CChainParams> Main();
@@ -309,7 +353,7 @@ index f7209bee1b068ac9956e41f19cbd1d14da57086e..f5869b8cd69c13546362bc9d6d06d5c7
      static std::unique_ptr<const CChainParams> TestNet();
      static std::unique_ptr<const CChainParams> TestNet4();
  
-@@ -165,6 +173,7 @@ protected:
+@@ -165,6 +174,7 @@ protected:
  
      Consensus::Params consensus;
      MessageStartChars pchMessageStart;
@@ -318,7 +362,7 @@ index f7209bee1b068ac9956e41f19cbd1d14da57086e..f5869b8cd69c13546362bc9d6d06d5c7
      uint64_t nPruneAfterHeight;
      uint64_t m_assumed_blockchain_size;
 diff --git a/src/node/blockstorage.cpp b/src/node/blockstorage.cpp
-index ab6d23ec074da68614685db4d60c0d6aceb33be9..8e25dff9e99584d0c0a9f3eba7e14456db87e371 100644
+index ab6d23ec0..8e25dff9e 100644
 --- a/src/node/blockstorage.cpp
 +++ b/src/node/blockstorage.cpp
 @@ -1101,9 +1101,9 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
@@ -335,7 +379,7 @@ index ab6d23ec074da68614685db4d60c0d6aceb33be9..8e25dff9e99584d0c0a9f3eba7e14456
          }
  
 diff --git a/src/node/miner.cpp b/src/node/miner.cpp
-index 7ea8d10b73064724ab4369aca08cc7e6e6342cd8..5ac592be680f6d5eadb9aef42af3f6812ae7daa2 100644
+index 7ea8d10b7..5ac592be6 100644
 --- a/src/node/miner.cpp
 +++ b/src/node/miner.cpp
 @@ -20,6 +20,7 @@
@@ -386,7 +430,7 @@ index 7ea8d10b73064724ab4369aca08cc7e6e6342cd8..5ac592be680f6d5eadb9aef42af3f681
      if (m_options.test_block_validity) {
 diff --git a/src/pohw/experiment.h b/src/pohw/experiment.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..267e57849a5180d8ac204bcd65b2a45069927af2
+index 000000000..267e57849
 --- /dev/null
 +++ b/src/pohw/experiment.h
 @@ -0,0 +1,32 @@
@@ -424,10 +468,10 @@ index 0000000000000000000000000000000000000000..267e57849a5180d8ac204bcd65b2a450
 +#endif // BITCOIN_POHW_EXPERIMENT_H
 diff --git a/src/pohw/replay.h b/src/pohw/replay.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2525e7b4a6534a8c7196c0f1d3f5a9ebef03bdc3
+index 000000000..9ae776f6d
 --- /dev/null
 +++ b/src/pohw/replay.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,45 @@
 +// Copyright (c) 2026 The P2poolBTC contributors
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -458,7 +502,8 @@ index 0000000000000000000000000000000000000000..2525e7b4a6534a8c7196c0f1d3f5a9eb
 +
 +inline bool ReplayMarkerActive(int height, const Consensus::Params& params)
 +{
-+    return params.pohw_experiment && height >= params.pohw_replay_marker_activation_height;
++    return (params.pohw_experiment || params.pohw_replay_test) &&
++           height >= params.pohw_replay_marker_activation_height;
 +}
 +
 +inline bool CoinbaseHasReplayMarker(const CTransaction& coinbase)
@@ -473,7 +518,7 @@ index 0000000000000000000000000000000000000000..2525e7b4a6534a8c7196c0f1d3f5a9eb
 +
 +#endif // BITCOIN_POHW_REPLAY_H
 diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
-index 46ec238c3b18fd1c0a5ce35f25d1b619317dafda..646375d09b65189fa9343f65fb2617cf7570a1cb 100644
+index 46ec238c3..646375d09 100644
 --- a/src/policy/policy.cpp
 +++ b/src/policy/policy.cpp
 @@ -12,6 +12,7 @@
@@ -506,7 +551,7 @@ index 46ec238c3b18fd1c0a5ce35f25d1b619317dafda..646375d09b65189fa9343f65fb2617cf
          TxoutType whichType = Solver(prev.scriptPubKey, vSolutions);
          if (whichType == TxoutType::NONSTANDARD || whichType == TxoutType::WITNESS_UNKNOWN) {
 diff --git a/src/policy/policy.h b/src/policy/policy.h
-index 0bc7b32770833211913b82204f1b8fc4bdb4dfd0..61caa1ba48749e9063f6e239f5b10c0fb452276f 100644
+index 0bc7b3277..61caa1ba4 100644
 --- a/src/policy/policy.h
 +++ b/src/policy/policy.h
 @@ -161,7 +161,7 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
@@ -519,7 +564,7 @@ index 0bc7b32770833211913b82204f1b8fc4bdb4dfd0..61caa1ba48749e9063f6e239f5b10c0f
  * Check if the transaction is over standard P2WSH resources limit:
  * 3600bytes witnessScript size, 80bytes per witness stack element, 100 witness stack elements
 diff --git a/src/pow.cpp b/src/pow.cpp
-index 9a9f4e58178b82a6741b4f5a2a8c0ef02f89d0c7..786d295703ed4ee322a04efef368cf163dfee18d 100644
+index 9a9f4e581..786d29570 100644
 --- a/src/pow.cpp
 +++ b/src/pow.cpp
 @@ -8,13 +8,116 @@
@@ -682,7 +727,7 @@ index 9a9f4e58178b82a6741b4f5a2a8c0ef02f89d0c7..786d295703ed4ee322a04efef368cf16
          observed_new_target.SetCompact(new_nbits);
  
 diff --git a/src/pow.h b/src/pow.h
-index 26004c46187cb683e5418b723e58036b99e9e506..a28b3db179d9e5454ba3fbe96794a092cb87597d 100644
+index 26004c461..a28b3db17 100644
 --- a/src/pow.h
 +++ b/src/pow.h
 @@ -29,6 +29,15 @@ std::optional<arith_uint256> DeriveTarget(unsigned int nBits, uint256 pow_limit)
@@ -702,7 +747,7 @@ index 26004c46187cb683e5418b723e58036b99e9e506..a28b3db179d9e5454ba3fbe96794a092
  bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
  bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params&);
 diff --git a/src/qt/guiconstants.h b/src/qt/guiconstants.h
-index a3b8cb9d9ce382090a447dd30883ad81494ded9a..d4b6ed23c6c39414dd844dc69be0f6ae99f1ddee 100644
+index a3b8cb9d9..d4b6ed23c 100644
 --- a/src/qt/guiconstants.h
 +++ b/src/qt/guiconstants.h
 @@ -49,6 +49,7 @@ static const int TOOLTIP_WRAP_THRESHOLD = 80;
@@ -714,7 +759,7 @@ index a3b8cb9d9ce382090a447dd30883ad81494ded9a..d4b6ed23c6c39414dd844dc69be0f6ae
  #define QAPP_APP_NAME_TESTNET4 "Bitcoin-Qt-testnet4"
  #define QAPP_APP_NAME_SIGNET "Bitcoin-Qt-signet"
 diff --git a/src/qt/guiutil.cpp b/src/qt/guiutil.cpp
-index 1619227a419ffe89f48213b5aa892258cbc03b55..a0aa66e6c5bf2b2d623711bd09f1ed7ca2f92ab2 100644
+index 1619227a4..a0aa66e6c 100644
 --- a/src/qt/guiutil.cpp
 +++ b/src/qt/guiutil.cpp
 @@ -111,6 +111,7 @@ static std::string DummyAddress(const CChainParams &params)
@@ -726,7 +771,7 @@ index 1619227a419ffe89f48213b5aa892258cbc03b55..a0aa66e6c5bf2b2d623711bd09f1ed7c
          break;
      case ChainType::SIGNET:
 diff --git a/src/qt/networkstyle.cpp b/src/qt/networkstyle.cpp
-index 09d2df695819d5860b6403ad7bb13c69dfbeee0a..e1f0d782605211398521a339ac1411efe420d109 100644
+index 09d2df695..e1f0d7826 100644
 --- a/src/qt/networkstyle.cpp
 +++ b/src/qt/networkstyle.cpp
 @@ -18,6 +18,7 @@ static const struct {
@@ -738,7 +783,7 @@ index 09d2df695819d5860b6403ad7bb13c69dfbeee0a..e1f0d782605211398521a339ac1411ef
      {ChainType::TESTNET4, QAPP_APP_NAME_TESTNET4, 70, 30},
      {ChainType::SIGNET, QAPP_APP_NAME_SIGNET, 35, 15},
 diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
-index c631a93674aa296f74871ff7c3db3b1aa12ea741..7a826fb1095bc301aa314ec8b6a93fbc1c6f8461 100644
+index c631a9367..7a826fb10 100644
 --- a/src/rpc/blockchain.cpp
 +++ b/src/rpc/blockchain.cpp
 @@ -32,6 +32,8 @@
@@ -790,7 +835,7 @@ index c631a93674aa296f74871ff7c3db3b1aa12ea741..7a826fb1095bc301aa314ec8b6a93fbc
      NodeContext& node = EnsureAnyNodeContext(request.context);
      obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
 diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
-index 043e11ff63ad1eb6c5b30f97cb5ae3a4cfef3132..05aa527ceee9e21acd424e871881909987137018 100644
+index 043e11ff6..05aa527ce 100644
 --- a/src/rpc/mining.cpp
 +++ b/src/rpc/mining.cpp
 @@ -24,6 +24,7 @@
@@ -827,7 +872,7 @@ index 043e11ff63ad1eb6c5b30f97cb5ae3a4cfef3132..05aa527ceee9e21acd424e8718819099
  
      return result;
 diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
-index 443714ceedaf6b0cc695316882080f79fb50316e..a1017ab65d2251aa05346ba75c058467ed64bfe0 100644
+index 443714cee..a1017ab65 100644
 --- a/src/script/interpreter.cpp
 +++ b/src/script/interpreter.cpp
 @@ -8,6 +8,7 @@
@@ -861,7 +906,7 @@ index 443714ceedaf6b0cc695316882080f79fb50316e..a1017ab65d2251aa05346ba75c058467
          return set_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
      }
 diff --git a/src/script/interpreter.h b/src/script/interpreter.h
-index cbb137e09efb1f41d2780733d1c4f7808a22a69e..4f5d14f76cd2815664c911c0a66dff7c04041dfc 100644
+index cbb137e09..4f5d14f76 100644
 --- a/src/script/interpreter.h
 +++ b/src/script/interpreter.h
 @@ -145,6 +145,10 @@ enum class script_verify_flag_name : uint8_t {
@@ -876,7 +921,7 @@ index cbb137e09efb1f41d2780733d1c4f7808a22a69e..4f5d14f76cd2815664c911c0a66dff7c
      //
      SCRIPT_VERIFY_END_MARKER
 diff --git a/src/streams.h b/src/streams.h
-index f70adcf74a71ce163bff5fc19dd7b32ab22e3c88..ee83f090b4ddf7e47b8f69b603869cddf2526579 100644
+index f70adcf74..ee83f090b 100644
 --- a/src/streams.h
 +++ b/src/streams.h
 @@ -618,6 +618,30 @@ public:
@@ -911,7 +956,7 @@ index f70adcf74a71ce163bff5fc19dd7b32ab22e3c88..ee83f090b4ddf7e47b8f69b603869cdd
  
  /**
 diff --git a/src/test/pow_tests.cpp b/src/test/pow_tests.cpp
-index f6123401ad0e2b38f8a48a785c9d837b94f81551..015e5ac5ccd5c7da335c121ccd1cd709da0d2092 100644
+index f6123401a..015e5ac5c 100644
 --- a/src/test/pow_tests.cpp
 +++ b/src/test/pow_tests.cpp
 @@ -4,11 +4,14 @@
@@ -1057,7 +1102,7 @@ index f6123401ad0e2b38f8a48a785c9d837b94f81551..015e5ac5ccd5c7da335c121ccd1cd709
  {
      sanity_check_chainparams(*m_node.args, ChainType::REGTEST);
 diff --git a/src/test/streams_tests.cpp b/src/test/streams_tests.cpp
-index dfddc415b50e846c95e938938f03f21ad9f08b78..bcaa0bac284a591f8caab0f2511dcd007a731eb3 100644
+index dfddc415b..bcaa0bac2 100644
 --- a/src/test/streams_tests.cpp
 +++ b/src/test/streams_tests.cpp
 @@ -504,6 +504,34 @@ BOOST_AUTO_TEST_CASE(streams_buffered_file_skip)
@@ -1096,7 +1141,7 @@ index dfddc415b50e846c95e938938f03f21ad9f08b78..bcaa0bac284a591f8caab0f2511dcd00
  {
      // Make this test deterministic.
 diff --git a/src/test/transaction_tests.cpp b/src/test/transaction_tests.cpp
-index 916f565c04df41b909ad35e50b917cdb04caaa4f..519ec3350eb7bdd7199b7804873797286dd34ba0 100644
+index 916f565c0..519ec3350 100644
 --- a/src/test/transaction_tests.cpp
 +++ b/src/test/transaction_tests.cpp
 @@ -10,6 +10,7 @@
@@ -1187,7 +1232,7 @@ index 916f565c04df41b909ad35e50b917cdb04caaa4f..519ec3350eb7bdd7199b780487379728
  {
      CMutableTransaction mtx;
 diff --git a/src/util/chaintype.cpp b/src/util/chaintype.cpp
-index 5059ff7e9f47f3132a669f30d9eebc16abff6cb0..510f659831b6f9176364d427f1aa593e1c18c50c 100644
+index 5059ff7e9..510f65983 100644
 --- a/src/util/chaintype.cpp
 +++ b/src/util/chaintype.cpp
 @@ -13,6 +13,8 @@ std::string ChainTypeToString(ChainType chain)
@@ -1209,7 +1254,7 @@ index 5059ff7e9f47f3132a669f30d9eebc16abff6cb0..510f659831b6f9176364d427f1aa593e
          return ChainType::TESTNET;
      } else if (chain == "testnet4") {
 diff --git a/src/util/chaintype.h b/src/util/chaintype.h
-index 3b246ea49b5001f4ecd9c66b3c3a071cbdf97773..4468925e10f208e533f7b3ac8f972fcf03a53c9f 100644
+index 3b246ea49..4468925e1 100644
 --- a/src/util/chaintype.h
 +++ b/src/util/chaintype.h
 @@ -10,6 +10,7 @@
@@ -1221,7 +1266,7 @@ index 3b246ea49b5001f4ecd9c66b3c3a071cbdf97773..4468925e10f208e533f7b3ac8f972fcf
      SIGNET,
      REGTEST,
 diff --git a/src/validation.cpp b/src/validation.cpp
-index d3cabe4464790ef84348df10aef05f268e02488c..05e7fd2b90f3d5b32d76d79c357154d4e83f7017 100644
+index d3cabe446..05e7fd2b9 100644
 --- a/src/validation.cpp
 +++ b/src/validation.cpp
 @@ -36,6 +36,7 @@
@@ -1429,3 +1474,108 @@ index d3cabe4464790ef84348df10aef05f268e02488c..05e7fd2b90f3d5b32d76d79c357154d4
                      continue;
                  }
                  // read size
+diff --git a/test/functional/feature_pohw_replay.py b/test/functional/feature_pohw_replay.py
+new file mode 100755
+index 000000000..18a149d95
+--- /dev/null
++++ b/test/functional/feature_pohw_replay.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 The P2poolBTC contributors
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Exercise PoHW replay protection through the real mempool validation path."""
++
++from test_framework.blocktools import COINBASE_MATURITY
++from test_framework.messages import (
++    COutPoint,
++    CTransaction,
++    CTxIn,
++    CTxInWitness,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++from test_framework.wallet import (
++    MiniWallet,
++    MiniWalletMode,
++)
++
++
++ACTIVATION_HEIGHT = 2
++MARKER_SCRIPT_HEX = "5150"
++REPLAY_REJECT_REASON = "bad-pohw-replay-unprotected"
++
++
++class PoHWReplayProtectionTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++        self.extra_args = [[
++            f"-testactivationheight=pohw-replay@{ACTIVATION_HEIGHT}",
++        ]]
++
++    def run_test(self):
++        node = self.nodes[0]
++        wallet = MiniWallet(node, mode=MiniWalletMode.ADDRESS_OP_TRUE)
++
++        self.log.info("Mine an inherited output and a mature activated replay marker")
++        block_hashes = self.generate(
++            wallet,
++            ACTIVATION_HEIGHT + COINBASE_MATURITY - 1,
++        )
++        inherited_coinbase_txid = node.getblock(block_hashes[0])["tx"][0]
++        inherited_utxo = wallet.get_utxo(
++            txid=inherited_coinbase_txid,
++            mark_as_spent=False,
++        )
++
++        marker_block = node.getblock(
++            block_hashes[ACTIVATION_HEIGHT - 1],
++            2,
++        )
++        marker_coinbase = marker_block["tx"][0]
++        marker_outputs = [
++            output for output in marker_coinbase["vout"]
++            if output["value"] == 0
++            and output["scriptPubKey"]["hex"] == MARKER_SCRIPT_HEX
++        ]
++        assert_equal(len(marker_outputs), 1)
++
++        unprotected = wallet.create_self_transfer(
++            utxo_to_spend=inherited_utxo,
++        )["tx"]
++        unprotected_result = node.testmempoolaccept(
++            rawtxs=[unprotected.serialize().hex()],
++            maxfeerate=0,
++        )[0]
++        assert_equal(unprotected_result["allowed"], False)
++        assert_equal(unprotected_result["reject-reason"], REPLAY_REJECT_REASON)
++
++        self.log.info("Add the exact activated marker and pass the replay gate")
++        protected = CTransaction(unprotected)
++        protected.vin.append(CTxIn(COutPoint(
++            int(marker_coinbase["txid"], 16),
++            marker_outputs[0]["n"],
++        )))
++        protected.wit.vtxinwit.append(CTxInWitness())
++        protected_result = node.testmempoolaccept(
++            rawtxs=[protected.serialize().hex()],
++            maxfeerate=0,
++        )[0]
++        assert_equal(protected_result["allowed"], True)
++
++
++if __name__ == "__main__":
++    PoHWReplayProtectionTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 298edf880..ab5b00552 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -146,6 +146,7 @@ BASE_SCRIPTS = [
+     'p2p_headers_sync_with_minchainwork.py',
+     'p2p_feefilter.py',
+     'feature_csv_activation.py',
++    'feature_pohw_replay.py',
+     'p2p_sendheaders.py',
+     'feature_config_args.py',
+     'wallet_listtransactions.py',

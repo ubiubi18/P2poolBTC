@@ -237,15 +237,61 @@ changed. The service account receives ownership only after the staged tree is
 complete and atomically published. Wallets, cookies, credentials, peer state,
 logs, settings, and mempool data are excluded.
 
+The inherited clone ends at height `958016`; it is not a usable recovery seed
+until it also has the manifest-pinned block at `958017`. The bootstrap therefore
+requires exactly one explicit checkpoint source and refuses to report success
+at the inherited tip:
+
+- For the first or an offline recovery seed, export the raw serialized first
+  fork block from an already verified Experiment 1 node and pass its absolute
+  path with `--first-fork-block`. The script checks the block-header hash before
+  starting Core, submits it with networking disabled, then requires Core itself
+  to accept it at the pinned height and hash.
+- For an online recovery node, pass one reviewed numeric endpoint with
+  `--trusted-fork-peer`. Only `IPv4:40412` or `[IPv6]:40412` is accepted. Core is
+  started with that exclusive `connect` peer; DNS seeds, fixed seeds, address
+  discovery, and outbound learned-peer selection remain disabled. The peer is
+  an availability source, not the trust root: the patched consensus engine must
+  still accept the exact manifest checkpoint.
+
+To prepare the offline block artifact on an existing verified node:
+
+```sh
+umask 077
+FIRST_FORK_HASH=$(python3 - <<'PY'
+import json
+with open('compatibility/experiment-1-full-consensus.json', encoding='utf-8') as handle:
+    print(json.load(handle)['fork_point']['first_fork_hash'])
+PY
+)
+sudo -u bitcoin-pohw \
+  /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli \
+  -datadir=/srv/bitcoin/pohw -chain=pohw getblock "$FIRST_FORK_HASH" 0 \
+  | tr -d '\n' | xxd -r -p > /absolute/protected/path/experiment-1-first-fork.raw
+unset FIRST_FORK_HASH
+```
+
+Transfer that public block artifact over an authenticated channel. It contains
+no wallet key, but it must still be treated as untrusted input until the
+bootstrap verifies both its header and full Bitcoin Core consensus acceptance.
+
 ```sh
 sudo scripts/pohw-bootstrap-bitcoin-core-fork.sh \
   --source-datadir /srv/bitcoin/mainnet \
   --target-base /srv/bitcoin/pohw \
   --source-service bitcoind-mainnet.service \
+  --first-fork-block /absolute/protected/path/experiment-1-first-fork.raw \
   --restart-main
 
 sudo systemctl enable --now bitcoind-pohw-experiment-1.service
 ```
+
+For recovery from one reviewed live peer, replace `--first-fork-block ...`
+with `--trusted-fork-peer '<numeric-peer-ip>:40412'`. The generated local
+configuration retains that exclusive `connect=` entry. Review and edit the
+explicit peer list deliberately when adding more Experiment 1 peers; do not
+enable DNS seeds or fixed seeds. An existing target `bitcoin.conf` is refused
+because the bootstrap cannot prove that its discovery settings are safe.
 
 Never point both daemons at one writable datadir. Never copy a mainnet wallet
 into the fork datadir.

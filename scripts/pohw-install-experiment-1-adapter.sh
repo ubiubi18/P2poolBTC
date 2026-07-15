@@ -19,8 +19,11 @@ fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 SOURCE="target/release/p2pool-node"
-DEFAULT_DESTINATION="/usr/local/libexec/p2pool-experiment-1/p2pool-node"
+DEFAULT_RUNTIME_DIR="/usr/local/libexec/p2pool-experiment-1"
+DEFAULT_SYSTEMD_DIR="/etc/systemd/system"
+DEFAULT_DESTINATION="$DEFAULT_RUNTIME_DIR/p2pool-node"
 DESTINATION="$DEFAULT_DESTINATION"
+INSTALL_ROOT=""
 BUILD_EVIDENCE=""
 EXPECTED_EVIDENCE_SHA256=""
 EXPECTED_SOURCE_CID=""
@@ -42,7 +45,8 @@ Options:
                       Canonical P2poolBTC source CID obtained independently.
   --build-plan FILE   Exact governance build plan used by the evidence.
   --source-root DIR   Canonical P2poolBTC source root used by the build.
-  --destination PATH  Exact service binary destination.
+  --destination PATH  Must equal the fixed service binary destination.
+  --install-root DIR  Stage the fixed filesystem layout below DIR (non-root only).
   --help              Show this help.
 
 The installer never executes caller-supplied code. It refuses active P2Pool
@@ -88,6 +92,11 @@ while (($#)); do
       DESTINATION="$2"
       shift 2
       ;;
+    --install-root)
+      [[ $# -ge 2 ]] || { echo "--install-root requires a path" >&2; exit 2; }
+      INSTALL_ROOT="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -112,11 +121,31 @@ done
   echo "--expected-source-cid must be an independently obtained canonical base32 CIDv1" >&2
   exit 2
 }
-if [[ ${EUID:-0} -eq 0 && "$DESTINATION" != "$DEFAULT_DESTINATION" ]]; then
-  echo "root installation is restricted to the service's exact binary destination" >&2
+if [[ "$DESTINATION" != "$DEFAULT_DESTINATION" ]]; then
+  echo "installation is restricted to the service's fixed binary destination" >&2
   exit 1
 fi
-if [[ ${EUID:-0} -eq 0 && ! -x "$SYSTEMCTL_BIN" ]]; then
+if [[ ${EUID:-0} -eq 0 && -n "$INSTALL_ROOT" ]]; then
+  echo "root installation cannot use a staging root" >&2
+  exit 1
+fi
+if [[ ${EUID:-0} -ne 0 && -z "$INSTALL_ROOT" ]]; then
+  echo "non-root installation requires --install-root" >&2
+  exit 1
+fi
+if [[ -n "$INSTALL_ROOT" ]]; then
+  if [[ "$INSTALL_ROOT" != /* || "$INSTALL_ROOT" == / || -L "$INSTALL_ROOT" ]]; then
+    echo "install root must be an absolute non-symlink staging directory" >&2
+    exit 1
+  fi
+  DESTINATION="$INSTALL_ROOT$DEFAULT_DESTINATION"
+  RUNTIME_DIR="$INSTALL_ROOT$DEFAULT_RUNTIME_DIR"
+  SYSTEMD_DIR="$INSTALL_ROOT$DEFAULT_SYSTEMD_DIR"
+else
+  RUNTIME_DIR="$DEFAULT_RUNTIME_DIR"
+  SYSTEMD_DIR="$DEFAULT_SYSTEMD_DIR"
+fi
+if ! command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
   echo "trusted systemctl is unavailable: $SYSTEMCTL_BIN" >&2
   exit 1
 fi
@@ -128,15 +157,6 @@ if [[ ! -x "$SOURCE" ]]; then
   echo "Adapter binary is not executable: $SOURCE" >&2
   exit 1
 fi
-if [[ -L "$DESTINATION" ]]; then
-  echo "Adapter destination must not be a symlink: $DESTINATION" >&2
-  exit 1
-fi
-if [[ -e "$DESTINATION" && ! -f "$DESTINATION" ]]; then
-  echo "Adapter destination is not a regular file: $DESTINATION" >&2
-  exit 1
-fi
-
 # Verify a governance build-evidence package without importing or executing
 # anything from the candidate source tree. The evidence package binds the
 # exact artifact, dependency lock, source CID, command results, build plan,
@@ -261,36 +281,75 @@ verify_reference(evidence.get("buildPlan"), canonical_json(plan), "build plan")
 targets = [item for item in plan.get("targets", []) if isinstance(item, dict) and item.get("id") == "rust-workspace"]
 require(len(targets) == 1, "build plan must contain one rust-workspace target")
 target = targets[0]
-declarations = [item for item in target.get("artifacts", []) if isinstance(item, dict) and item.get("name") == "p2pool-node"]
-require(len(declarations) == 1, "build plan must declare p2pool-node exactly once")
-declaration = declarations[0]
-require(
-    declaration.get("repository") == "P2poolBTC"
-    and declaration.get("kind") == "file"
-    and declaration.get("deterministic") is True,
-    "p2pool-node must be a deterministic P2poolBTC file artifact",
-)
-relative_source = source_resolved.relative_to(source_root).as_posix()
-require(relative_source == declaration.get("pathHint"), "adapter binary does not match its build-plan path")
-
 artifact_entries = evidence.get("artifacts")
 require(isinstance(artifact_entries, list) and all(isinstance(item, dict) for item in artifact_entries), "build evidence artifacts are invalid")
-declared_names = [item.get("name") for item in target.get("artifacts", []) if isinstance(item, dict)]
+declarations = target.get("artifacts")
+require(isinstance(declarations, list) and all(isinstance(item, dict) for item in declarations), "build plan artifacts are invalid")
+declared_names = [item.get("name") for item in declarations]
 evidence_names = [item.get("name") for item in artifact_entries]
+require(len(declared_names) == len(set(declared_names)), "build plan artifact names are not unique")
 require(len(evidence_names) == len(set(evidence_names)) and set(evidence_names) == set(declared_names), "build evidence artifact set does not match the build plan")
 for item in artifact_entries:
     item_sha = item.get("sha256")
     require(SHA256_RE.fullmatch(item_sha or "") is not None and item.get("cid") == raw_cid(item_sha), f"artifact content reference is invalid: {item.get('name')}")
     require(isinstance(item.get("size"), int) and not isinstance(item.get("size"), bool) and item["size"] > 0, f"artifact size is invalid: {item.get('name')}")
-artifacts = [item for item in artifact_entries if item.get("name") == "p2pool-node"]
-require(len(artifacts) == 1, "build evidence must contain p2pool-node exactly once")
-artifact = artifacts[0]
-expected_sha = artifact.get("sha256")
-expected_size = artifact.get("size")
-require(SHA256_RE.fullmatch(expected_sha or "") is not None, "p2pool-node evidence SHA-256 is invalid")
-require(isinstance(expected_size, int) and not isinstance(expected_size, bool) and expected_size > 0, "p2pool-node evidence size is invalid")
-source_raw = read_regular(source_resolved, "adapter binary", 1024 * 1024 * 1024)
-require(len(source_raw) == expected_size and hashlib.sha256(source_raw).hexdigest() == expected_sha, "adapter binary does not match build evidence")
+
+declarations_by_name = {item["name"]: item for item in declarations}
+evidence_by_name = {item["name"]: item for item in artifact_entries}
+runtime_specs = (
+    ("p2pool-node", "target/release/p2pool-node", source_resolved, "adapter binary", "builder-platform", "builder-platform", False, 1024 * 1024 * 1024),
+    ("pohw-run-mining-adapter.sh", "scripts/pohw-run-mining-adapter.sh", source_root / "scripts/pohw-run-mining-adapter.sh", "mining adapter wrapper", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-run-gossip-mesh.sh", "scripts/pohw-run-gossip-mesh.sh", source_root / "scripts/pohw-run-gossip-mesh.sh", "gossip mesh wrapper", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-health-status.py", "scripts/pohw-health-status.py", source_root / "scripts/pohw-health-status.py", "health status checker", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-mining-adapter.service", "deploy/systemd/pohw-mining-adapter.service", source_root / "deploy/systemd/pohw-mining-adapter.service", "mining adapter unit", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-gossip-mesh.service", "deploy/systemd/pohw-gossip-mesh.service", source_root / "deploy/systemd/pohw-gossip-mesh.service", "gossip mesh unit", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-mining-adapter-server.conf", "deploy/systemd/pohw-mining-adapter-server.conf", source_root / "deploy/systemd/pohw-mining-adapter-server.conf", "mining adapter server drop-in", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-gossip-mesh-server.conf", "deploy/systemd/pohw-gossip-mesh-server.conf", source_root / "deploy/systemd/pohw-gossip-mesh-server.conf", "gossip mesh server drop-in", "linux", "any", True, MAX_JSON_BYTES),
+)
+verified_sha256s = []
+for name, path_hint, local_path, label, platform, architecture, pinned, maximum in runtime_specs:
+    require(name in declarations_by_name, f"build plan must declare {name} exactly once")
+    declaration = declarations_by_name[name]
+    require(
+        declaration.get("repository") == "P2poolBTC"
+        and declaration.get("kind") == "file"
+        and declaration.get("pathHint") == path_hint
+        and declaration.get("platform") == platform
+        and declaration.get("architecture") == architecture
+        and declaration.get("deterministic") is True,
+        f"{name} must be the expected deterministic P2poolBTC file artifact",
+    )
+    if name == "p2pool-node":
+        relative_source = source_resolved.relative_to(source_root).as_posix()
+        require(relative_source == path_hint, "adapter binary does not match its build-plan path")
+    raw = read_regular(local_path, label, maximum)
+    measured = reference(raw)
+    artifact = evidence_by_name[name]
+    require(
+        artifact.get("repository") == declaration["repository"]
+        and artifact.get("kind") == declaration["kind"]
+        and artifact.get("deterministic") is True
+        and artifact.get("packagedName") == Path(path_hint).name,
+        f"build evidence metadata mismatch: {name}",
+    )
+    if platform != "builder-platform":
+        require(artifact.get("platform") == platform, f"build evidence platform mismatch: {name}")
+    if architecture != "builder-platform":
+        require(artifact.get("architecture") == architecture, f"build evidence architecture mismatch: {name}")
+    require(
+        artifact.get("cid") == measured["cid"]
+        and artifact.get("sha256") == measured["sha256"]
+        and artifact.get("size") == measured["size"],
+        f"{label} does not match build evidence",
+    )
+    if pinned:
+        require(
+            declaration.get("expectedCid") == measured["cid"]
+            and declaration.get("expectedSha256") == measured["sha256"]
+            and declaration.get("expectedSize") == measured["size"],
+            f"{label} does not match the pinned build-plan artifact",
+        )
+    verified_sha256s.append(measured["sha256"])
 
 source_cids = evidence.get("sourceCids")
 require(isinstance(source_cids, list) and len(source_cids) == 1, "rust build evidence must bind exactly one source repository")
@@ -342,20 +401,34 @@ for lock in plan_locks:
     matches = [item for item in evidence_locks if isinstance(item, dict) and item.get("repository") == "P2poolBTC" and item.get("path") == lock_path]
     require(len(matches) == 1 and matches[0].get("sha256") == lock_sha and matches[0].get("cid") == raw_cid(lock_sha) and matches[0].get("size") == len(lock_raw), f"build evidence dependency lock mismatch: {lock_path}")
 
-print(expected_sha)
+print(" ".join(verified_sha256s))
 PY
 ) || {
-  echo "Adapter source/build evidence verification failed" >&2
+  echo "Adapter runtime source/build evidence verification failed" >&2
   exit 1
 }
+read -r EXPECTED_SHA256 MINING_WRAPPER_SHA256 GOSSIP_WRAPPER_SHA256 \
+  HEALTH_SCRIPT_SHA256 MINING_UNIT_SHA256 GOSSIP_UNIT_SHA256 \
+  MINING_SERVER_DROPIN_SHA256 GOSSIP_SERVER_DROPIN_SHA256 <<< "$EXPECTED_SHA256"
+if [[ -z "${GOSSIP_SERVER_DROPIN_SHA256:-}" ]]; then
+  echo "Adapter runtime source/build evidence verification returned incomplete digests" >&2
+  exit 1
+fi
 
-artifact_sha256() {
-  python3 -I - "$1" <<'PY'
+verify_installed_artifact() {
+  python3 -I - "$1" "$2" "$3" "$4" <<'PY'
 import hashlib, os, stat, sys
 path = sys.argv[1]
+expected_sha256 = sys.argv[2]
+expected_mode = int(sys.argv[3], 8)
+require_root_owner = sys.argv[4] == "true"
 metadata = os.lstat(path)
 if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
     raise SystemExit("installed artifact must be a regular non-symlink file")
+if stat.S_IMODE(metadata.st_mode) != expected_mode:
+    raise SystemExit(f"installed artifact mode is not {expected_mode:04o}")
+if require_root_owner and (metadata.st_uid != 0 or metadata.st_gid != 0):
+    raise SystemExit("installed artifact is not owned by root:root")
 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 descriptor = os.open(path, flags)
 try:
@@ -371,80 +444,206 @@ finally:
     os.close(descriptor)
 if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
     raise SystemExit("installed artifact changed while hashing")
-print(digest.hexdigest())
+if digest.hexdigest() != expected_sha256:
+    raise SystemExit("installed artifact does not match build evidence")
 PY
 }
 
-if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
-  for service in "${SERVICES[@]}"; do
-    if "$SYSTEMCTL_BIN" is-active --quiet "$service"; then
-      echo "Refusing adapter installation while $service is active" >&2
+for service in "${SERVICES[@]}"; do
+  if "$SYSTEMCTL_BIN" is-active --quiet "$service"; then
+    echo "Refusing adapter installation while $service is active" >&2
+    exit 1
+  else
+    status=$?
+    if [[ $status -ne 3 ]]; then
+      echo "Cannot prove that $service is inactive (systemctl status $status)" >&2
       exit 1
-    else
-      status=$?
-      if [[ $status -ne 3 ]]; then
-        echo "Cannot prove that $service is inactive (systemctl status $status)" >&2
-        exit 1
-      fi
     fi
-  done
-fi
+  fi
+done
 
-destination_dir="$(dirname "$DESTINATION")"
-if [[ -L "$destination_dir" || ( -e "$destination_dir" && ! -d "$destination_dir" ) ]]; then
-  echo "Adapter destination directory is unsafe: $destination_dir" >&2
-  exit 1
-fi
-mkdir -p "$destination_dir"
+MINING_WRAPPER_SOURCE="$SOURCE_ROOT/scripts/pohw-run-mining-adapter.sh"
+GOSSIP_WRAPPER_SOURCE="$SOURCE_ROOT/scripts/pohw-run-gossip-mesh.sh"
+HEALTH_SCRIPT_SOURCE="$SOURCE_ROOT/scripts/pohw-health-status.py"
+MINING_UNIT_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-mining-adapter.service"
+GOSSIP_UNIT_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-gossip-mesh.service"
+MINING_SERVER_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-mining-adapter-server.conf"
+GOSSIP_SERVER_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-gossip-mesh-server.conf"
+MINING_WRAPPER_DESTINATION="$RUNTIME_DIR/pohw-run-mining-adapter.sh"
+GOSSIP_WRAPPER_DESTINATION="$RUNTIME_DIR/pohw-run-gossip-mesh.sh"
+HEALTH_SCRIPT_DESTINATION="$RUNTIME_DIR/pohw-health-status.py"
+MINING_UNIT_DESTINATION="$SYSTEMD_DIR/pohw-mining-adapter.service"
+GOSSIP_UNIT_DESTINATION="$SYSTEMD_DIR/pohw-gossip-mesh.service"
+MINING_SERVER_DROPIN_DIR="$SYSTEMD_DIR/pohw-mining-adapter.service.d"
+GOSSIP_SERVER_DROPIN_DIR="$SYSTEMD_DIR/pohw-gossip-mesh.service.d"
+MINING_SERVER_DROPIN_DESTINATION="$MINING_SERVER_DROPIN_DIR/server.conf"
+GOSSIP_SERVER_DROPIN_DESTINATION="$GOSSIP_SERVER_DROPIN_DIR/server.conf"
+
+ARTIFACT_SOURCES=(
+  "$SOURCE"
+  "$MINING_WRAPPER_SOURCE"
+  "$GOSSIP_WRAPPER_SOURCE"
+  "$HEALTH_SCRIPT_SOURCE"
+  "$MINING_UNIT_SOURCE"
+  "$GOSSIP_UNIT_SOURCE"
+  "$MINING_SERVER_DROPIN_SOURCE"
+  "$GOSSIP_SERVER_DROPIN_SOURCE"
+)
+ARTIFACT_DESTINATIONS=(
+  "$DESTINATION"
+  "$MINING_WRAPPER_DESTINATION"
+  "$GOSSIP_WRAPPER_DESTINATION"
+  "$HEALTH_SCRIPT_DESTINATION"
+  "$MINING_UNIT_DESTINATION"
+  "$GOSSIP_UNIT_DESTINATION"
+  "$MINING_SERVER_DROPIN_DESTINATION"
+  "$GOSSIP_SERVER_DROPIN_DESTINATION"
+)
+ARTIFACT_MODES=(0755 0755 0755 0755 0644 0644 0644 0644)
+ARTIFACT_SHA256S=(
+  "$EXPECTED_SHA256"
+  "$MINING_WRAPPER_SHA256"
+  "$GOSSIP_WRAPPER_SHA256"
+  "$HEALTH_SCRIPT_SHA256"
+  "$MINING_UNIT_SHA256"
+  "$GOSSIP_UNIT_SHA256"
+  "$MINING_SERVER_DROPIN_SHA256"
+  "$GOSSIP_SERVER_DROPIN_SHA256"
+)
+ARTIFACT_LABELS=(
+  "adapter binary"
+  "mining adapter wrapper"
+  "gossip mesh wrapper"
+  "health status checker"
+  "mining adapter unit"
+  "gossip mesh unit"
+  "mining adapter server drop-in"
+  "gossip mesh server drop-in"
+)
+
+for directory in \
+  "$RUNTIME_DIR" \
+  "$SYSTEMD_DIR" \
+  "$MINING_SERVER_DROPIN_DIR" \
+  "$GOSSIP_SERVER_DROPIN_DIR"; do
+  if [[ -L "$directory" || ( -e "$directory" && ! -d "$directory" ) ]]; then
+    echo "Adapter destination directory is unsafe: $directory" >&2
+    exit 1
+  fi
+  mkdir -p "$directory"
+  if [[ -L "$directory" || ! -d "$directory" ]]; then
+    echo "Adapter destination directory could not be created safely: $directory" >&2
+    exit 1
+  fi
+done
+
+for index in "${!ARTIFACT_DESTINATIONS[@]}"; do
+  destination=${ARTIFACT_DESTINATIONS[$index]}
+  if [[ -L "$destination" || ( -e "$destination" && ! -f "$destination" ) ]]; then
+    echo "${ARTIFACT_LABELS[$index]} destination is unsafe: $destination" >&2
+    exit 1
+  fi
+done
 
 backup="${DESTINATION}.previous"
-temp="$(mktemp "$destination_dir/.p2pool-node.install.XXXXXX")"
+if [[ -L "$backup" || ( -e "$backup" && ! -f "$backup" ) ]]; then
+  echo "Adapter rollback destination is unsafe: $backup" >&2
+  exit 1
+fi
+
+REQUIRE_ROOT_OWNER=false
+if [[ ${EUID:-0} -eq 0 ]]; then
+  REQUIRE_ROOT_OWNER=true
+fi
+
+install_fixed_copy() {
+  local mode=$1
+  local source_path=$2
+  local destination_path=$3
+  if [[ "$REQUIRE_ROOT_OWNER" == true ]]; then
+    install -o root -g root -m "$mode" "$source_path" "$destination_path"
+  else
+    install -m "$mode" "$source_path" "$destination_path"
+  fi
+}
+
+STAGED_PATHS=("" "" "" "" "" "" "" "")
+TRANSACTION_BACKUPS=("" "" "" "" "" "" "" "")
+EXISTED=(false false false false false false false false)
+REPLACED=(false false false false false false false false)
 backup_temp=""
-replaced=false
-had_previous=false
 
 rollback() {
   local status=$?
+  local index
+  trap - ERR INT TERM
   set +e
-  rm -f "$temp"
   [[ -z "$backup_temp" ]] || rm -f "$backup_temp"
-  if [[ "$replaced" == true ]]; then
-    if [[ "$had_previous" == true && -f "$backup" && ! -L "$backup" ]]; then
-      local restore
-      restore="$(mktemp "$destination_dir/.p2pool-node.rollback.XXXXXX")"
-      install -m 0755 "$backup" "$restore"
-      mv -f "$restore" "$DESTINATION"
-    else
-      rm -f "$DESTINATION"
+  for index in "${!STAGED_PATHS[@]}"; do
+    [[ -z "${STAGED_PATHS[$index]}" ]] || rm -f "${STAGED_PATHS[$index]}"
+  done
+  for ((index=${#ARTIFACT_DESTINATIONS[@]} - 1; index >= 0; index--)); do
+    if [[ "${REPLACED[$index]}" == true ]]; then
+      if [[ "${EXISTED[$index]}" == true ]]; then
+        mv -f "${TRANSACTION_BACKUPS[$index]}" "${ARTIFACT_DESTINATIONS[$index]}"
+        TRANSACTION_BACKUPS[index]=""
+      else
+        rm -f "${ARTIFACT_DESTINATIONS[$index]}"
+      fi
     fi
+    [[ -z "${TRANSACTION_BACKUPS[$index]}" ]] || rm -f "${TRANSACTION_BACKUPS[$index]}"
+  done
+  if [[ "${REPLACED[4]}" == true \
+    || "${REPLACED[5]}" == true \
+    || "${REPLACED[6]}" == true \
+    || "${REPLACED[7]}" == true ]]; then
+    "$SYSTEMCTL_BIN" daemon-reload >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
 trap rollback ERR INT TERM
 
+for index in "${!ARTIFACT_SOURCES[@]}"; do
+  destination_dir=$(dirname "${ARTIFACT_DESTINATIONS[$index]}")
+  STAGED_PATHS[index]=$(mktemp "$destination_dir/.${ARTIFACT_LABELS[$index]// /-}.install.XXXXXX")
+  staged=${STAGED_PATHS[$index]}
+  install_fixed_copy "${ARTIFACT_MODES[$index]}" \
+    "${ARTIFACT_SOURCES[$index]}" "$staged"
+  verify_installed_artifact "$staged" "${ARTIFACT_SHA256S[$index]}" \
+    "${ARTIFACT_MODES[$index]}" "$REQUIRE_ROOT_OWNER"
+done
+
 if [[ -f "$DESTINATION" ]]; then
-  had_previous=true
-  if [[ -L "$backup" || ( -e "$backup" && ! -f "$backup" ) ]]; then
-    echo "Adapter rollback destination is unsafe: $backup" >&2
-    false
-  fi
-  backup_temp="$(mktemp "$destination_dir/.p2pool-node.previous.XXXXXX")"
-  install -m 0755 "$DESTINATION" "$backup_temp"
+  backup_temp="$(mktemp "$RUNTIME_DIR/.p2pool-node.previous.XXXXXX")"
+  install_fixed_copy 0755 "$DESTINATION" "$backup_temp"
   mv -f "$backup_temp" "$backup"
   backup_temp=""
 fi
 
-install -m 0755 "$SOURCE" "$temp"
-if [[ "$(artifact_sha256 "$temp")" != "$EXPECTED_SHA256" ]]; then
-  echo "Temporary adapter install does not match build evidence" >&2
-  false
-fi
-mv -f "$temp" "$DESTINATION"
-replaced=true
-if [[ "$(artifact_sha256 "$DESTINATION")" != "$EXPECTED_SHA256" ]]; then
-  echo "Installed adapter does not match build evidence" >&2
+for index in "${!ARTIFACT_DESTINATIONS[@]}"; do
+  destination=${ARTIFACT_DESTINATIONS[$index]}
+  if [[ -f "$destination" ]]; then
+    transaction_backup=$(mktemp "$(dirname "$destination")/.pohw-runtime.rollback.XXXXXX")
+    TRANSACTION_BACKUPS[index]=$transaction_backup
+    EXISTED[index]=true
+    cp -p "$destination" "$transaction_backup"
+  fi
+  REPLACED[index]=true
+  mv -f "${STAGED_PATHS[$index]}" "$destination"
+  STAGED_PATHS[index]=""
+  verify_installed_artifact "$destination" "${ARTIFACT_SHA256S[$index]}" \
+    "${ARTIFACT_MODES[$index]}" "$REQUIRE_ROOT_OWNER"
+done
+
+if ! "$SYSTEMCTL_BIN" daemon-reload; then
+  echo "systemd daemon-reload failed; restoring the previous runtime files" >&2
   false
 fi
 
 trap - ERR INT TERM
-echo "Experiment 1 adapter installed from verified source/build evidence; services remain stopped"
+for index in "${!TRANSACTION_BACKUPS[@]}"; do
+  [[ -z "${TRANSACTION_BACKUPS[$index]}" ]] || rm -f "${TRANSACTION_BACKUPS[$index]}" || true
+  TRANSACTION_BACKUPS[index]=""
+done
+
+echo "Experiment 1 adapter runtime and units installed from verified source/build evidence; services remain stopped"

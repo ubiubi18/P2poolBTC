@@ -10,7 +10,8 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/mnt/ssd/p2pool
 EnvironmentFile=-/etc/pohw/p2pool.env
-ExecStart=/mnt/ssd/p2pool/scripts/pohw-run-gossip-mesh.sh
+Environment=POHW_P2POOL_NODE_BIN=/usr/local/libexec/p2pool-experiment-1/p2pool-node
+ExecStart=/usr/local/libexec/p2pool-experiment-1/pohw-run-gossip-mesh.sh
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
@@ -32,7 +33,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 UMask=0077
-ReadOnlyPaths=/mnt/ssd/p2pool
+ReadOnlyPaths=/mnt/ssd/p2pool /usr/local/libexec/p2pool-experiment-1
 ReadWritePaths=/mnt/ssd/pohw-p2pool
 
 [Install]

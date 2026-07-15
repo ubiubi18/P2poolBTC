@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,6 +73,45 @@ class MinerRegistryRuntimeGateTests(unittest.TestCase):
         self.assertNotIn("IDENA_API_KEY", environment)
         self.assertEqual(environment["GOTOOLCHAIN"], "go1.26.5")
         self.assertEqual(environment["GOPROXY"], "off")
+
+    def test_candidate_binds_exact_idena_go_commit(self):
+        candidate = MODULE.load_lock(
+            ROOT / "compatibility" / "experiment-1-miner-registry-candidate.json"
+        )
+        stack_lock = MODULE.load_lock(ROOT / "compatibility" / "stack-lock.json")
+        locked = MODULE.locked_component(stack_lock, "idena-go")["commit"]
+        self.assertEqual(candidate["runtime_binding"]["idena_go_commit"], locked)
+
+    def test_exact_checkout_rejects_dirty_idena_go_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            worktree = Path(temporary)
+            subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "runtime-gate@example.invalid"],
+                cwd=worktree,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Runtime Gate Test"],
+                cwd=worktree,
+                check=True,
+            )
+            tracked = worktree / "go.mod"
+            tracked.write_text("module example.invalid/idena-go\n", encoding="utf-8")
+            subprocess.run(["git", "add", "go.mod"], cwd=worktree, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=worktree, check=True)
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            self.assertEqual(MODULE.verify_exact_clean_checkout(worktree, commit), commit)
+            tracked.write_text("module example.invalid/modified\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.GateError, "checkout is dirty"):
+                MODULE.verify_exact_clean_checkout(worktree, commit)
 
 
 if __name__ == "__main__":

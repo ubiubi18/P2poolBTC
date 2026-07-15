@@ -21,6 +21,7 @@ REPLAY_REJECT_REASON = "bad-pohw-replay-unprotected"
 EXPECTED_LATER_REJECTIONS = {
     "bad-txns-premature-spend-of-coinbase",
     "mandatory-script-verify-flag-failed",
+    "mempool-script-verify-flag-failed",
     "non-mandatory-script-verify-flag",
 }
 

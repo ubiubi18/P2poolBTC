@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v3",
+  "status": "experimental-uncommitted-candidate",
+  "authorizedForDeployment": false,
+  "authorizedForRelease": false,
+  "canonicalReferenceChangePermitted": false,
+  "forkProfile": {
+    "forkIdentifier": "idena-code-governance-day-local-testnet-v3",
+    "networkId": 10002,
+    "consensusChangesAllowed": true,
+    "consensusDeltaImplemented": true,
+    "consensusDeltaActive": false,
+    "consensusDelta": "Add a read-only epoch_block WASM host import backed by State.EpochBlock().",
+    "legacyCompatibleBeforeActivation": true,
+    "legacyCompatibilityReleaseId": "idena-mainnet-legacy-compat-2026.07.12-rc3",
+    "legacyCompatibilityLockSha256": "e83f01033b1f2d5be1d404ef4c340fc9fd5736bf6ffd6c16c754167632807b98",
+    "historicalGovernanceForkLockSha256": "e60053f5ccb649d9f73ab7cf697ccfb8604afc25d89d3b4d00bdde8d9ce12d4e"
+  },
+  "activation": {
+    "mechanism": "fixed-reviewed-source-feature-mask",
+    "sourcePath": "vm/wasm/vm.go",
+    "sourceStatus": "no-authorized-height-or-genesis",
+    "enabled": false,
+    "activationHeight": null,
+    "genesisCid": null,
+    "environmentOverridePermitted": false,
+    "requiredProposalRiskClass": "consensus",
+    "mainnetActivationPermitted": false,
+    "liveCanonicalReferenceChangesPermitted": false
+  },
+  "components": [
+    {
+      "name": "idena-go",
+      "repository": "https://github.com/ubiubi18/idena-go.git",
+      "baseCommit": "aafb254786ac3c82308550a7a82642019f077d6b",
+      "baseSourceCid": "bafyreih3yhu25jmihmtwtwimyav4f4nyxk6haqs3va4jlxqvwdaylqmfeq",
+      "baseSourceSha256": "fbc1e9aea5883b2769d90cc02bc2f1b8babc70425ba83895de15b0c185c18524",
+      "candidateCommit": null,
+      "candidateSourceStatus": "deterministic-patched-source-uncommitted",
+      "candidateSourceCid": "bafyreie44rcvg4zmmff772fnd76xcpctjwsjbjjslssuwploquhrdzejbq",
+      "candidateSourceSha256": "9ce44553732c614bffe8ad1ffd713c534da490a5325ca54b3d6e850f11e4890c",
+      "candidateSourceCarSha256": "18c7261088931dd28ba875e2218143b7cf8a406b062fb21da14e6eff21888cb6",
+      "candidateSourceFileCount": 549,
+      "candidateSourceTotalBytes": 7086742,
+      "artifactExclusionsPath": "compatibility/governance-fork-artifact-exclusions/idena-go.json",
+      "artifactExclusionsSha256": "36eb871349ab0a07e4e7244a401cfdbd1200c6458acc796fdf471dc856243519",
+      "patch": {
+        "path": "integrations/governance-epoch-anchor/idena-go.patch",
+        "cid": "bafkreihi4yf7yo3r6ln4issslhcr25p7ltg42bhqfta6oebhnjdgcdtx5u",
+        "sha256": "e8e60bfc3b71f2dbc44a5259c51d75ff5ccdcd04f02cc1e710276a46610e77ed",
+        "size": 5397
+      }
+    },
+    {
+      "name": "idena-wasm-binding",
+      "repository": "https://github.com/ubiubi18/idena-wasm-binding.git",
+      "baseCommit": "67ba065fdb02aa07cced2a43a261e481ca5b39d9",
+      "baseSourceCid": "bafyreih7jwjq42y4sy2zawuiwwqrgvj3fipz5s5q6ztn2kxv34d7opqfdm",
+      "baseSourceSha256": "ff4d930e6b1c9635905a88b5a113553b2a1f9ecbb0f666dd2af5df07f73e051b",
+      "candidateCommit": null,
+      "candidateSourceStatus": "deterministic-patched-source-uncommitted",
+      "candidateSourceCid": "bafyreiczd45rhfwh5nslheqvg47kljf7axyjtfogjopln4jssyc6z3qsn4",
+      "candidateSourceSha256": "591f3b1396c7eb64b39215373ea5a4bf05f09995c64b9eb6f1329605ecee126f",
+      "candidateSourceCarSha256": "c5b968081b97ae258fa6a82840f6a77273017acfde1f9bf8becedf6e20103e6e",
+      "candidateSourceFileCount": 27,
+      "candidateSourceTotalBytes": 129943,
+      "artifactExclusionsPath": "compatibility/governance-fork-artifact-exclusions/idena-wasm-binding.json",
+      "artifactExclusionsSha256": "6b78e389b3bd4f14855e340e25276762ac3e8b5acce672670611eb31072790f7",
+      "patch": {
+        "path": "integrations/governance-epoch-anchor/idena-wasm-binding.patch",
+        "cid": "bafkreicbguu7j2xucsnhtp6k3btvflq4lartorydniieio3l7ksxfieicu",
+        "sha256": "413529f4eaf4149a79bfcad86752ae1c58233747036a10443b6bfaa572a08815",
+        "size": 22584
+      }
+    },
+    {
+      "name": "idena-wasm",
+      "repository": "https://github.com/ubiubi18/idena-wasm.git",
+      "baseCommit": "7e1138959f9f96f59d20efa11f2c27b134067541",
+      "baseSourceCid": "bafyreihhyoq4lm4foioe5zeygdbhdcqzgvg77fpjr6bnp32v2jcfgrggqi",
+      "baseSourceSha256": "e7c3a1c5b385721c4ee49830c2718a19354dff95e98f82d7ef55d2445344c682",
+      "candidateCommit": null,
+      "candidateSourceStatus": "deterministic-patched-source-uncommitted",
+      "candidateSourceCid": "bafyreiapeg4d2javcsj5hmgk7cttyjhsjqn3y5dtjv3qk3hqcy25emqsrq",
+      "candidateSourceSha256": "0f21b83d24151493d3b0caf8a73c24f24c1bbc74734d77056cf01635d232128c",
+      "candidateSourceCarSha256": "b1e439a252de4b3dacc07826411a888e18844577907e543d3549500f8f34c2ec",
+      "candidateSourceFileCount": 31,
+      "candidateSourceTotalBytes": 266599,
+      "artifactExclusionsPath": "compatibility/governance-fork-artifact-exclusions/idena-wasm.json",
+      "artifactExclusionsSha256": "cce6dc503c44241a29e5831288b96284454f11d13e0ec55f681bc63e32f5e9c6",
+      "patch": {
+        "path": "integrations/governance-epoch-anchor/idena-wasm.patch",
+        "cid": "bafkreihojlrxcpa6azomfbxdb4suxwtlnbdrdwhxu2cuo7wwid273vdq5e",
+        "sha256": "ee4ae3713c1e065cc286e30f254bda6b684711d8f7a685477ed640f5fdd470e9",
+        "size": 20692
+      }
+    },
+    {
+      "name": "wasmer",
+      "repository": "https://github.com/ubiubi18/wasmer.git",
+      "commit": "1637dea03c0110f7dd800f2d9781193caf820074",
+      "sourceCid": "bafyreiasz7u34r5bqpojo7ydptf7jjfbd4sdeocy667czhhghmbqqpamp4",
+      "sourceSha256": "12cfe9be47a183dc977f037ccbf4a4a11f24323858f7be2c9ce63b03083c0c7f"
+    },
+    {
+      "name": "idena-sdk-js-lite",
+      "repository": "https://github.com/ubiubi18/idena-sdk-js-lite.git",
+      "commit": "cc6e69b9b87aa381398b7839050a4640f46eb5ba",
+      "sourceCid": "bafyreiezzbiyensz2ttoqahuf7du3e6otvpfgwlb6a4yke3j22ttghm22u",
+      "sourceSha256": "99c851823659d4e6e800f42fc74d93ce9d5e535961f039851369d6a7331d9ad5"
+    }
+  ],
+  "governanceSource": {
+    "repository": "https://github.com/ubiubi18/P2poolBTC.git",
+    "baseCommit": "f4a7538b8c89a3dcdb5159cc37674481dae38d11",
+    "candidateCommit": null,
+    "candidateSourceCid": null,
+    "scopeClassifier": "pohw-objective-risk-classifier-v2",
+    "scopeCountersDerivedFromVerifiedSourceTransitions": true
+  },
+  "hostAbi": {
+    "newImport": "env.epoch_block",
+    "value": "current epoch's authoritative validation boundary from State.EpochBlock()",
+    "sideEffects": "none",
+    "gasSchedule": "ReadGlobalStateGas",
+    "featureMask": 1,
+    "defaultFeatureMask": 0,
+    "disabledResolverBehavior": "import-omitted",
+    "nestedPropagation": "calls-and-deploys",
+    "abiVersion": 2,
+    "goApiV2Size64": 280,
+    "legacyVtableCallbackCount": 31,
+    "extensionPlacement": "after-legacy-go-api-prefix",
+    "contractImportCount": 13,
+    "contractExportCount": 63
+  },
+  "contractArtifact": {
+    "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
+    "cid": "bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq",
+    "sha256": "eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc",
+    "size": 289677,
+    "abiImports": 13,
+    "abiExports": 63,
+    "buildStatus": "local-non-attested"
+  },
+  "runtimeIntegrationTestOverlay": {
+    "basePath": "compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go",
+    "baseCid": "bafkreic5nitmd2uv2abkmmq3sbkta7attqlazesc6bbcnwmqouhdtyjj2m",
+    "baseSha256": "5d6a26c1ea95d002a6321b9055307c139c160c9242f04226d990750e39e129d3",
+    "baseSize": 13048,
+    "patchPath": "integrations/governance-epoch-anchor/idena-go-runtime-test.patch",
+    "patchCid": "bafkreigipvo445fmj2jpvvkwvzxwvf3cp2un2l2ncyimj46qvkuqbg66b4",
+    "patchSha256": "c87d5dce74ac4e92fad556ae6f6a97627ea8dd2f4d1610c4f3d0aaa9009bde0f",
+    "patchSize": 7908,
+    "targetPath": "vm/wasm/pohw_governance_contract_runtime_gate_test.go",
+    "testName": "TestGovernanceContractProductionRuntimeDeterminism",
+    "resultCid": "bafkreidanrhekcmtb4j5bfu36yoq477gsclnprx55ipyz7uped54fdumcu",
+    "resultSha256": "606c4e4509930f13d0969bf61d0e7fe69096d7c6fdea1f8cfe8f20fbc28e8c15",
+    "resultSize": 15953
+  },
+  "parameterSet": {
+    "cid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
+    "sha256": "788782538cbcb9137d4b9e9feb6b5ed368a7017067dda158c4383e68da73a02c",
+    "lockSha256": "9de72604c0693cf0b29c3be37c0559cf3f87ef91e936bb7ac3113f75082e144a"
+  },
+  "toolchains": {
+    "rust": "1.97.0",
+    "go": "1.26.5",
+    "node": "24.18.0",
+    "npm": "11.16.0",
+    "pnpm": "11.11.0",
+    "assemblyscript": "0.27.37",
+    "rustToolchainFileSha256": "174a086284d57e79557b62bc627e96257893375dfd37239e3c3e830ce2629b95",
+    "goVersionFileSha256": "14c5f0cdd5bd79e9272abe3b788316012cd6bcabc5e4980f27634b2413857758"
+  },
+  "localVerification": {
+    "toolchainGate": "passed-local-not-attested",
+    "contractEmulator": "passed-local-not-attested",
+    "productionIdenaWasmRuntime": "passed-local-not-attested",
+    "rustWorkspace": "passed-local-not-attested",
+    "independentRebuilds": 0,
+    "publicPinAttestations": 0,
+    "externalAuditAttestations": 0
+  },
+  "requiredFinalizationGates": {
+    "exactCandidateCommitsAndSourceCids": false,
+    "allNativeBindingPlatformsRebuilt": false,
+    "legacyReplayAndPreActivationDifferential": false,
+    "stateMigrationAndRollbackRehearsal": false,
+    "independentMatchingBuilders": false,
+    "independentPublicPinProviders": false,
+    "independentExternalAudits": false,
+    "deploymentReadinessVerifier": "pohw-governance deployment-readiness-verify"
+  },
+  "notes": [
+    "This candidate lock records exact base revisions, patch bytes, deterministic patched-source CIDs, and CAR digests; it is not a final ecosystem lock.",
+    "Null candidate commits remain a deliberate fail-closed blocker until each patch is reviewed and committed in its own repository. A source CID identifies the current bytes but does not create release authority.",
+    "No local actor may label its own duplicate builds, pin accounts, or audit reports as independent evidence.",
+    "No activation height or genesis is authorized. The fixed node activation source therefore returns no activation and the candidate remains inactive by construction on every network and height.",
+    "The historical governance-fork lock and its d894 artifact remain unchanged. Current Governance Day candidate and build-plan records use only the post-audit eba64f artifact."
+  ]
+}

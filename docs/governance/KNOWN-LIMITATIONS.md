@@ -2,30 +2,40 @@
 
 This implementation is safe only for local, no-value testing.
 
-- Governance Day schedule anchoring is not authenticated to the finalized
-  Idena validation lifecycle by the pinned WASM host ABI. The current first
-  caller can choose the epoch anchor. Deployment is blocked until an objective
-  anchor is supplied by a separately reviewed governance-fork capability or an
-  equally deterministic legacy-compatible mechanism.
-- `normal` risk-class proposals are rejected by the Governance Day contract.
-  No objective contract-verifiable classifier currently distinguishes normal
-  code changes from critical, migration, consensus, or recovery changes. A
-  maintainer-selected label would recreate privileged authority, so this path
-  intentionally fails closed.
-- Proposal scope counters are immutable and bounded by the locked parameter
-  profile, but they are currently proposer-declared and checked by independent
-  review/build workers. The pinned WASM host cannot retrieve and decode every
-  referenced source and patch block. A public-testnet candidate needs a
-  bounded Merkle proof or equivalent on-chain-verifiable scope commitment.
-- The local candidate requires the 25 IDNA critical bond at proposal creation.
-  Review rounds can still be opened before risk is known with the lower 10
-  IDNA floor; an underfunded critical round cannot create a proposal and must
-  expire before its refundable balance is claimed.
+- The legacy-compatible WASM host still cannot authenticate the Governance Day
+  schedule. A separate disabled fork candidate now supplies a read-only
+  `epoch_block` import backed by `State.EpochBlock()`. Its component patches now
+  have deterministic source CIDs and CAR digests that CI reconstructs from the
+  exact base revisions, but they still have no committed candidate revisions.
+  It cannot be activated until those commits plus replay, migration, gas, and
+  cross-repository compatibility gates pass.
+- The Governance Day contract now derives normal/critical risk and scope
+  counters from exact bounded base, candidate, and patch DAG-CBOR payloads.
+  This removes proposer-declared paths and counters, but each aggregate source
+  proof is capped at 600,000 canonical bytes. Larger ecosystem transitions must
+  be split without evading the critical-path classifier or use a separately
+  reviewed proof format.
+- The classifier is objective, not omniscient. It treats consensus, contracts,
+  compatibility, security, deployment, workflow, dependency, and migration
+  paths as critical and otherwise permits bounded normal changes. A dangerous
+  semantic change hidden in an apparently normal path can still be missed by
+  path classification, so independent review and build gates remain required.
+- The local candidate requires the 10 IDNA normal or 25 IDNA critical bond
+  derived from the verified source transition. An underfunded critical round
+  cannot create a proposal and must expire before its refundable balance is
+  claimed.
 - The IdenaAI integration is represented as a local, exact-base patch because
-  this task forbids publishing branches. Its tracked `.env.e2e` was removed
-  from the candidate rather than exempted, so deterministic source packaging
-  passes without relaxing the environment-file policy. The patch and source
+  this task forbids publishing branches. Its tracked `.env.e2e` is excluded
+  from the patch so deleted environment bytes cannot leak through diff
+  transport, then removed by one exact fail-closed harness policy before source
+  packaging. The environment-file policy is not relaxed. The patch and source
   CID are local candidate evidence, not a release or DAO authorization.
+- The MIT human/AI development policy is implemented and content-addressed, but
+  it is not a proof that reviewers, model families, builders, or pin providers
+  are organizationally independent. It also does not make AI output correct.
+  Prompt injection, correlated models, provider compromise, and dishonest
+  attestations remain residual risks handled only partially by isolation,
+  diversity, objective challenges, bonds, and the other acceptance gates.
 - Local rollback support verifies, stages, inspects, and simulates a return to
   last-known-good software. It does not install binaries, replace files, stop
   processes, or claim that an on-chain revert works while the chain is stuck.
@@ -46,11 +56,12 @@ This implementation is safe only for local, no-value testing.
   requires a separately reviewed contract migration proposal. There is no
   upgradeable admin proxy.
 - Evidence is registered permissionlessly in a fixed bonded review round for
-  one parent/candidate/patch tuple. Anyone may freeze the round after its
-  deadline, and roots are derived from all registered CIDs; proposal creation
-  cannot curate a favorable subset. Both the Rust lifecycle and WASM contract
-  recompute bounded raw evidence CIDs for false agent test, builder test, and
-  availability claims. The WASM parser deliberately accepts only
+  one parent/candidate/patch/scope tuple. The V2 round ID and every builder
+  attestation bind the exact verified scope CID. Anyone may freeze the round
+  after its deadline, and roots are derived from all registered CIDs; proposal
+  creation cannot curate a favorable subset. Both the Rust lifecycle and WASM
+  contract recompute bounded raw evidence CIDs for false agent test, builder
+  test, and availability claims. The WASM parser deliberately accepts only
   `{"passed":false}` and `{"available":false}`. General malformed-content and
   transient IPFS outage proofs are not fully expressible on-chain. The host
   cannot fetch IPFS, and global unavailability has no simple trustless proof.
@@ -139,6 +150,12 @@ This implementation is safe only for local, no-value testing.
 - Desktop renderer output can be deterministic, but signed/notarized installers
   may retain platform-specific nondeterminism and centralized signing
   constraints.
+- `BuildAttestationV1` currently fails closed by requiring every builder to
+  cover the candidate manifest's complete artifact inventory. This prevents
+  favorable-subset attestations but cannot yet express separately verified
+  per-platform artifact groups. Candidates whose full inventory cannot be
+  reproduced by every required builder remain ineligible until that schema and
+  gate model is implemented and audited.
 - The existing desktop updater remains present for rollback. The experimental
   DAO path verifies contract-executed proposal state, canonical artifact pins,
   build roots, CIDs, SHA-256 digests, and a local anti-replay high-water mark,

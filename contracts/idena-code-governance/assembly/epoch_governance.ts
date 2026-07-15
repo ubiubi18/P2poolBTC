@@ -7,6 +7,7 @@ import {
   callerHex,
   currentBlock,
   currentEpoch,
+  currentEpochBlock,
   emitVersionedEvent,
   getString,
   hasKey,
@@ -24,6 +25,7 @@ import { settledGlobalWeightForEpoch } from "./stake_weight";
 import {
   MetricsRecord,
   Proposal,
+  STATE_ACCEPTED_PENDING_CHALLENGE,
   STATE_ACCEPTED_PENDING_EXECUTION,
   STATE_ACCEPTED_PENDING_GRACE,
   STATE_CANCELLED_BEFORE_CUTOFF,
@@ -47,7 +49,9 @@ const PROFILE_KEY = "epoch-governance:enabled";
 const CANONICAL_CID_KEY = "governance:canonical-cid";
 const METRICS_ROOT_KEY = "governance:metrics-root";
 const METRICS_EPOCH_KEY = "governance:metrics-epoch";
-const CHAIN_ID = "idena-mainnet";
+// Replay domain for the explicitly inactive governance-day fork profile.
+// This contract build is not valid for the legacy Idena mainnet profile.
+const CHAIN_ID = "idena-code-governance-day-local-testnet-v2:10002";
 const MAX_EPOCH_PROPOSALS: u32 = 64;
 const PROPOSAL_CUTOFF_OFFSET: u64 = 40;
 const COMMIT_START_OFFSET: u64 = 80;
@@ -74,18 +78,32 @@ export function initializeEpochGovernanceProfile(): void {
 export function anchorGovernanceEpoch(): usize {
   ensureInitialized();
   requireNoPayment();
+  ensureCurrentGovernanceEpochAnchored();
   const epoch = currentEpoch();
-  const key = epochAnchorKey(epoch);
-  if (!hasKey(key)) {
-    const anchor = currentBlock();
-    const settledWeight = settledGlobalWeightForEpoch(epoch);
-    setString(key, anchor.toString());
-    setString(epochTotalWeightKey(epoch), settledWeight);
-    setString(epochMetricsRootKey(epoch), getString(METRICS_ROOT_KEY));
-    setString(epochMetricsEpochKey(epoch), getString(METRICS_EPOCH_KEY));
-    emitVersionedEvent("GovernanceEpochAnchoredV1", [epoch.toString(), anchor.toString()]);
-  }
+  const anchor = currentEpochBlock();
+  assert(anchor <= currentBlock(), "chain epoch boundary is in the future");
+  assert(epoch == 0 || anchor > 0, "chain epoch boundary is unavailable");
+  assert(parseU64(getString(epochAnchorKey(epoch))) == anchor, "stored governance epoch boundary disagrees with chain state");
   return governanceScheduleJson(epoch);
+}
+
+export function ensureCurrentGovernanceEpochAnchored(): void {
+  if (!isEpochGovernanceEnabled()) return;
+  const epoch = currentEpoch();
+  const anchor = currentEpochBlock();
+  assert(anchor <= currentBlock(), "chain epoch boundary is in the future");
+  assert(epoch == 0 || anchor > 0, "chain epoch boundary is unavailable");
+  const key = epochAnchorKey(epoch);
+  if (hasKey(key)) {
+    assert(parseU64(getString(key)) == anchor, "stored governance epoch boundary disagrees with chain state");
+    return;
+  }
+  const settledWeight = settledGlobalWeightForEpoch(epoch);
+  setString(key, anchor.toString());
+  setString(epochTotalWeightKey(epoch), settledWeight);
+  setString(epochMetricsRootKey(epoch), getString(METRICS_ROOT_KEY));
+  setString(epochMetricsEpochKey(epoch), getString(METRICS_EPOCH_KEY));
+  emitVersionedEvent("GovernanceEpochAnchoredV1", [epoch.toString(), anchor.toString()]);
 }
 
 export function registerEpochProposal(
@@ -122,6 +140,7 @@ export function cancelProposalBeforeCutoff(proposalIdPtr: usize): usize {
   const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_CANCELLED_BEFORE_CUTOFF;
+  releaseProposalCandidateLock(proposal);
   saveProposal(proposal);
   addTreasury(fee);
   emitVersionedEvent("EpochProposalCancelledV1", [epoch.toString(), proposal.id, fee.toString()]);
@@ -152,7 +171,7 @@ export function freezeEpochProposalSet(): usize {
   for (let i: u32 = 0; i < submittedCount; i++) {
     const id = getString(epochProposalKey(epoch, i));
     const proposal = loadProposal(id);
-    if (proposal.state == STATE_CANCELLED_BEFORE_CUTOFF) continue;
+    if (proposal.state == STATE_CANCELLED_BEFORE_CUTOFF || proposal.state == STATE_EXPIRED) continue;
     if (proposal.state == STATE_DRAFT) {
       settleIncompleteProposal(proposal);
       continue;
@@ -274,11 +293,28 @@ export function revealEpochBallot(choicesPtr: usize, noncePtr: usize, saltPtr: u
 }
 
 export function finalizeEpochVoting(): usize {
+  return finalizeEpoch(currentEpoch());
+}
+
+export function finalizeEpochVotingForEpoch(epochPtr: usize): usize {
   ensureEpochMode();
   requireNoPayment();
-  const epoch = currentEpoch();
+  const epoch = parseU16(argumentString(epochPtr, 5));
+  assert(epoch <= currentEpoch(), "cannot finalize a future governance epoch");
+  return finalizeEpoch(epoch);
+}
+
+function finalizeEpoch(epoch: u16): usize {
+  ensureEpochMode();
+  requireNoPayment();
   assert(currentBlock() >= revealEndBlock(epoch), "reveal window has not ended");
   assert(!hasKey(epochFinalizedKey(epoch)), "epoch voting is already finalized");
+  if (!hasKey(epochFrozenRootKey(epoch))) {
+    recoverUnfrozenEpoch(epoch);
+    setString(epochFinalizedKey(epoch), currentBlock().toString());
+    emitVersionedEvent("GovernanceEpochRecoveredV1", [epoch.toString(), currentBlock().toString()]);
+    return epochProposalSetJson(epoch);
+  }
   const count = storedU32(epochFrozenCountKey(epoch));
   for (let i: u32 = 0; i < count; i++) {
     const proposal = loadProposal(getString(epochFrozenProposalKey(epoch, i)));
@@ -334,11 +370,32 @@ export function enterExecutionReadyState(proposalIdPtr: usize): usize {
   const proposal = loadProposal(validHash(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_ACCEPTED_PENDING_GRACE, "proposal is not in grace");
   assert(currentBlock() >= proposal.challengeEnd, "grace period has not elapsed");
+  assert(
+    currentBlock() <= checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS),
+    "proposal execution window has elapsed",
+  );
   proposal.state = STATE_ACCEPTED_PENDING_EXECUTION;
-  proposal.executeAfter = currentBlock();
   saveProposal(proposal);
   emitVersionedEvent("ProposalExecutionReadyV1", [proposal.id, proposal.executeAfter.toString()]);
   return epochProposalStateJson(proposal);
+}
+
+function recoverUnfrozenEpoch(epoch: u16): void {
+  const emptyRoot = proposalSetRoot(epoch, new Array<string>());
+  setString(epochFrozenRootKey(epoch), emptyRoot);
+  setString(epochFrozenCountKey(epoch), "0");
+  setString(epochFrozenAtKey(epoch), currentBlock().toString());
+  const submittedCount = storedU32(epochProposalCountKey(epoch));
+  for (let i: u32 = 0; i < submittedCount; i++) {
+    const proposal = loadProposal(getString(epochProposalKey(epoch, i)));
+    if (proposal.state == STATE_CANCELLED_BEFORE_CUTOFF || proposal.state == STATE_EXPIRED) continue;
+    assert(
+      proposal.state == STATE_DRAFT || proposal.state == STATE_REVIEW_OPEN || proposal.state == STATE_REVERT_PROPOSED,
+      "unfrozen epoch contains an unrecoverable proposal state",
+    );
+    settleIncompleteProposal(proposal);
+    storeEpochDecisionRecord(proposal, epoch, currentBlock());
+  }
 }
 
 export function createRevertProposal(proposalIdPtr: usize, executionIndexPtr: usize): usize {
@@ -572,22 +629,23 @@ export function epochAttestationGatesPass(proposal: Proposal): bool {
   const minimumBuilders: u32 = proposal.isCritical() ? 3 : 2;
   const minimumBuilderPlatforms: u32 = proposal.isCritical() ? 2 : 1;
   const minimumAvailabilityProviders: u32 = proposal.isCritical() ? 3 : 2;
+  const criticalFindingOwnerThreshold: u32 = proposal.isCritical() ? 3 : 2;
   const minimumExpiryValue = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
   const grace = proposal.isCritical() ? CRITICAL_GRACE_BLOCKS : NORMAL_GRACE_BLOCKS;
-  const requiredAvailabilityUntil = checkedBlockAdd(
-    checkedBlockAdd(currentBlock(), grace),
-    EXECUTION_WINDOW_BLOCKS,
-  );
+  const dynamicExecutionStart = checkedBlockAdd(currentBlock(), grace);
+  const availabilityStart = proposal.executeAfter > dynamicExecutionStart
+    ? proposal.executeAfter
+    : dynamicExecutionStart;
+  const requiredAvailabilityUntil = checkedBlockAdd(availabilityStart, EXECUTION_WINDOW_BLOCKS);
   return proposal.agentSubmittedCount == proposal.agentLeafCount
     && proposal.buildSubmittedCount == proposal.buildLeafCount
     && proposal.availabilitySubmittedCount == proposal.availabilityLeafCount
     && proposal.agentCount >= minimumAgents
     && proposal.agentModelCount >= minimumFamilies
     && proposal.agentOwnerCount >= (proposal.isCritical() ? 3 : 2)
-    && (proposal.unresolvedCriticalCount == 0 || proposal.waiverCid.length > 0)
+    && (proposal.unresolvedCriticalCount < criticalFindingOwnerThreshold || proposal.waiverCid.length > 0)
     && proposal.builderOwnerCount >= minimumBuilders
     && proposal.builderPlatformCount >= minimumBuilderPlatforms
-    && proposal.builderConflictCount == 0
     && proposal.artifactDigest.length == 64
     && proposal.availabilityOwnerCount >= minimumAvailabilityProviders
     && minimumExpiryValue.length > 0
@@ -598,6 +656,7 @@ function settleNoQuorum(proposal: Proposal): void {
   const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_NO_QUORUM;
+  releaseProposalCandidateLock(proposal);
   saveProposal(proposal);
   addTreasury(fee);
   emitVersionedEvent("ProposalNoQuorumV1", [proposal.id, proposal.refundableBond, fee.toString()]);
@@ -607,6 +666,7 @@ function settleIncompleteProposal(proposal: Proposal): void {
   const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_EXPIRED;
+  releaseProposalCandidateLock(proposal);
   saveProposal(proposal);
   addTreasury(fee);
 }
@@ -616,6 +676,8 @@ function settleEpochRejected(proposal: Proposal): void {
   const treasury = proposal.bondAmount() - half;
   proposal.refundableBond = "0";
   proposal.state = STATE_REJECTED;
+  releaseProposalCandidateLock(proposal);
+  releaseConfiscatedProposalReservation(proposal);
   saveProposal(proposal);
   if (!half.isZero()) burn(half);
   addTreasury(treasury);
@@ -626,8 +688,26 @@ function settleEpochStale(proposal: Proposal): void {
   const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_STALE;
+  releaseProposalCandidateLock(proposal);
   saveProposal(proposal);
   addTreasury(fee);
+}
+
+function releaseProposalCandidateLock(proposal: Proposal): void {
+  const key = "review-candidate:" + hashText(
+    "IDENA_GOV_REVIEW_CANDIDATE_V1\x00" + proposal.parentCid + "|" + proposal.candidateCid + "|" + proposal.patchCid,
+  );
+  if (getString(key) == proposal.reviewRoundId) removeKey(key);
+}
+
+function releaseConfiscatedProposalReservation(proposal: Proposal): void {
+  const consumedKey = "slash-reservation-consumed:proposal:" + proposal.id;
+  if (hasKey(consumedKey)) return;
+  const reservationKey = "stake:slash-reservations:" + proposal.proposer;
+  const reservations = storedU32(reservationKey);
+  assert(reservations > 0, "proposal slash reservation is missing");
+  setString(reservationKey, (reservations - 1).toString());
+  setString(consumedKey, "1");
 }
 
 function parseAndValidateChoices(epoch: u16, encoding: string): string[] {

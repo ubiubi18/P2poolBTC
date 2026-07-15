@@ -59,8 +59,9 @@ opens a bonded round with the canonical DAG-CBOR bytes for one exact
 parent/candidate/patch tuple and its complete pinset. The contract recomputes
 the four CIDs and commits to every candidate repository source, candidate
 artifact, and toolchain lock. Build evidence must repeat that complete source
-set, use the exact candidate toolchains, and contain only candidate-authorized
-artifacts. The opening pinset must cover the candidate, aggregate and
+and artifact set and use the exact candidate toolchains. Omitting an authorized
+candidate artifact is rejected; the per-artifact `core` flag affects only the
+reproducible digest group, not coverage. The opening pinset must cover the candidate, aggregate and
 repository patches, parameter set, candidate sources and artifacts, and all
 proposal metadata. Agent and build submissions then add their attestation,
 policy, result, finding, toolchain, SBOM, and artifact CIDs to the final
@@ -68,8 +69,10 @@ availability requirement. At freeze, only providers covering that complete
 final set and their own probe-result CID count; an early partial attestation
 remains auditable but contributes no availability weight. Duplicate provider
 IDs and duplicate eligible owners do not create independent availability
-weight. Any eligible
-reviewer, builder, or availability operator may submit bonded evidence during
+weight. The availability phase cannot be frozen until the risk-specific number
+of complete independent providers is present, so an arbitrary caller cannot
+close the phase early with a single partial or short-lived attestation. Any
+eligible reviewer, builder, or availability operator may submit bonded evidence during
 the fixed review window. Anyone may freeze the round; the contract derives
 sorted roots from the complete registered sets, and proposal creation must use
 that exact frozen round. Every leaf is canonical-payload verified when it is
@@ -81,9 +84,9 @@ cannot prove global IPFS unavailability or adjudicate subjective findings.
 
 Identity-metrics migration roots require three distinct eligible operator
 identities to attest to the exact snapshot CID, digest, replay commitment,
-boundary, source block, and indexer implementation. A first bad descriptor
-cannot reserve a root. If two conflicting descriptors each reach quorum, the
-root is marked conflicted and cannot be used by a proposal.
+boundary, source block, and indexer implementation. One dissenting operator
+cannot reserve a root. The first descriptor to reach quorum becomes immutable;
+later attestations for a conflicting descriptor are rejected.
 
 Stake snapshots use immutable deposit lots and finalized-withdrawal
 checkpoints. Aggregate weight for next-epoch deposits is scheduled at deposit

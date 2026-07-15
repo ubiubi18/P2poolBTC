@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "releaseId": "pohw-governance-day-local-candidate-2026-07-15-v1",
+  "releaseId": "pohw-governance-day-local-candidate-2026-07-15-v2",
   "status": "experimental-local-only",
   "authorizedForDeployment": false,
   "authorizedForRelease": false,
   "canonicalReferenceChangePermitted": false,
   "source": {
     "repository": "https://github.com/ubiubi18/P2poolBTC.git",
-    "baseCommit": "182f58526078c1b9ffd015dd6955625c10d438e5",
+    "baseCommit": "f4a7538b8c89a3dcdb5159cc37674481dae38d11",
     "candidateSourceCid": null,
     "candidateSourceStatus": "uncommitted-local-worktree",
     "reason": "A source CID that includes this lock cannot recursively authorize itself. Package the final reviewed tree into an external EcosystemManifestV1 candidate instead."
@@ -15,10 +15,12 @@
   "governanceProfile": {
     "mode": "immutable-epoch-governance-day",
     "legacyPerProposalVotingEnabled": false,
-    "normalRiskEnabled": false,
-    "normalRiskBlocker": "missing-objective-contract-verifiable-risk-classifier",
-    "epochAnchorAuthenticated": false,
-    "epochAnchorBlocker": "pinned-wasm-host-does-not-expose-finalized-validation-boundary"
+    "normalRiskEnabled": true,
+    "normalRiskClassifier": "pohw-objective-risk-classifier-v2",
+    "scopeCountersDerivedFromVerifiedSourceTransitions": true,
+    "epochAnchorAuthenticated": true,
+    "epochAnchorHostImport": "env.epoch_block",
+    "epochAnchorRequiresSeparateForkProfile": "compatibility/governance-day-fork-candidate-lock.json"
   },
   "parameterSet": {
     "path": "compatibility/governance-day-parameters.json",
@@ -28,19 +30,20 @@
   },
   "contractArtifact": {
     "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
-    "cid": "bafkreif2se5hppplvl2bhv3eszawodfkbnmfl7eq2luotc2rf5x45qxufi",
-    "sha256": "ba913a77bdebaaf413d7649641670caa0b5855fc90d2e8e98b512f6fcec2f42a",
-    "size": 257979,
-    "abiExports": 62,
+    "cid": "bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq",
+    "sha256": "eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc",
+    "size": 289677,
+    "abiImports": 13,
+    "abiExports": 63,
     "buildStatus": "local-non-attested"
   },
   "idenaAiIntegration": {
     "baseCommit": "30fe9651dd53a39cb7c465a2332c46b455c42afd",
     "patchPath": "integrations/idena-ai-governance-day.patch",
-    "patchSha256": "dbd28607c03b2a65001b0885407b1eb68ce98ac1a9a79586031b1a2258146850",
-    "patchSize": 114247,
-    "canonicalSourceCid": "bafyreiedew34otx523a3axnbzccu23p62bctlrfptc4bk2y2ghjg27w54y",
-    "sourceTreeSha256": "8325b7c74efdd6c1b05da1c8854d6dfed04535c4af98b8156b1a31d26d7edde6",
+    "patchSha256": "d2e8790a19937319ada4652ecfc0de09a0fcbb24a76fd07fe18704f4905a696f",
+    "patchSize": 116463,
+    "canonicalSourceCid": "bafyreidis7m3osfsfprkhw4upsx7xgcsq3k3blnupq7utfqhlfvdrxv5ju",
+    "sourceTreeSha256": "6897d9b748b22be2a3db947caffb985286d5b0adb47c3f499607596a38debd4d",
     "sourcePackagingBlocker": null
   },
   "executionPolicy": {
@@ -52,7 +55,8 @@
   },
   "notes": [
     "This file is an inventory of one local candidate build, not DAO authorization.",
-    "The existing legacy compatibility lock and governance-fork lock remain unchanged.",
-    "Independent clean-room rebuilds, public IPFS replication, authenticated epoch anchoring, and external audit are still required."
+    "The legacy compatibility lock remains unchanged; the separate experimental governance-fork prototype tracks the hardened contract artifact.",
+    "Authenticated epoch anchoring and objective scope classification pass local production-runtime tests in the separate fork candidate.",
+    "Independent clean-room rebuilds, public IPFS replication attestations, and external audits are still required and cannot be self-issued by this worktree."
   ]
 }

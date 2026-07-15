@@ -51,6 +51,29 @@ if [[ -n "${POHW_EXPLORER_POHW_CORE_MANIFEST:-}" ]]; then
   args+=(--explorer-pohw-core-manifest "$POHW_EXPLORER_POHW_CORE_MANIFEST")
 fi
 
+case "${POHW_EXPLORER_FORK_ADDRESS_INDEX:-false}" in
+  true)
+    args+=(--explorer-fork-address-index)
+    ;;
+  false)
+    ;;
+  *)
+    echo "POHW_EXPLORER_FORK_ADDRESS_INDEX must be true or false." >&2
+    exit 1
+    ;;
+esac
+
+for setting in \
+  POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS \
+  POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS \
+  POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS \
+  POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES; do
+  if [[ -n "${!setting:-}" ]]; then
+    option="--$(tr '[:upper:]_' '[:lower:]-' <<< "${setting#POHW_}")"
+    args+=("$option" "${!setting}")
+  fi
+done
+
 if [[ -n "${POHW_EXPLORER_BITCOIN_INDEX_URL:-}" ]]; then
   args+=(--explorer-bitcoin-index-url "$POHW_EXPLORER_BITCOIN_INDEX_URL")
 fi

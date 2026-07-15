@@ -165,6 +165,13 @@ pub enum SharechainReplayError {
     UnknownShareBitcoinWorkTemplate(String),
     #[error("share header prefix does not match accepted Bitcoin work template {0}")]
     ShareBitcoinWorkTemplateMismatch(String),
+    #[error(
+        "sharechain already has root {existing_share_hash}; cannot admit distinct root {candidate_share_hash}"
+    )]
+    AdditionalSharechainRoot {
+        existing_share_hash: String,
+        candidate_share_hash: String,
+    },
     #[error("conflicting share for hash {0}")]
     ConflictingShare(String),
     #[error("Bitcoin work hash {work_hash} is already credited to share {existing_share_hash}")]
@@ -961,6 +968,9 @@ impl SharechainReplayState {
             return Err(SharechainReplayError::TemplateAnchorBeforeRegistration);
         }
 
+        let parent_hash = share.parent_share_hash.to_ascii_lowercase();
+        self.validate_unique_sharechain_root(&share.share_hash(), &parent_hash)?;
+
         if !policy.bootstrap_limits_active(template.bitcoin_header_version()?) {
             return Ok(());
         }
@@ -986,7 +996,6 @@ impl SharechainReplayState {
             }
         }
 
-        let parent_hash = share.parent_share_hash.to_ascii_lowercase();
         if parent_hash == ZERO_SHARE_PARENT_HASH {
             return Ok(());
         }
@@ -1005,6 +1014,31 @@ impl SharechainReplayState {
             if anchor.height <= parent_anchor.height {
                 return Err(SharechainReplayError::NonIncreasingBootstrapAnchor);
             }
+        }
+        Ok(())
+    }
+
+    fn validate_unique_sharechain_root(
+        &self,
+        candidate_share_hash: &str,
+        parent_share_hash: &str,
+    ) -> Result<(), SharechainReplayError> {
+        if !parent_share_hash.eq_ignore_ascii_case(ZERO_SHARE_PARENT_HASH) {
+            return Ok(());
+        }
+
+        let candidate_share_hash = candidate_share_hash.to_ascii_lowercase();
+        if let Some(existing_share_hash) = self.shares.iter().find_map(|(share_hash, node)| {
+            (node
+                .parent_share_hash
+                .eq_ignore_ascii_case(ZERO_SHARE_PARENT_HASH)
+                && !share_hash.eq_ignore_ascii_case(&candidate_share_hash))
+            .then(|| share_hash.to_ascii_lowercase())
+        }) {
+            return Err(SharechainReplayError::AdditionalSharechainRoot {
+                existing_share_hash,
+                candidate_share_hash,
+            });
         }
         Ok(())
     }
@@ -1125,6 +1159,8 @@ impl SharechainReplayState {
         }
 
         let parent_share_hash = share.parent_share_hash.to_ascii_lowercase();
+        self.validate_unique_sharechain_root(&share_hash, &parent_share_hash)?;
+
         self.shares.insert(
             share_hash.clone(),
             ShareNode {
@@ -1314,6 +1350,7 @@ impl SharechainReplayState {
     pub fn rebuild_derived_share_state(&mut self) -> Result<(), SharechainReplayError> {
         self.share_hash_by_work_hash.clear();
         for (share_hash, node) in &self.shares {
+            self.validate_unique_sharechain_root(share_hash, &node.parent_share_hash)?;
             let work_hash = node.share.work_hash.to_ascii_lowercase();
             if let Some(existing_share_hash) = self
                 .share_hash_by_work_hash
@@ -1706,8 +1743,16 @@ mod tests {
     }
 
     fn test_bitcoin_header_hex_with_merkle(nonce: u32, merkle_byte: u8) -> String {
+        test_bitcoin_header_hex_with_version_and_merkle(nonce, 1, merkle_byte)
+    }
+
+    fn test_bitcoin_header_hex_with_version_and_merkle(
+        nonce: u32,
+        version: u32,
+        merkle_byte: u8,
+    ) -> String {
         let mut header = [0u8; 80];
-        header[0..4].copy_from_slice(&1u32.to_le_bytes());
+        header[0..4].copy_from_slice(&version.to_le_bytes());
         header[36..68].copy_from_slice(&[merkle_byte; 32]);
         header[68..72].copy_from_slice(&1_231_006_505u32.to_le_bytes());
         header[72..76].copy_from_slice(&0x207f_ffffu32.to_le_bytes());
@@ -1764,9 +1809,30 @@ mod tests {
         start_nonce: u32,
         merkle_byte: u8,
     ) -> Share {
+        mined_test_share_from_nonce_with_version(
+            miner_id,
+            target,
+            proof_root,
+            parent_hash,
+            start_nonce,
+            merkle_byte,
+            1,
+        )
+    }
+
+    fn mined_test_share_from_nonce_with_version(
+        miner_id: &str,
+        target: &str,
+        proof_root: &str,
+        parent_hash: &str,
+        start_nonce: u32,
+        merkle_byte: u8,
+        version: u32,
+    ) -> Share {
         for nonce in start_nonce..start_nonce.saturating_add(10_000) {
             let mut share = test_share(miner_id, target, nonce, proof_root, parent_hash);
-            share.bitcoin_header_hex = test_bitcoin_header_hex_with_merkle(nonce, merkle_byte);
+            share.bitcoin_header_hex =
+                test_bitcoin_header_hex_with_version_and_merkle(nonce, version, merkle_byte);
             share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
             share.work_hash = share.recomputed_work_hash().unwrap();
             if share.work_hash <= target.to_ascii_lowercase() {
@@ -1886,6 +1952,75 @@ mod tests {
             .unwrap();
         state.accept_bitcoin_work_template(&template).unwrap();
         state.apply_message(&message).unwrap();
+    }
+
+    fn assert_distinct_second_root_rejected(version: u32) {
+        let (legacy, mining_keypair) = signed_registration();
+        let registration = anchored_registration(legacy, &mining_keypair, 13, 1, 100);
+        let policy = anchor_policy();
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+
+        let mut first = mined_test_share_from_nonce_with_version(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"81".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+            1,
+            0x71,
+            version,
+        );
+        let first_template =
+            signed_anchored_work_template(&mut first, &mining_keypair, &policy, 101, 0x51);
+        apply_anchored_template(&mut state, first_template, &policy);
+        let first_message = SharechainMessage::Share(first.clone());
+        state
+            .validate_idena_anchor_policy(&first_message, &policy)
+            .unwrap();
+        assert_eq!(
+            state.apply_message(&first_message).unwrap(),
+            ApplyOutcome::Applied
+        );
+        let first_hash = first.share_hash();
+        assert_eq!(state.best_share_tip(), Some(first_hash.as_str()));
+
+        let mut second = mined_test_share_from_nonce_with_version(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"82".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+            2,
+            0x72,
+            version,
+        );
+        let second_template =
+            signed_anchored_work_template(&mut second, &mining_keypair, &policy, 102, 0x52);
+        apply_anchored_template(&mut state, second_template, &policy);
+        let second_hash = second.share_hash();
+        let second_message = SharechainMessage::Share(second);
+
+        let admission_err = state
+            .validate_idena_anchor_policy(&second_message, &policy)
+            .unwrap_err();
+        assert!(matches!(
+            admission_err,
+            SharechainReplayError::AdditionalSharechainRoot {
+                existing_share_hash,
+                candidate_share_hash,
+            } if existing_share_hash == first_hash && candidate_share_hash == second_hash
+        ));
+        let replay_err = state.apply_message(&second_message).unwrap_err();
+        assert!(matches!(
+            replay_err,
+            SharechainReplayError::AdditionalSharechainRoot {
+                existing_share_hash,
+                candidate_share_hash,
+            } if existing_share_hash == first_hash && candidate_share_hash == second_hash
+        ));
+        assert_eq!(state.summary().stored_share_count, 1);
+        assert_eq!(state.best_share_tip(), Some(first_hash.as_str()));
     }
 
     fn signed_snapshot_vote(miner_id: &str, keypair: &Keypair) -> SnapshotVote {
@@ -2209,42 +2344,74 @@ mod tests {
             .unwrap();
         let checkpoint_root_hash = checkpoint_root.share_hash();
 
-        let mut competing_root = mined_test_share_from_nonce(
+        let mut checkpoint_branch = mined_test_share_from_nonce(
             "miner-a",
             MAX_SHARE_TARGET_HEX,
             &"62".repeat(32),
-            ZERO_SHARE_PARENT_HASH,
+            &checkpoint_root_hash,
             2,
             0x62,
         );
-        let template =
-            signed_anchored_work_template(&mut competing_root, &mining_keypair, &policy, 102, 0x42);
+        let template = signed_anchored_work_template(
+            &mut checkpoint_branch,
+            &mining_keypair,
+            &policy,
+            102,
+            0x42,
+        );
         apply_anchored_template(&mut state, template, &policy);
         state
             .validate_idena_anchor_policy(
-                &SharechainMessage::Share(competing_root.clone()),
+                &SharechainMessage::Share(checkpoint_branch.clone()),
                 &policy,
             )
             .unwrap();
         state
-            .apply_message(&SharechainMessage::Share(competing_root.clone()))
+            .apply_message(&SharechainMessage::Share(checkpoint_branch.clone()))
             .unwrap();
-        let competing_root_hash = competing_root.share_hash();
+        let checkpoint_branch_hash = checkpoint_branch.share_hash();
+
+        let mut competing_branch = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"63".repeat(32),
+            &checkpoint_root_hash,
+            3,
+            0x63,
+        );
+        let template = signed_anchored_work_template(
+            &mut competing_branch,
+            &mining_keypair,
+            &policy,
+            103,
+            0x43,
+        );
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(competing_branch.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(competing_branch.clone()))
+            .unwrap();
+        let competing_branch_hash = competing_branch.share_hash();
 
         let mut competing_child = mined_test_share_from_nonce(
             "miner-a",
             MAX_SHARE_TARGET_HEX,
-            &"63".repeat(32),
-            &competing_root_hash,
-            3,
-            0x63,
+            &"64".repeat(32),
+            &competing_branch_hash,
+            4,
+            0x64,
         );
         let template = signed_anchored_work_template(
             &mut competing_child,
             &mining_keypair,
             &policy,
-            103,
-            0x43,
+            104,
+            0x44,
         );
         apply_anchored_template(&mut state, template, &policy);
         state
@@ -2259,12 +2426,12 @@ mod tests {
         let competing_child_hash = competing_child.share_hash();
         assert_eq!(state.best_share_tip(), Some(competing_child_hash.as_str()));
 
-        let checkpoint_summary = state.share_summary(&checkpoint_root_hash).unwrap();
+        let checkpoint_summary = state.share_summary(&checkpoint_branch_hash).unwrap();
         let checkpoint = SharechainCheckpointAnchorV1 {
             contract_address: policy.registry_contract_address.clone(),
             experiment_id: policy.experiment_id.clone(),
             round: 1,
-            share_tip_hash: checkpoint_root_hash.clone(),
+            share_tip_hash: checkpoint_branch_hash.clone(),
             share_height: checkpoint_summary.height,
             cumulative_score: checkpoint_summary.cumulative_score.unwrap(),
             parent_checkpoint_tip: ZERO_SHARE_PARENT_HASH.to_string(),
@@ -2282,22 +2449,25 @@ mod tests {
             .validate_idena_anchor_policy(&checkpoint_message, &policy)
             .unwrap();
         state.apply_message(&checkpoint_message).unwrap();
-        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+        assert_eq!(
+            state.best_share_tip(),
+            Some(checkpoint_branch_hash.as_str())
+        );
 
         let mut fabricated_extension = mined_test_share_from_nonce(
             "miner-a",
             MAX_SHARE_TARGET_HEX,
-            &"64".repeat(32),
+            &"65".repeat(32),
             &competing_child_hash,
-            4,
-            0x64,
+            5,
+            0x65,
         );
         let template = signed_anchored_work_template(
             &mut fabricated_extension,
             &mining_keypair,
             &policy,
-            104,
-            0x44,
+            105,
+            0x45,
         );
         apply_anchored_template(&mut state, template, &policy);
         state
@@ -2309,22 +2479,25 @@ mod tests {
         state
             .apply_message(&SharechainMessage::Share(fabricated_extension))
             .unwrap();
-        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+        assert_eq!(
+            state.best_share_tip(),
+            Some(checkpoint_branch_hash.as_str())
+        );
 
         let mut checkpoint_child = mined_test_share_from_nonce(
             "miner-a",
             MAX_SHARE_TARGET_HEX,
-            &"65".repeat(32),
-            &checkpoint_root_hash,
-            5,
-            0x65,
+            &"66".repeat(32),
+            &checkpoint_branch_hash,
+            6,
+            0x66,
         );
         let template = signed_anchored_work_template(
             &mut checkpoint_child,
             &mining_keypair,
             &policy,
-            105,
-            0x45,
+            106,
+            0x46,
         );
         apply_anchored_template(&mut state, template, &policy);
         state
@@ -2337,7 +2510,10 @@ mod tests {
             .apply_message(&SharechainMessage::Share(checkpoint_child.clone()))
             .unwrap();
         let checkpoint_child_hash = checkpoint_child.share_hash();
-        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+        assert_eq!(
+            state.best_share_tip(),
+            Some(checkpoint_branch_hash.as_str())
+        );
 
         let checkpoint_child_summary = state.share_summary(&checkpoint_child_hash).unwrap();
         let checkpoint_two = SharechainCheckpointAnchorV1 {
@@ -2347,7 +2523,7 @@ mod tests {
             share_tip_hash: checkpoint_child_hash.clone(),
             share_height: checkpoint_child_summary.height,
             cumulative_score: checkpoint_child_summary.cumulative_score.unwrap(),
-            parent_checkpoint_tip: checkpoint_root_hash,
+            parent_checkpoint_tip: checkpoint_branch_hash,
             finalization_block: 116,
             finalization_block_hash: format!("0x{}", "52".repeat(32)),
             finalization_epoch: 8,
@@ -2364,6 +2540,22 @@ mod tests {
         state.apply_message(&checkpoint_two_message).unwrap();
         assert_eq!(state.best_share_tip(), Some(checkpoint_child_hash.as_str()));
         assert_eq!(state.summary().latest_checkpoint_round, Some(2));
+    }
+
+    #[test]
+    fn bootstrap_rejects_distinct_second_zero_parent_share() {
+        let policy = anchor_policy();
+        let version = 1;
+        assert!(policy.bootstrap_limits_active(version));
+        assert_distinct_second_root_rejected(version);
+    }
+
+    #[test]
+    fn post_handoff_rejects_distinct_second_zero_parent_share() {
+        let policy = anchor_policy();
+        let version = 1 | (1 << policy.handoff_version_bit);
+        assert!(!policy.bootstrap_limits_active(version));
+        assert_distinct_second_root_rejected(version);
     }
 
     #[test]
@@ -2545,61 +2737,72 @@ mod tests {
     #[test]
     fn fork_choice_counts_only_best_cumulative_branch() {
         let (registration, mining_keypair) = signed_registration();
-        let mut root_a = mined_test_share(
+        let mut root = mined_test_share(
             "MINER-A",
             MAX_SHARE_TARGET_HEX,
             &"11".repeat(32),
             ZERO_SHARE_PARENT_HASH,
         );
-        root_a.mining_signature_hex = sign(root_a.signing_hash(), &mining_keypair);
-        let root_a_hash = root_a.share_hash();
+        root.mining_signature_hex = sign(root.signing_hash(), &mining_keypair);
+        let root_hash = root.share_hash();
         let mut child_a = mined_test_share(
             "MINER-A",
             MAX_SHARE_TARGET_HEX,
             &"12".repeat(32),
-            &root_a_hash,
+            &root_hash,
         );
         child_a.mining_signature_hex = sign(child_a.signing_hash(), &mining_keypair);
         let child_a_hash = child_a.share_hash();
-        let mut root_b = mined_test_share(
+        let mut grandchild_a = mined_test_share(
+            "MINER-A",
+            MAX_SHARE_TARGET_HEX,
+            &"13".repeat(32),
+            &child_a_hash,
+        );
+        grandchild_a.mining_signature_hex = sign(grandchild_a.signing_hash(), &mining_keypair);
+        let grandchild_a_hash = grandchild_a.share_hash();
+        let mut child_b = mined_test_share(
             "MINER-A",
             MAX_SHARE_TARGET_HEX,
             &"22".repeat(32),
-            ZERO_SHARE_PARENT_HASH,
+            &root_hash,
         );
-        root_b.mining_signature_hex = sign(root_b.signing_hash(), &mining_keypair);
+        child_b.mining_signature_hex = sign(child_b.signing_hash(), &mining_keypair);
 
         let mut state = SharechainReplayState::default();
-        apply_registration_and_template(&mut state, registration, &root_a, &mining_keypair);
+        apply_registration_and_template(&mut state, registration, &root, &mining_keypair);
         state
-            .apply_message(&SharechainMessage::Share(root_b))
+            .apply_message(&SharechainMessage::Share(child_b))
             .unwrap();
         state
-            .apply_message(&SharechainMessage::Share(root_a))
+            .apply_message(&SharechainMessage::Share(root))
             .unwrap();
         state
             .apply_message(&SharechainMessage::Share(child_a))
             .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(grandchild_a))
+            .unwrap();
 
         let summary = state.summary();
-        assert_eq!(summary.stored_share_count, 3);
-        assert_eq!(summary.active_share_count, 2);
+        assert_eq!(summary.stored_share_count, 4);
+        assert_eq!(summary.active_share_count, 3);
         assert_eq!(summary.inactive_share_count, 1);
-        assert_eq!(summary.active_share_score_total, 2);
+        assert_eq!(summary.active_share_score_total, 3);
         assert_eq!(
             summary.best_share_tip.as_deref(),
-            Some(child_a_hash.as_str())
+            Some(grandchild_a_hash.as_str())
         );
-        assert_eq!(state.best_share_height(), Some(2));
-        assert_eq!(state.hashrate_scores().get("miner-a"), Some(&2));
+        assert_eq!(state.best_share_height(), Some(3));
+        assert_eq!(state.hashrate_scores().get("miner-a"), Some(&3));
 
         let shares = state.share_summaries();
-        assert_eq!(shares.len(), 3);
-        assert_eq!(shares[0].share_hash, child_a_hash);
-        assert_eq!(shares[0].height, 2);
+        assert_eq!(shares.len(), 4);
+        assert_eq!(shares[0].share_hash, grandchild_a_hash);
+        assert_eq!(shares[0].height, 3);
         assert!(shares[0].active);
         assert_eq!(shares[0].hashrate_score_delta, "1");
-        assert_eq!(shares[0].cumulative_score.as_deref(), Some("2"));
+        assert_eq!(shares[0].cumulative_score.as_deref(), Some("3"));
         assert!(shares[0].template_created_at_unix.is_some());
         let template_time = shares[0].template_created_at_unix.unwrap();
         assert_eq!(state.recent_active_idena_addresses(template_time).len(), 1);
@@ -2660,35 +2863,46 @@ mod tests {
     #[test]
     fn fork_choice_tie_breaks_by_share_hash_not_arrival_order() {
         let (registration, mining_keypair) = signed_registration();
-        let mut root_a = mined_test_share(
+        let mut root = mined_test_share(
             "MINER-A",
             MAX_SHARE_TARGET_HEX,
             &"11".repeat(32),
             ZERO_SHARE_PARENT_HASH,
         );
-        root_a.mining_signature_hex = sign(root_a.signing_hash(), &mining_keypair);
-        let root_a_hash = root_a.share_hash();
-        let mut root_b = mined_test_share(
+        root.mining_signature_hex = sign(root.signing_hash(), &mining_keypair);
+        let root_hash = root.share_hash();
+        let mut child_a = mined_test_share(
+            "MINER-A",
+            MAX_SHARE_TARGET_HEX,
+            &"12".repeat(32),
+            &root_hash,
+        );
+        child_a.mining_signature_hex = sign(child_a.signing_hash(), &mining_keypair);
+        let child_a_hash = child_a.share_hash();
+        let mut child_b = mined_test_share(
             "MINER-A",
             MAX_SHARE_TARGET_HEX,
             &"22".repeat(32),
-            ZERO_SHARE_PARENT_HASH,
+            &root_hash,
         );
-        root_b.mining_signature_hex = sign(root_b.signing_hash(), &mining_keypair);
-        let root_b_hash = root_b.share_hash();
-        let expected_tip = root_a_hash.min(root_b_hash);
+        child_b.mining_signature_hex = sign(child_b.signing_hash(), &mining_keypair);
+        let child_b_hash = child_b.share_hash();
+        let expected_tip = child_a_hash.min(child_b_hash);
 
         let mut state = SharechainReplayState::default();
-        apply_registration_and_template(&mut state, registration, &root_a, &mining_keypair);
+        apply_registration_and_template(&mut state, registration, &root, &mining_keypair);
         state
-            .apply_message(&SharechainMessage::Share(root_b))
+            .apply_message(&SharechainMessage::Share(root))
             .unwrap();
         state
-            .apply_message(&SharechainMessage::Share(root_a))
+            .apply_message(&SharechainMessage::Share(child_b))
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(child_a))
             .unwrap();
 
         let summary = state.summary();
-        assert_eq!(summary.active_share_count, 1);
+        assert_eq!(summary.active_share_count, 2);
         assert_eq!(summary.inactive_share_count, 1);
         assert_eq!(
             summary.best_share_tip.as_deref(),

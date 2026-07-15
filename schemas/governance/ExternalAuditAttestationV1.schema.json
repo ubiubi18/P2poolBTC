@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/ExternalAuditAttestationV1.schema.json",
+  "title": "ExternalAuditAttestationV1 canonical payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "candidateEcosystemCid",
+    "scopeEvidenceCid",
+    "auditorIdentity",
+    "auditorOrganizationId",
+    "auditPolicyCid",
+    "reportCid",
+    "independenceStatementCid",
+    "coveredRepositoryCids",
+    "unresolvedCriticalFindings",
+    "unresolvedHighFindings",
+    "verdict",
+    "creationBlockOrTimestamp",
+    "authentication"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "candidateEcosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "scopeEvidenceCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "auditorIdentity": {"$ref": "common.schema.json#/$defs/Address"},
+    "auditorOrganizationId": {"type": "string", "pattern": "^[a-z0-9._-]{1,80}$"},
+    "auditPolicyCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "reportCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "independenceStatementCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "coveredRepositoryCids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "common.schema.json#/$defs/AttestedRepositoryCid"}
+    },
+    "unresolvedCriticalFindings": {"type": "integer", "minimum": 0},
+    "unresolvedHighFindings": {"type": "integer", "minimum": 0},
+    "verdict": {"enum": ["pass", "fail"]},
+    "creationBlockOrTimestamp": {"type": "integer", "minimum": 0},
+    "authentication": {"const": "on-chain-submitter"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"verdict": {"const": "pass"}}},
+      "then": {
+        "properties": {
+          "unresolvedCriticalFindings": {"const": 0},
+          "unresolvedHighFindings": {"const": 0}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "kind": "pohw-decentralized-human-ai-development-policy-v1",
+  "policyId": "pohw-aidd-human-ai-v1",
+  "ecosystemId": "ubiubi18-pohw",
+  "licenseSpdx": "MIT",
+  "upstream": [
+    {
+      "repositoryUrl": "https://github.com/ai-driven-dev/framework",
+      "commit": "8aeaf051f05c8d4e54eb94dc1e03d05e909b0173",
+      "sourceTreeCid": "bafyreif2aqjfv53gkzgtrb3kqanyegjaaqd6h2xq26pwxh2z5sx3kjsuqi",
+      "licenseSpdx": "MIT"
+    }
+  ],
+  "authority": {
+    "canonicalAuthority": "idena-wasm-governance-contract",
+    "githubIsCanonical": false,
+    "maintainerMergeKeyExists": false,
+    "agentMayAcceptProposal": false,
+    "agentMayExecuteProposal": false,
+    "contractOwnerMayReplaceCanonicalCid": false,
+    "acceptedExecutionIsPermissionless": true
+  },
+  "sandbox": {
+    "networkDisabledByDefault": true,
+    "walletKeysExposed": false,
+    "providerSecretsExposedToRepositoryScripts": false,
+    "readOnlySourceMount": true,
+    "isolatedTemporaryBuildDirectory": true,
+    "explicitDependencyFetchPhase": true,
+    "commandAllowlisting": true,
+    "resourceLimitsRequired": true,
+    "completeRedactedCommandLog": true
+  },
+  "phases": [
+    {"id": "specify", "actor": "human-ai", "humanApprovalRequired": true, "mutatesCandidateSource": false, "outputSchema": "ChangeProposalV1"},
+    {"id": "plan", "actor": "human-ai", "humanApprovalRequired": true, "mutatesCandidateSource": false, "outputSchema": "ChangeProposalV1"},
+    {"id": "implement", "actor": "isolated-agent", "humanApprovalRequired": true, "mutatesCandidateSource": true, "outputSchema": "EcosystemManifestV1"},
+    {"id": "review", "actor": "independent-reviewer", "humanApprovalRequired": false, "mutatesCandidateSource": false, "outputSchema": "AgentReviewAttestationV1"},
+    {"id": "build", "actor": "independent-builder", "humanApprovalRequired": false, "mutatesCandidateSource": false, "outputSchema": "BuildAttestationV1"},
+    {"id": "publish", "actor": "availability-provider", "humanApprovalRequired": false, "mutatesCandidateSource": false, "outputSchema": "DataAvailabilityAttestationV1"},
+    {"id": "propose", "actor": "human-ai", "humanApprovalRequired": true, "mutatesCandidateSource": false, "outputSchema": "ChangeProposalV1"},
+    {"id": "vote", "actor": "eligible-identities", "humanApprovalRequired": false, "mutatesCandidateSource": false, "outputSchema": "VoteReceiptV1"},
+    {"id": "execute", "actor": "any-caller", "humanApprovalRequired": false, "mutatesCandidateSource": false, "outputSchema": "EcosystemManifestV1"}
+  ]
+}

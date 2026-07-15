@@ -1,0 +1,184 @@
+diff --git a/compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go b/compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
+index c6f21eb..c7d2f07 100644
+--- a/compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
++++ b/compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/idena-network/idena-go/config"
+ 	"github.com/idena-network/idena-go/core/appstate"
+ 	"github.com/idena-network/idena-go/crypto"
++	wasmlib "github.com/idena-network/idena-wasm-binding/lib"
+ 	models "github.com/idena-network/idena-wasm-binding/lib/protobuf"
+ 	"github.com/stretchr/testify/require"
+ 	dbm "github.com/tendermint/tm-db"
+@@ -28,7 +29,7 @@ import (
+ 
+ const (
+ 	governanceInitialCID   = "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm"
+-	governanceParameterCID = "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm"
++	governanceParameterCID = "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq"
+ 	governanceMetricsEpoch = "7"
+ 	governanceWasmGasLimit = uint64(612000000)
+ 	governanceStakeAtoms   = "1000000000000000000"
+@@ -61,6 +62,11 @@ type governanceRuntimeResult struct {
+ 	parameterResult  string
+ 	parametersGas    uint64
+ 	parametersHash   string
++	anchorGas        uint64
++	anchorHash       string
++	anchorResult     string
++	repeatAnchorGas  uint64
++	repeatAnchorHash string
+ }
+ 
+ type governanceMetricsFixture struct {
+@@ -93,6 +99,7 @@ func TestGovernanceContractProductionRuntimeDeterminism(t *testing.T) {
+ 	require.NoError(t, err)
+ 	digest := sha256.Sum256(code)
+ 	require.Equal(t, expectedDigest, hex.EncodeToString(digest[:]))
++	assertGovernanceEpochImportDisabledByDefault(t, code)
+ 
+ 	first := runGovernanceRuntimeFixture(t, code)
+ 	second := runGovernanceRuntimeFixture(t, code)
+@@ -111,6 +118,55 @@ func TestGovernanceContractProductionRuntimeDeterminism(t *testing.T) {
+ 	require.Contains(t, first.deployEvents[0], "GovernanceInitializedV1")
+ }
+ 
++func assertGovernanceEpochImportDisabledByDefault(t *testing.T, code []byte) {
++	t.Helper()
++	state, err := appstate.NewAppState(dbm.NewMemDB(), eventbus.New())
++	require.NoError(t, err)
++	state.Initialize(0)
++	state.State.SetGlobalEpoch(7)
++	state.State.SetEpochBlock(42)
++
++	key, err := crypto.GenerateKeyFromSeed(rand.New(rand.NewSource(1)))
++	require.NoError(t, err)
++	metrics := governanceMetricsForAddress(crypto.PubkeyToAddress(key.PublicKey))
++	attachment := attachments.CreateDeployContractAttachment(
++		common.Hash{}, code, nil,
++		[]byte(governanceInitialCID),
++		[]byte(governanceParameterCID),
++		[]byte(metrics.root),
++		[]byte(governanceMetricsEpoch),
++	)
++	payload, err := attachment.ToBytes()
++	require.NoError(t, err)
++	transaction, err := types.SignTx(&types.Transaction{
++		Epoch:        7,
++		AccountNonce: 1,
++		Type:         types.DeployContractTx,
++		Payload:      payload,
++		Amount:       big.NewInt(0),
++	}, key)
++	require.NoError(t, err)
++
++	vm := NewWasmVM(state, nil, createHeader(42, 1234567), governanceRuntimeConfig(), true, nil)
++	require.Zero(t, vm.features, "inactive candidate unexpectedly enabled node features")
++	receipt := vm.Run(transaction, governanceWasmGasLimit)
++	require.False(t, receipt.Success, "disabled resolver accepted env.epoch_block")
++	require.Contains(t, fmt.Sprint(receipt.Error), "epoch_block")
++	require.Empty(t, state.State.GetContractCode(receipt.ContractAddress))
++}
++
++func governanceCandidateWasmVM(
++	t *testing.T,
++	state *appstate.AppState,
++	header *types.Header,
++) *WasmVM {
++	t.Helper()
++	vm := NewWasmVM(state, nil, header, governanceRuntimeConfig(), true, nil)
++	require.Zero(t, vm.features, "candidate must be inactive through the node path")
++	vm.features = wasmlib.FeatureEpochBlock
++	return vm
++}
++
+ func runGovernanceRuntimeFixture(t *testing.T, code []byte) governanceRuntimeResult {
+ 	t.Helper()
+ 	database := dbm.NewMemDB()
+@@ -118,13 +174,14 @@ func runGovernanceRuntimeFixture(t *testing.T, code []byte) governanceRuntimeRes
+ 	require.NoError(t, err)
+ 	state.Initialize(0)
+ 	state.State.SetGlobalEpoch(7)
++	state.State.SetEpochBlock(42)
+ 
+ 	random := rand.New(rand.NewSource(1))
+ 	key, err := crypto.GenerateKeyFromSeed(random)
+ 	require.NoError(t, err)
+ 	metricsFixture := governanceMetricsForAddress(crypto.PubkeyToAddress(key.PublicKey))
+ 	header := createHeader(42, 1234567)
+-	vm := NewWasmVM(state, nil, header, governanceRuntimeConfig(), true, nil)
++	vm := governanceCandidateWasmVM(t, state, header)
+ 
+ 	deployAttachment := attachments.CreateDeployContractAttachment(
+ 		common.Hash{},
+@@ -195,6 +252,7 @@ func runGovernanceRuntimeFixture(t *testing.T, code []byte) governanceRuntimeRes
+ 
+ 	activationHeader := createHeader(43, 1234568)
+ 	state.State.SetGlobalEpoch(8)
++	state.State.SetEpochBlock(43)
+ 	activation := callGovernanceRuntimeMethod(
+ 		t, state, activationHeader, key, deployReceipt.ContractAddress, 6, 8, big.NewInt(0),
+ 		"activateGovernanceStake",
+@@ -207,17 +265,30 @@ func runGovernanceRuntimeFixture(t *testing.T, code []byte) governanceRuntimeRes
+ 	activeStake := decodeGovernanceStakeState(t, governanceRuntimeOutput(t, activeStakeReceipt))
+ 	require.Equal(t, governanceStakeAtoms, activeStake.Active)
+ 	require.Empty(t, activeStake.Pending)
++	anchor := callGovernanceRuntimeMethod(
++		t, state, activationHeader, key, deployReceipt.ContractAddress, 8, 8, big.NewInt(0),
++		"anchorGovernanceEpoch",
++	)
++	anchorOutput := governanceRuntimeOutput(t, anchor)
++	require.Contains(t, string(anchorOutput), `"epochAnchorBlock":43`)
++	require.Contains(t, string(anchorOutput), `"proposalCutoffBlock":83`)
++	repeatAnchorHeader := createHeader(44, 1234569)
++	repeatAnchor := callGovernanceRuntimeMethod(
++		t, state, repeatAnchorHeader, key, deployReceipt.ContractAddress, 9, 8, big.NewInt(0),
++		"anchorGovernanceEpoch",
++	)
++	require.Equal(t, anchorOutput, governanceRuntimeOutput(t, repeatAnchor))
+ 
+ 	canonical := callGovernanceRuntimeMethod(
+-		t, state, activationHeader, key, deployReceipt.ContractAddress, 8, 8, big.NewInt(0),
++		t, state, activationHeader, key, deployReceipt.ContractAddress, 10, 8, big.NewInt(0),
+ 		"canonicalEcosystemCid",
+ 	)
+ 	parameter := callGovernanceRuntimeMethod(
+-		t, state, activationHeader, key, deployReceipt.ContractAddress, 9, 8, big.NewInt(0),
++		t, state, activationHeader, key, deployReceipt.ContractAddress, 11, 8, big.NewInt(0),
+ 		"governanceParameterSetCid",
+ 	)
+ 	parameters := callGovernanceRuntimeMethod(
+-		t, state, activationHeader, key, deployReceipt.ContractAddress, 10, 8, big.NewInt(0),
++		t, state, activationHeader, key, deployReceipt.ContractAddress, 12, 8, big.NewInt(0),
+ 		"governanceParameters",
+ 	)
+ 	canonicalOutput := governanceRuntimeOutput(t, canonical)
+@@ -256,6 +327,11 @@ func runGovernanceRuntimeFixture(t *testing.T, code []byte) governanceRuntimeRes
+ 		parameterResult:  string(parameterOutput),
+ 		parametersGas:    parameters.GasUsed,
+ 		parametersHash:   hex.EncodeToString(parametersDigest[:]),
++		anchorGas:        anchor.GasUsed,
++		anchorHash:       governanceReceiptHash(anchor),
++		anchorResult:     string(anchorOutput),
++		repeatAnchorGas:  repeatAnchor.GasUsed,
++		repeatAnchorHash: governanceReceiptHash(repeatAnchor),
+ 	}
+ }
+ 
+@@ -320,7 +396,7 @@ func callGovernanceRuntimeMethodRaw(
+ 	}
+ 	transaction, err = types.SignTx(transaction, key)
+ 	require.NoError(t, err)
+-	vm := NewWasmVM(state, nil, header, governanceRuntimeConfig(), true, nil)
++	vm := governanceCandidateWasmVM(t, state, header)
+ 	return vm.Run(transaction, governanceWasmGasLimit)
+ }
+ 
+@@ -379,6 +455,7 @@ func appendUint16(target []byte, value uint16) []byte {
+ 
+ func governanceRuntimeConfig() *config.Config {
+ 	configuration := getLatestConfig()
++	configuration.Network = governanceEpochAnchorNetworkID
+ 	configuration.IsDebug = false
+ 	return configuration
+ }

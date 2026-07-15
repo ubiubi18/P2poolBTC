@@ -60,6 +60,13 @@ pub enum ReviewVerdictV1 {
     Abstain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalAuditVerdictV1 {
+    Pass,
+    Fail,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentReviewAttestationV1 {
@@ -106,6 +113,7 @@ pub struct BuildAttestationV1 {
     pub candidate_ecosystem_cid: String,
     pub source_cids: Vec<RepositoryCidV1>,
     pub toolchain_cid: String,
+    pub scope_evidence_cid: String,
     pub builder_identity: String,
     pub runtime_family: String,
     pub architecture: String,
@@ -134,6 +142,25 @@ pub struct DataAvailabilityAttestationV1 {
     pub observed_at_block_or_timestamp: u64,
     pub expires_at_block: u64,
     pub bond_atoms: String,
+    pub authentication: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalAuditAttestationV1 {
+    pub schema_version: u16,
+    pub candidate_ecosystem_cid: String,
+    pub scope_evidence_cid: String,
+    pub auditor_identity: String,
+    pub auditor_organization_id: String,
+    pub audit_policy_cid: String,
+    pub report_cid: String,
+    pub independence_statement_cid: String,
+    pub covered_repository_cids: Vec<RepositoryCidV1>,
+    pub unresolved_critical_findings: u32,
+    pub unresolved_high_findings: u32,
+    pub verdict: ExternalAuditVerdictV1,
+    pub creation_block_or_timestamp: u64,
     pub authentication: String,
 }
 
@@ -212,6 +239,20 @@ pub fn verify_data_availability_attestation_car(
     bytes: &[u8],
 ) -> Result<AttestationPackage<DataAvailabilityAttestationV1>, AttestationError> {
     verify_package(bytes, validate_availability)
+}
+
+pub fn package_external_audit_attestation(
+    mut value: ExternalAuditAttestationV1,
+) -> Result<AttestationPackage<ExternalAuditAttestationV1>, AttestationError> {
+    value.auditor_identity = normalize_attestation_address(&value.auditor_identity)?;
+    validate_external_audit(&value)?;
+    package(value)
+}
+
+pub fn verify_external_audit_attestation_car(
+    bytes: &[u8],
+) -> Result<AttestationPackage<ExternalAuditAttestationV1>, AttestationError> {
+    verify_package(bytes, validate_external_audit)
 }
 
 pub fn package_identity_metrics_attestation(
@@ -327,6 +368,7 @@ fn validate_build(value: &BuildAttestationV1) -> Result<(), AttestationError> {
     }
     validate_dag_cbor_cid(&value.candidate_ecosystem_cid, "candidateEcosystemCid")?;
     validate_dag_cbor_cid(&value.toolchain_cid, "toolchainCid")?;
+    validate_dag_cbor_cid(&value.scope_evidence_cid, "scopeEvidenceCid")?;
     validate_raw_cid(&value.sbom_cid, "sbomCid")?;
     validate_raw_cid(&value.test_results_cid, "testResultsCid")?;
     validate_repository_cids(&value.source_cids)?;
@@ -415,9 +457,15 @@ fn validate_availability(value: &DataAvailabilityAttestationV1) -> Result<(), At
             .verified_cids
             .iter()
             .any(|cid| cid == &value.candidate_ecosystem_cid)
+        || !value
+            .verified_cids
+            .iter()
+            .any(|cid| cid == &value.probe_result_cid)
         || !strict_sorted_unique(&value.verified_cids)
     {
-        return invalid("verifiedCids must be sorted, unique, and include the candidate CID");
+        return invalid(
+            "verifiedCids must be sorted, unique, and include the candidate and probe-result CIDs",
+        );
     }
     for cid in &value.verified_cids {
         validate_content_cid(cid)?;
@@ -426,6 +474,32 @@ fn validate_availability(value: &DataAvailabilityAttestationV1) -> Result<(), At
         return invalid("expiresAtBlock must be later than the observation boundary");
     }
     validate_amount(&value.bond_atoms)?;
+    validate_authentication(&value.authentication)
+}
+
+fn validate_external_audit(value: &ExternalAuditAttestationV1) -> Result<(), AttestationError> {
+    if value.schema_version != 1 {
+        return invalid("schemaVersion must be 1");
+    }
+    validate_dag_cbor_cid(&value.candidate_ecosystem_cid, "candidateEcosystemCid")?;
+    validate_dag_cbor_cid(&value.scope_evidence_cid, "scopeEvidenceCid")?;
+    validate_lower_label(&value.auditor_organization_id, 80, "auditorOrganizationId")?;
+    normalize_attestation_address(&value.auditor_identity)?;
+    for cid in [
+        &value.audit_policy_cid,
+        &value.report_cid,
+        &value.independence_statement_cid,
+    ] {
+        validate_content_cid(cid)?;
+    }
+    validate_repository_cids(&value.covered_repository_cids)?;
+    if value.verdict == ExternalAuditVerdictV1::Pass
+        && (value.unresolved_critical_findings != 0 || value.unresolved_high_findings != 0)
+    {
+        return invalid(
+            "a passing external audit cannot contain unresolved high or critical findings",
+        );
+    }
     validate_authentication(&value.authentication)
 }
 
@@ -848,6 +922,7 @@ mod tests {
                 cid: cid("source"),
             }],
             toolchain_cid: cid("toolchain"),
+            scope_evidence_cid: cid("scope-evidence"),
             builder_identity: format!("0x{}", "01".repeat(20)),
             runtime_family: "linux".to_string(),
             architecture: "x86_64".to_string(),
@@ -943,14 +1018,17 @@ mod tests {
     #[test]
     fn availability_attestation_enforces_manifest_and_content_cid_profiles() {
         let candidate = cid("candidate");
+        let probe = raw_cid("probe");
+        let mut verified_cids = vec![candidate.clone(), probe.clone()];
+        verified_cids.sort();
         let mut value = DataAvailabilityAttestationV1 {
             schema_version: 1,
             candidate_ecosystem_cid: candidate.clone(),
             pinset_cid: cid("pinset"),
             provider_id: "provider-a".to_string(),
             operator_identity: format!("0x{}", "01".repeat(20)),
-            verified_cids: vec![candidate],
-            probe_result_cid: raw_cid("probe"),
+            verified_cids,
+            probe_result_cid: probe,
             available: true,
             observed_at_block_or_timestamp: 42,
             expires_at_block: 100,
@@ -973,6 +1051,38 @@ mod tests {
         assert!(matches!(
             package_data_availability_attestation(value),
             Err(AttestationError::Invalid(message)) if message.contains("raw or DAG-CBOR")
+        ));
+    }
+
+    #[test]
+    fn external_audit_is_content_addressed_and_cannot_pass_with_open_severe_findings() {
+        let mut value = ExternalAuditAttestationV1 {
+            schema_version: 1,
+            candidate_ecosystem_cid: cid("candidate"),
+            scope_evidence_cid: cid("scope"),
+            auditor_identity: format!("0x{}", "02".repeat(20)),
+            auditor_organization_id: "independent-audit-lab".to_string(),
+            audit_policy_cid: cid("audit-policy"),
+            report_cid: raw_cid("audit-report"),
+            independence_statement_cid: cid("independence-statement"),
+            covered_repository_cids: vec![RepositoryCidV1 {
+                repository: "P2poolBTC".to_string(),
+                cid: cid("source"),
+            }],
+            unresolved_critical_findings: 0,
+            unresolved_high_findings: 0,
+            verdict: ExternalAuditVerdictV1::Pass,
+            creation_block_or_timestamp: 42,
+            authentication: "on-chain-submitter".to_string(),
+        };
+        let package = package_external_audit_attestation(value.clone()).unwrap();
+        let verified = verify_external_audit_attestation_car(&package.car_bytes).unwrap();
+        assert_eq!(verified.root_cid, package.root_cid);
+
+        value.unresolved_high_findings = 1;
+        assert!(matches!(
+            package_external_audit_attestation(value),
+            Err(AttestationError::Invalid(message)) if message.contains("passing external audit")
         ));
     }
 

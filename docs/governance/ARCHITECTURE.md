@@ -54,6 +54,11 @@ proposal after all gates, challenge period, and timelock pass.
 11. IdenaAI is the primary experimental governance interface. Its provider-
     neutral agents prepare reviews and briefs, but the user controls every
     ballot choice, signature, submission, and local rollback confirmation.
+12. `DevelopmentPolicyBundleV1` adapts the MIT AI-Driven Dev phase vocabulary
+    into a CID-bound lifecycle. Human/AI specification and isolated
+    implementation feed independent review, build, availability, Idena voting,
+    and permissionless execution. The policy validator rejects maintainer,
+    GitHub, deployer, or autonomous-agent authority.
 
 ## Four Independent Gates
 
@@ -85,9 +90,13 @@ counter, genesis change, network ID, or validation rule belongs exclusively in
 `compatibility/governance-fork-lock.json`, with a distinct network identifier,
 activation mechanism, replay/migration gates, source CIDs, and artifact digests.
 
-The current Governance Day contract cannot authenticate its epoch anchor to a
-finalized validation boundary with the pinned host ABI; first-caller anchoring
-is therefore a deployment blocker. Any required runtime capability belongs only
-in the separate governance-fork profile and requires deterministic gas, replay,
-and migration tests. The contract also fails closed for `normal` risk proposals
-until an objective on-chain risk classifier exists.
+The legacy-compatible host ABI cannot authenticate a Governance Day epoch
+anchor. The disabled `governance-day-fork-candidate-lock.json` therefore binds
+exact patches for a read-only `env.epoch_block` import backed by
+`State.EpochBlock()`. The component source CIDs and deterministic CAR digests
+are locked and reconstructed in CI, but candidate commits remain unset, so the
+profile cannot activate. The contract derives normal/critical risk and every
+scope counter from bounded canonical base, candidate, and patch DAG-CBOR proofs; a
+proposer-declared downgrade or fabricated path is rejected. Runtime, replay,
+migration, independent-build, availability, and audit gates remain mandatory
+before any fork activation.

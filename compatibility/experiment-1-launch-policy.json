@@ -3,8 +3,8 @@
   "experiment_id": "pohw-experiment-1-full-consensus",
   "activation_id": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
   "fork_manifest_path": "compatibility/experiment-1-full-consensus.json",
-  "fork_manifest_sha256": "a9036ba5ffd72906cf0c05c66efb2cedb170375b8160c1683bc09fcf20954915",
-  "status": "blocked-pending-idena-registry-deployment",
+  "fork_manifest_sha256": "bb81abb8217cfb50a36f3c5cb6a2e799100a0f9fe0b7d406fe5b079d5e201b8d",
+  "status": "blocked-release-readiness",
   "idena_anchor_policy_schema": 2,
   "required_handoff_version_bit": 27,
   "required_runtime_gates": {
@@ -18,7 +18,7 @@
   },
   "registry_source_candidate": {
     "path": "compatibility/experiment-1-miner-registry-candidate.json",
-    "sha256": "91247d97f239d90f95e674133e6c9b1a2eb9562ae2f01ef4de64a610e7432126",
+    "sha256": "89a21e6a2104dbbc3a1877a897ab0044f027d3408f97435d8486473f7abb22f2",
     "contract_schema_version": 3,
     "contract_version": "0.3.0",
     "wasm_sha256": "7f5cbf0daeded9bc3ca04ade914e37688edccaa0a8ad025bb74842ec788ad601",
@@ -26,6 +26,23 @@
     "deployment_authorized": false
   },
   "registry_deployment": null,
+  "public_join_readiness": {
+    "exact_source_commit_published": false,
+    "canonical_source_cid_published": false,
+    "deterministic_car_digest_published": false,
+    "release_build_evidence_published": false,
+    "required_independent_registry_build_operators": 2,
+    "verified_independent_registry_build_operators": 1,
+    "matching_registry_builds_observed": 2,
+    "external_security_review_required": true,
+    "external_security_review_passed": false,
+    "deployment_readiness_report_cid": null,
+    "deployment_readiness_report_car_sha256": null,
+    "deployment_readiness_candidate_ecosystem_cid": null,
+    "registry_deployment_finalized": false,
+    "immutable_v2_anchor_policy_published": false,
+    "independent_second_node_rehearsal_passed": false
+  },
   "activation_requirements": [
     "Run the emulator, ABI check, and production idena-go runtime identity-gate test against the exact candidate bytes.",
     "Obtain at least two independent matching builds and compare SHA-256 and raw CID.",
@@ -37,7 +54,7 @@
   "notes": [
     "This sidecar does not alter or reinterpret the existing fork activation manifest or its first block.",
     "Null deployment data is an intentional launch interlock, not a placeholder contract address.",
-    "The source candidate passed one local production-runtime build only and is not deployment authorization.",
+    "Two matching builds were observed under one operator; this counts as one independent build operator and is not deployment authorization.",
     "No contract deployment or live-chain transaction is performed by repository tooling."
   ]
 }

@@ -127,7 +127,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/pohw-miner-registry-runtime-gate.py \
 ```
 
 The runtime gate verifies every source digest, artifact size, SHA-256, raw CID,
-runtime test digest, Go toolchain, and exact `idena-wasm-binding` revision in
+runtime test digest, Go toolchain, exact clean `idena-go` commit, and exact
+`idena-wasm-binding` revision in
 [`compatibility/experiment-1-miner-registry-candidate.json`](../compatibility/experiment-1-miner-registry-candidate.json),
 then runs registration and checkpoint identity transitions through idena-go's
 production WASM engine. Independent builders should compare the WASM SHA-256
@@ -276,8 +277,11 @@ scripts/pohw-experiment-register-miner.sh .pohw-experiment.env \
   --idena-address 0xYOUR_PUBLIC_IDENA_ADDRESS \
   --registry-experiment-id p2poolbtc-experiment-1 \
   --registry-anchor-file ./miner-registry-anchor.json \
-  --idena-signature-hex 0xPUBLIC_SIGNATURE
+  --idena-signature-stdin
 ```
+
+Pipe or type the public signature on standard input; do not place it in shell
+history. The wrapper never includes the signature in its process arguments.
 
 The status must be `registration_ready`, `registration_version` must be `2`,
 and `registry_anchor` must match the contract receipt.

@@ -1,10 +1,10 @@
 # Migration And Rollback
 
-## Phase 0: committed prototype, not deployed
+## Phase 0: local only
 
-The current state is a committed experimental prototype based on the exact
-revision recorded in the governance-fork lock. It is not a canonical source
-CID, an authorized release, or a deployed governance system.
+The current state is an uncommitted local experimental prototype based on the
+exact revision recorded in the governance-fork lock. The prototype files and
+artifact are not yet represented by a canonical source commit or source CID.
 The legacy compatibility lock stays byte-for-byte unchanged. No contract address, initial canonical CID,
 genesis CID, activation height, or release is authorized.
 

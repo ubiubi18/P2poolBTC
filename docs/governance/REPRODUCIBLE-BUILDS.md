@@ -89,6 +89,19 @@ deterministic core is invalid. The platform-constrained desktop-installer
 target therefore includes the renderer archive and bundled node as core
 artifacts while treating the signed installer itself as non-core.
 
+The `core` flag does not permit artifact omission. The Rust lifecycle and WASM
+contract require every build attestation to repeat the candidate ecosystem
+manifest's complete artifact inventory with exact names, CIDs, SHA-256 digests,
+and sizes. This closes a favorable-subset attack in which builders agree only
+on one artifact while leaving another candidate artifact unverified.
+
+This v1 rule is deliberately fail-closed: every required builder must be able
+to reproduce the complete authorized inventory. A candidate containing outputs
+that only one operating system can build must either use a reviewed portable
+cross-build or wait for a future schema that defines explicit per-platform
+artifact groups and independent coverage thresholds. Do not omit such outputs
+or relabel them non-core to bypass coverage.
+
 SBOMs, test results, and artifact bytes use raw CIDv1/SHA2-256. The generator
 also writes `toolchain-locks.dag-cbor`, a canonical DAG-CBOR map of the full
 plan toolchain lock. Its CID is the attestation `toolchainCid`; the raw

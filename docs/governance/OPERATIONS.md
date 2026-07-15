@@ -9,6 +9,35 @@ Use Go 1.26.5, Rust 1.97.0, Node 24.18.0, npm 11.16.0, and pnpm 11.11.0 for
 attested builds. Local versions that differ are suitable only for development
 and must be reported as non-attested.
 
+## Package the human/AI development policy
+
+Package the MIT policy and verify its canonical CAR before accepting review
+evidence:
+
+```sh
+cargo run -p governance-cli -- development-policy-package \
+  --input integrations/decentralized-aidd/policy.json \
+  --output-dir /tmp/pohw-development-policy
+
+cargo run -p governance-cli -- development-policy-inspect \
+  --car /tmp/pohw-development-policy/development-policy.car
+```
+
+The expected policy CID is
+`bafyreid56pzxhbjuhonxsl5b2a2jjrgrzydgyyvvyfboucqh53y7hzyare`. Bind an AI
+review to the verified policy rather than trusting a provider or branch:
+
+```sh
+cargo run -p governance-cli -- review-attestation \
+  --input /absolute/path/agent-review.json \
+  --development-policy /tmp/pohw-development-policy/development-policy.car \
+  --output-dir /tmp/agent-review
+```
+
+The policy and review CARs must be included in the public proposal pinset. None
+of these commands signs, votes, publishes a release, or changes the canonical
+ecosystem CID.
+
 ## Governance Day local demonstration
 
 Build the deterministic protocol fixture first:
@@ -102,8 +131,10 @@ cargo run -p governance-cli -- pin \
 
 Do not add generated binaries to the source tree or bypass a packaging
 rejection. The IdenaAI local integration follows the same rule: its tracked
-`.env.e2e` is deleted by the exact-base patch, and the 33-step harness verifies
-that its deterministic source CID matches the inactive integration record.
+`.env.e2e` is never copied into the integration patch. The disposable harness
+removes that one exact regular file by fail-closed policy before packaging and
+verifies that the deterministic source CID matches the inactive integration
+record.
 
 Do not reuse the idena-go IPFS repository. Keep Kubo's control API on loopback.
 External pin providers are optional and require operator-specific credentials
@@ -234,24 +265,72 @@ Use the emitted raw SBOM CID as `sbomCid`, raw test-results CID as
 `coreArtifactDigest` in the
 `BuildAttestationV1` input. Map each evidence artifact's `deterministic` flag
 to the attestation artifact's `core` flag without changing any other field.
-The contract recomputes the complete core-set digest. A local evidence package
-is not an independent builder attestation and does not authorize a release.
+The contract recomputes the complete core-set digest and also requires the
+attestation inventory to exactly cover every artifact in the candidate
+ecosystem manifest. `core: false` excludes an artifact from the matching-core
+digest but never from the coverage check. A local evidence package is not an
+independent builder attestation and does not authorize a release.
 
 ## Create and verify a proposal
 
-Create strict JSON inputs matching `schemas/governance/ChangeProposalV1` and
-the current parameter set, then run:
+First create `/absolute/path/scope-input.json`. Every path may be absolute; a
+relative path is resolved from the input file's directory. The repository list
+must exactly match the aggregate ecosystem patch:
+
+```json
+{
+  "schemaVersion": 1,
+  "parentEcosystemCar": "/verified/cars/parent-ecosystem.car",
+  "candidateEcosystemCar": "/verified/cars/candidate-ecosystem.car",
+  "ecosystemPatchCar": "/verified/cars/ecosystem-patch.car",
+  "rationaleFile": "/verified/metadata/rationale.md",
+  "migrationNotesFile": "/verified/metadata/migration-notes.md",
+  "testPlanFile": "/verified/metadata/test-plan.md",
+  "repositories": [
+    {
+      "repository": "P2poolBTC",
+      "baseCar": "/verified/cars/P2poolBTC-base.car",
+      "candidateCar": "/verified/cars/P2poolBTC-candidate.car",
+      "patchCar": "/verified/cars/P2poolBTC-patch.car"
+    }
+  ]
+}
+```
+
+Package and independently re-inspect the objective path, size, migration, and
+risk classification evidence:
+
+```sh
+cargo run -p governance-cli -- scope-package \
+  --input /absolute/path/scope-input.json \
+  --output-dir /tmp/governance-scope
+
+cargo run -p governance-cli -- scope-inspect \
+  --car /tmp/governance-scope/proposal-scope.car
+```
+
+Create a strict proposal JSON matching
+`schemas/governance/ChangeProposalV1.schema.json`. Its `scopeEvidenceCid`,
+source CIDs, counters, and risk class must exactly match the inspected scope
+CAR. Then run:
 
 ```sh
 cargo run -p governance-cli -- proposal-create \
   --input /absolute/path/proposal-input.json \
   --parameters compatibility/governance-testnet-parameters-v1.json \
+  --scope-car /tmp/governance-scope/proposal-scope.car \
   --output-dir /tmp/governance-proposal
 
 cargo run -p governance-cli -- proposal-verify \
   --proposal-car /tmp/governance-proposal/proposal.car \
-  --parameters compatibility/governance-testnet-parameters-v1.json
+  --parameters compatibility/governance-testnet-parameters-v1.json \
+  --scope-car /tmp/governance-scope/proposal-scope.car
 ```
+
+`--scope-car` is mandatory for proposal verification. Supplying a different
+scope CAR fails even when its contents are otherwise valid. The separate
+per-repository patch-verification mode does not take a scope CAR because it
+verifies one source transition rather than an executable proposal.
 
 `proposal-create` also writes `proposal.dag-cbor.hex`. Submit that exact file
 with the emitted proposal CID. The contract recomputes the CID from the
@@ -372,8 +451,9 @@ executeProposal(proposalId)               callable by anyone after timelock
 complete repository source set, artifact set, and toolchain maps to the round.
 The pinset must contain the candidate, patch, parameter set, every candidate
 source tree, every candidate artifact, every repository patch, and every
-proposal metadata CID. Build attestations must repeat the complete source set
-and provide the exact candidate-derived toolchain manifest. Agent and build
+proposal metadata CID. Each build attestation must repeat the complete source
+and candidate artifact sets and provide the exact candidate-derived toolchain
+manifest. Agent and build
 submissions dynamically extend the required availability set with their own
 attestation and referenced policy, result, finding, SBOM, toolchain, and
 artifact CIDs. At freeze, an availability attestation counts only if it covers

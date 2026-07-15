@@ -2087,9 +2087,112 @@ tr:last-child td {
 .governance-repositories,
 .governance-proposals,
 .governance-history,
+.governance-development,
 .governance-day {
   display: grid;
   gap: 12px;
+}
+
+.governance-development {
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--line-strong);
+  padding: 16px 0;
+}
+
+.development-license {
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--green-strong);
+  padding: 4px 7px;
+  font-size: 11px;
+}
+
+.development-policy-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(160px, 0.6fr) minmax(0, 1fr);
+  gap: 1px;
+  border: 1px solid var(--line-strong);
+  background: var(--line);
+}
+
+.development-policy-meta > span {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  background: var(--surface);
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.development-policy-meta code,
+.development-policy-meta strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 11px;
+  text-transform: none;
+}
+
+.development-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.development-phase {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  min-width: 0;
+  align-items: center;
+  gap: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.development-phase-index {
+  grid-row: 1 / span 3;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.development-phase strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.development-phase small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.development-phase code {
+  grid-column: 2 / span 2;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.development-human-gate {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  border-left: 2px solid var(--green);
+  color: var(--green-strong);
+  padding-left: 6px;
+  font-size: 9px;
+  font-weight: 750;
+  text-align: right;
+}
+
+.development-human-gate.required {
+  border-left-color: var(--amber);
+  color: #71420a;
 }
 
 .governance-section-heading {
@@ -2927,7 +3030,9 @@ tr:last-child td {
   .governance-canonical,
   .governance-gates,
   .governance-day-grid,
-  .governance-timeline {
+  .governance-timeline,
+  .development-policy-meta,
+  .development-flow {
     grid-template-columns: minmax(0, 1fr);
   }
 

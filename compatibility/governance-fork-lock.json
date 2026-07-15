@@ -135,9 +135,9 @@
     "contractVersion": "0.1.0",
     "contractArtifact": {
       "name": "idena-code-governance.wasm",
-      "size": 211486,
-      "cid": "bafkreihv375yxvslxtmzq6dijulqybflhqfugt3q3xixjijes5lwpknm74",
-      "sha256": "f5dffb8bd64bbcd99878684d170c04ab3c0b434f70ddd174a124975767a9acff"
+      "size": 277970,
+      "cid": "bafkreigyssaw5og7rm34bestlihe2mjjzczykvugwfibobxfh5el2c74om",
+      "sha256": "d894816eb8df8b37c092535a0e4d3129c8b3855686b1501706e53f48bd0bfc73"
     },
     "runtimeIntegrationTestOverlay": {
       "path": "compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go",

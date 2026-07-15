@@ -31,6 +31,14 @@ patch CID, affected repository CIDs, model and runtime identity, policy CIDs,
 tool versions, command results, findings, verdict, owner Idena identity, bond,
 and authentication. It is immutable after its CID is committed.
 
+The active development policy is the canonical CAR produced from
+`integrations/decentralized-aidd/policy.json`. It is MIT licensed, records the
+exact adapted upstream source revision, and forbids maintainer, GitHub,
+deployer, or autonomous-agent authority. Review packaging should pass that CAR
+with `--development-policy`; the CLI rejects an attestation whose
+`agentPolicyCid` differs from the verified policy CID. A policy change requires
+a new CID and governance proposal. See `HUMAN-AI-DEVELOPMENT.md`.
+
 Evidence registration is permissionless within a fixed bonded review round for
 one exact parent, candidate, and patch CID. The opener cannot choose the final
 roots. Any eligible operator may register evidence before the deadline, and any

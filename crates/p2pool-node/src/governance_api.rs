@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use cid::{Cid, Version};
 use governance_core::{
-    evaluate_gates, AcceptanceEvidence, EpochGateParametersV1, EpochGovernanceParameterSetV1,
+    evaluate_gates, frozen_proposal_set_root, package_development_policy, AcceptanceEvidence,
+    DevelopmentPolicyBundleV1, EpochGateParametersV1, EpochGovernanceParameterSetV1,
     GateParameterSet, RiskClass,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,10 @@ pub struct GovernanceDashboardResponseV1 {
     pub safety_label: String,
     pub governance_contract_address: Option<String>,
     pub current_canonical_ecosystem_cid: Option<String>,
+    #[serde(default)]
+    pub development_policy_cid: Option<String>,
+    #[serde(default)]
+    pub development_policy: Option<DevelopmentPolicyBundleV1>,
     pub identity_metrics: Option<GovernanceIdentityMetricsCertificationV1>,
     pub repositories: Vec<GovernanceRepositoryViewV1>,
     pub proposals: Vec<GovernanceProposalViewV1>,
@@ -125,6 +130,8 @@ pub struct GovernanceIdentityMetricsCertificationV1 {
 pub struct GovernanceProposalViewV1 {
     pub proposal_id: String,
     pub proposal_cid: String,
+    pub scope_evidence_cid: String,
+    pub scope_evidence_verified: bool,
     pub candidate_ecosystem_cid: String,
     pub parameter_set_cid: String,
     pub review_round_id: String,
@@ -144,6 +151,10 @@ pub struct GovernanceProposalViewV1 {
     pub agent_review_root: String,
     pub build_attestation_root: String,
     pub data_availability_root: String,
+    #[serde(default)]
+    pub critical_finding_waiver_cid: Option<String>,
+    #[serde(default)]
+    pub critical_finding_waiver_verified: bool,
     pub ai_reviews: GovernanceReviewGateV1,
     pub builds: GovernanceBuildGateV1,
     pub data_availability: GovernanceAvailabilityGateV1,
@@ -244,6 +255,8 @@ fn unconfigured() -> GovernanceDashboardResponseV1 {
         safety_label: EXPERIMENTAL_LABEL.to_string(),
         governance_contract_address: None,
         current_canonical_ecosystem_cid: None,
+        development_policy_cid: None,
+        development_policy: None,
         identity_metrics: None,
         repositories: vec![],
         proposals: vec![],
@@ -257,7 +270,7 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
     if value.api_version != "pohw-governance-dashboard-v1"
         || value.schema_version != 1
         || !value.experimental
-        || value.status != "verified-local-snapshot"
+        || value.status != "operator-validated-local-snapshot"
         || value.safety_label != EXPERIMENTAL_LABEL
     {
         bail!("governance dashboard header or safety label is invalid");
@@ -274,6 +287,20 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
             .as_deref()
             .context("configured governance snapshot has no canonical ecosystem CID")?,
     )?;
+    let development_policy = value
+        .development_policy
+        .clone()
+        .context("configured governance snapshot has no decentralized development policy")?;
+    let declared_policy_cid = value
+        .development_policy_cid
+        .as_deref()
+        .context("configured governance snapshot has no development policy CID")?;
+    validate_object_cid(declared_policy_cid)?;
+    let verified_policy = package_development_policy(development_policy)
+        .context("configured governance development policy is invalid")?;
+    if verified_policy.root_cid.to_string() != declared_policy_cid {
+        bail!("configured governance development policy CID is not canonical");
+    }
     let metrics = value
         .identity_metrics
         .as_ref()
@@ -305,6 +332,10 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
     for proposal in &value.proposals {
         validate_sha256(&proposal.proposal_id)?;
         validate_object_cid(&proposal.proposal_cid)?;
+        validate_object_cid(&proposal.scope_evidence_cid)?;
+        if !proposal.scope_evidence_verified {
+            bail!("proposal scope evidence was not verified against source and patch CARs");
+        }
         validate_object_cid(&proposal.candidate_ecosystem_cid)?;
         validate_object_cid(&proposal.parameter_set_cid)?;
         if proposal.parameter_set_cid != EXPECTED_GOVERNANCE_PARAMETER_SET_CID {
@@ -335,9 +366,6 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
             "normal" | "critical" | "consensus" | "migration"
         ) {
             bail!("proposal risk class is invalid");
-        }
-        if proposal.risk_class == "normal" {
-            bail!("normal proposal snapshots are disabled until an objective risk classifier is deployed");
         }
         let profile = EpochGovernanceParameterSetV1::experimental_defaults();
         let limits = if proposal.risk_class == "normal" {
@@ -489,6 +517,12 @@ fn validate_epoch_governance(
         }
         (Some(root), Some(frozen_at)) => {
             validate_sha256(root)?;
+            let expected_root =
+                frozen_proposal_set_root(epoch.governance_epoch, &epoch.ordered_proposal_ids)
+                    .context("could not derive the canonical frozen proposal-set root")?;
+            if root != expected_root {
+                bail!("frozen governance proposal-set root does not bind its ordered IDs");
+            }
             if frozen_at < schedule.proposal_cutoff_block
                 || frozen_at >= schedule.commit_start_block
                 || epoch.ordered_proposal_ids.is_empty()
@@ -639,6 +673,28 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
     }
 
     let profile = EpochGovernanceParameterSetV1::experimental_defaults();
+    let risk = match proposal.risk_class.as_str() {
+        "normal" => RiskClass::Normal,
+        "critical" => RiskClass::Critical,
+        "consensus" => RiskClass::Consensus,
+        "migration" => RiskClass::Migration,
+        _ => bail!("proposal risk class is invalid"),
+    };
+    let valid_critical_finding_waiver = match (
+        proposal.critical_finding_waiver_cid.as_deref(),
+        proposal.critical_finding_waiver_verified,
+    ) {
+        (None, false) => false,
+        (Some(cid), true) => {
+            if !risk.is_critical() {
+                bail!("normal proposals cannot carry a critical-finding waiver");
+            }
+            validate_object_cid(cid)
+                .context("critical-finding waiver CID is not a canonical immutable object")?;
+            true
+        }
+        _ => bail!("critical-finding waiver CID and verification state are incomplete"),
+    };
     let evidence = AcceptanceEvidence {
         yes_weight,
         no_weight,
@@ -649,18 +705,15 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         valid_agent_attestations: proposal.ai_reviews.valid_attestations,
         distinct_agent_families: proposal.ai_reviews.distinct_model_families,
         distinct_agent_owner_identities: proposal.ai_reviews.distinct_owner_identities,
-        unresolved_critical_findings: proposal.ai_reviews.unresolved_critical_findings,
+        unresolved_critical_findings: if valid_critical_finding_waiver {
+            0
+        } else {
+            proposal.ai_reviews.unresolved_critical_findings
+        },
         valid_builders: proposal.builds.independent_builders,
         distinct_builder_platforms: proposal.builds.distinct_platforms,
         matching_core_artifact_digests: proposal.builds.matching_core_artifact_digests,
         independent_data_availability_providers: proposal.data_availability.independent_attestors,
-    };
-    let risk = match proposal.risk_class.as_str() {
-        "normal" => RiskClass::Normal,
-        "critical" => RiskClass::Critical,
-        "consensus" => RiskClass::Consensus,
-        "migration" => RiskClass::Migration,
-        _ => unreachable!("risk class was validated before gate recomputation"),
     };
     let expected = if risk.is_critical() {
         profile.critical
@@ -873,6 +926,8 @@ mod tests {
         GovernanceProposalViewV1 {
             proposal_id: "4".repeat(64),
             proposal_cid: cid("proposal"),
+            scope_evidence_cid: cid("scope-evidence"),
+            scope_evidence_verified: true,
             candidate_ecosystem_cid: cid("candidate"),
             parameter_set_cid: EXPECTED_GOVERNANCE_PARAMETER_SET_CID.to_string(),
             review_round_id: "5".repeat(64),
@@ -892,6 +947,8 @@ mod tests {
             agent_review_root: "6".repeat(64),
             build_attestation_root: "7".repeat(64),
             data_availability_root: "8".repeat(64),
+            critical_finding_waiver_cid: None,
+            critical_finding_waiver_verified: false,
             ai_reviews: GovernanceReviewGateV1 {
                 valid_attestations: 3,
                 required_attestations: 3,
@@ -943,9 +1000,17 @@ mod tests {
 
     fn configured_dashboard() -> GovernanceDashboardResponseV1 {
         let mut value = unconfigured();
-        value.status = "verified-local-snapshot".to_string();
+        value.status = "operator-validated-local-snapshot".to_string();
         value.governance_contract_address = Some(format!("0x{}", "1".repeat(40)));
         value.current_canonical_ecosystem_cid = Some(cid("ecosystem"));
+        let development_policy = DevelopmentPolicyBundleV1::experimental_default();
+        value.development_policy_cid = Some(
+            package_development_policy(development_policy.clone())
+                .unwrap()
+                .root_cid
+                .to_string(),
+        );
+        value.development_policy = Some(development_policy);
         value.identity_metrics = Some(certified_metrics());
         value.repositories.push(GovernanceRepositoryViewV1 {
             name: "P2poolBTC".to_string(),
@@ -955,11 +1020,13 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_governance_day_ui_fixture_passes_strict_snapshot_validation() {
+    fn checked_in_governance_day_ui_fixture_has_a_bound_proposal_set_root() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/governance/fixtures/governance-dashboard-v1.json");
-        let value = load_dashboard(Some(&fixture)).unwrap();
-        assert_eq!(value.status, "verified-local-snapshot");
+        let bytes = fs::read(&fixture).unwrap();
+        let value: GovernanceDashboardResponseV1 = serde_json::from_slice(&bytes).unwrap();
+        validate_dashboard(&value).unwrap();
+        assert_eq!(value.status, "operator-validated-local-snapshot");
         assert_eq!(value.proposals.len(), 1);
         assert_eq!(value.epoch_governance.unwrap().phase, "Grace");
     }
@@ -976,7 +1043,9 @@ mod tests {
                 commit_end_block: 100,
                 reveal_end_block: 120,
             },
-            frozen_proposal_set_root: Some("9".repeat(64)),
+            frozen_proposal_set_root: Some(
+                frozen_proposal_set_root(421, std::slice::from_ref(&proposal_id)).unwrap(),
+            ),
             ordered_proposal_ids: vec![proposal_id],
             frozen_at_block: Some(40),
             reviewed_proposals: 1,
@@ -1001,24 +1070,32 @@ mod tests {
 
     #[test]
     fn strict_snapshot_rejects_unsafe_or_mismatched_fields() {
-        let mut value = unconfigured();
-        value.status = "verified-local-snapshot".to_string();
-        value.governance_contract_address = Some(format!("0x{}", "1".repeat(40)));
-        value.current_canonical_ecosystem_cid = Some(cid("ecosystem"));
-        value.identity_metrics = Some(certified_metrics());
-        value.repositories.push(GovernanceRepositoryViewV1 {
-            name: "P2poolBTC".to_string(),
-            source_tree_cid: cid("source"),
-        });
+        let mut value = configured_dashboard();
         assert!(validate_dashboard(&value).is_ok());
         value.repositories[0].source_tree_cid = "not-a-cid".to_string();
         assert!(validate_dashboard(&value).is_err());
     }
 
     #[test]
+    fn dashboard_rejects_privileged_or_cid_mismatched_development_policy() {
+        let mut value = configured_dashboard();
+        value
+            .development_policy
+            .as_mut()
+            .unwrap()
+            .authority
+            .agent_may_execute_proposal = true;
+        assert!(validate_dashboard(&value).is_err());
+
+        let mut value = configured_dashboard();
+        value.development_policy_cid = Some(cid("substituted-policy"));
+        assert!(validate_dashboard(&value).is_err());
+    }
+
+    #[test]
     fn configured_snapshot_requires_a_canonical_contract_address() {
         let mut value = unconfigured();
-        value.status = "verified-local-snapshot".to_string();
+        value.status = "operator-validated-local-snapshot".to_string();
         value.current_canonical_ecosystem_cid = Some(cid("ecosystem"));
         value.identity_metrics = Some(certified_metrics());
         value.repositories.push(GovernanceRepositoryViewV1 {
@@ -1056,6 +1133,25 @@ mod tests {
     }
 
     #[test]
+    fn accepted_proposal_requires_an_explicit_verified_critical_finding_waiver() {
+        let mut proposal = passing_proposal();
+        proposal.ai_reviews.unresolved_critical_findings = 1;
+        assert!(validate_proposal_gates(&proposal).is_err());
+
+        proposal.critical_finding_waiver_cid = Some(cid("critical-finding-waiver"));
+        assert!(validate_proposal_gates(&proposal).is_err());
+
+        proposal.critical_finding_waiver_verified = true;
+        assert!(validate_proposal_gates(&proposal).is_ok());
+
+        proposal.critical_finding_waiver_cid = Some(raw_cid("raw-waiver-is-not-a-manifest"));
+        assert!(validate_proposal_gates(&proposal).is_err());
+
+        proposal.critical_finding_waiver_cid = None;
+        assert!(validate_proposal_gates(&proposal).is_err());
+    }
+
+    #[test]
     fn proposal_cannot_self_declare_weaker_gate_minima() {
         let mut proposal = passing_proposal();
         proposal.pos.turnout_quorum_bps = 1;
@@ -1073,10 +1169,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_rejects_disabled_normal_risk_and_underfunded_critical_bonds() {
+    fn dashboard_rejects_unverified_scope_and_underfunded_critical_bonds() {
         let mut value = configured_dashboard();
         let mut proposal = passing_proposal();
-        proposal.risk_class = "normal".to_string();
+        proposal.scope_evidence_verified = false;
         value.proposals.push(proposal);
         assert!(validate_dashboard(&value).is_err());
 
@@ -1103,7 +1199,7 @@ mod tests {
     #[test]
     fn dashboard_collections_match_manifest_repository_limits() {
         let mut value = unconfigured();
-        value.status = "verified-local-snapshot".to_string();
+        value.status = "operator-validated-local-snapshot".to_string();
         value.governance_contract_address = Some(format!("0x{}", "1".repeat(40)));
         value.current_canonical_ecosystem_cid = Some(cid("ecosystem"));
         value.identity_metrics = Some(certified_metrics());
@@ -1136,6 +1232,18 @@ mod tests {
         value.epoch_governance = Some(epoch_view(proposal.proposal_id.clone()));
         value.proposals = vec![proposal];
         assert!(validate_dashboard(&value).is_ok());
+
+        value
+            .epoch_governance
+            .as_mut()
+            .unwrap()
+            .frozen_proposal_set_root = Some("9".repeat(64));
+        assert!(validate_dashboard(&value).is_err());
+
+        let epoch = value.epoch_governance.as_mut().unwrap();
+        epoch.frozen_proposal_set_root = Some(
+            frozen_proposal_set_root(epoch.governance_epoch, &epoch.ordered_proposal_ids).unwrap(),
+        );
 
         value
             .epoch_governance

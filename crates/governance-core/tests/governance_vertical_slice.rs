@@ -95,13 +95,17 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
     let candidate_a = roots.join("candidate-a");
     let candidate_b = roots.join("candidate-b");
     for root in [&base_a, &base_b, &candidate_a, &candidate_b] {
-        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
     }
-    fs::write(base_a.join("fixture.txt"), b"p2pool base\n").unwrap();
-    fs::write(base_b.join("fixture.txt"), b"idena base\n").unwrap();
-    fs::write(candidate_a.join("fixture.txt"), b"p2pool candidate\n").unwrap();
-    fs::write(candidate_b.join("fixture.txt"), b"idena candidate\n").unwrap();
-    fs::write(candidate_b.join("added.txt"), b"atomic second repository\n").unwrap();
+    fs::write(base_a.join("docs/fixture.md"), b"p2pool base\n").unwrap();
+    fs::write(base_b.join("docs/fixture.md"), b"idena base\n").unwrap();
+    fs::write(candidate_a.join("docs/fixture.md"), b"p2pool candidate\n").unwrap();
+    fs::write(candidate_b.join("docs/fixture.md"), b"idena candidate\n").unwrap();
+    fs::write(
+        candidate_b.join("docs/added.md"),
+        b"atomic second repository\n",
+    )
+    .unwrap();
 
     let base_sources = [
         package_source_tree(&base_a, "P2poolBTC").unwrap(),
@@ -188,6 +192,92 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
     let migration = package_dag_cbor("no migration".to_string()).unwrap();
     let test_plan = package_dag_cbor("rebuild both fixture repositories".to_string()).unwrap();
     let toolchain = package_toolchain_manifest_for_ecosystem(&candidate.manifest).unwrap();
+    let scope_repositories = repository_patches
+        .iter()
+        .enumerate()
+        .map(|(index, patch)| {
+            let mut changes = patch
+                .patch
+                .removed_paths
+                .iter()
+                .map(|path| ScopeChangeV1 {
+                    path: path.clone(),
+                    change_kind: "remove".to_string(),
+                    size: 0,
+                })
+                .chain(
+                    patch
+                        .patch
+                        .upserted_files
+                        .iter()
+                        .map(|entry| ScopeChangeV1 {
+                            path: entry.path.clone(),
+                            change_kind: "upsert".to_string(),
+                            size: entry.size,
+                        }),
+                )
+                .collect::<Vec<_>>();
+            changes.sort_by(|left, right| left.path.cmp(&right.path));
+            RepositoryScopeEvidenceV1 {
+                repository: patch.patch.repository.clone(),
+                base_source_cid: patch.patch.base_source_cid.clone(),
+                candidate_source_cid: patch.patch.candidate_source_cid.clone(),
+                patch_cid: patch.patch_cid.to_string(),
+                patch_sha256: patch.patch_sha256.clone(),
+                base_manifest_dag_cbor_hex: hex::encode(&base_sources[index].dag_cbor_bytes),
+                candidate_manifest_dag_cbor_hex: hex::encode(
+                    &candidate_sources[index].dag_cbor_bytes,
+                ),
+                patch_dag_cbor_hex: hex::encode(&patch.dag_cbor_bytes),
+                patch_content_bytes: patch
+                    .patch
+                    .upserted_files
+                    .iter()
+                    .map(|entry| entry.size)
+                    .sum(),
+                candidate_content_bytes: candidate_sources[index]
+                    .manifest
+                    .files
+                    .iter()
+                    .map(|entry| entry.size)
+                    .sum(),
+                changes,
+            }
+        })
+        .collect::<Vec<_>>();
+    let changed_file_count = scope_repositories
+        .iter()
+        .map(|repository| repository.changes.len() as u32)
+        .sum();
+    let patch_bytes = scope_repositories
+        .iter()
+        .map(|repository| repository.patch_content_bytes)
+        .sum();
+    let source_package_bytes = scope_repositories
+        .iter()
+        .map(|repository| repository.candidate_content_bytes)
+        .sum();
+    let description_bytes = (rationale.dag_cbor_bytes.len()
+        + migration.dag_cbor_bytes.len()
+        + test_plan.dag_cbor_bytes.len()) as u32;
+    let scope = package_proposal_scope_evidence(ProposalScopeEvidenceV1 {
+        schema_version: 1,
+        classifier_version: OBJECTIVE_RISK_CLASSIFIER_V2.to_string(),
+        parent_ecosystem_cid: parent.root_cid.to_string(),
+        candidate_ecosystem_cid: candidate.root_cid.to_string(),
+        patch_cid: aggregate_patch.root_cid.to_string(),
+        repositories: scope_repositories,
+        rationale_bytes: rationale.dag_cbor_bytes.len() as u32,
+        migration_notes_bytes: migration.dag_cbor_bytes.len() as u32,
+        test_plan_bytes: test_plan.dag_cbor_bytes.len() as u32,
+        changed_file_count,
+        patch_bytes,
+        source_package_bytes,
+        description_bytes,
+        migration_operation_count: 0,
+        derived_risk_class: RiskClass::Normal,
+    })
+    .unwrap();
     let pinset = package_pinset_manifest_for_transition_with_additional(
         &candidate,
         &aggregate_patch,
@@ -195,6 +285,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
             rationale.root_cid.to_string(),
             migration.root_cid.to_string(),
             test_plan.root_cid.to_string(),
+            scope.root_cid.to_string(),
         ],
     )
     .unwrap();
@@ -211,6 +302,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         &aggregate_patch.car_bytes,
     );
     store.put(&toolchain.root_cid.to_string(), &toolchain.car_bytes);
+    store.put(&scope.root_cid.to_string(), &scope.car_bytes);
     store.put(&pinset.root_cid.to_string(), &pinset.car_bytes);
     for source in base_sources.iter().chain(candidate_sources.iter()) {
         store.put(&source.root_cid.to_string(), &source.car_bytes);
@@ -281,6 +373,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
             candidate_ecosystem_cid: candidate.root_cid.to_string(),
             source_cids: affected.clone(),
             toolchain_cid: toolchain.root_cid.to_string(),
+            scope_evidence_cid: scope.root_cid.to_string(),
             builder_identity: address((index + 1) as u8),
             runtime_family: if index == 1 { "macos" } else { "linux" }.to_string(),
             architecture: if index == 1 { "arm64" } else { "x86_64" }.to_string(),
@@ -344,7 +437,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
             probe_result_cid,
             available: true,
             observed_at_block_or_timestamp: 20,
-            expires_at_block: 400,
+            expires_at_block: 2_000,
             bond_atoms: ONE_IDNA.to_string(),
             authentication: "on-chain-submitter".to_string(),
         };
@@ -465,6 +558,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
                 candidate_car: &candidate.car_bytes,
                 patch_car: &aggregate_patch.car_bytes,
                 pinset_car: &pinset.car_bytes,
+                scope_car: &scope.car_bytes,
                 opener_address: &address(1),
                 attached_bond_atoms: 10 * ONE_IDNA,
             },
@@ -529,6 +623,15 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
             )
             .unwrap();
     }
+    engine
+        .freeze_review_round(
+            &review_round_id,
+            GovernanceClock {
+                block: 50,
+                epoch: 2,
+            },
+        )
+        .unwrap();
     for package in &availability_packages {
         engine
             .submit_data_availability_attestation(
@@ -549,7 +652,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
                         .clone(),
                 },
                 GovernanceClock {
-                    block: 20,
+                    block: 50,
                     epoch: 2,
                 },
             )
@@ -577,18 +680,16 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         Some(availability_commitment.root.as_str())
     );
     let content = ChangeProposalContentV1 {
-        schema_version: 1,
+        schema_version: 2,
+        scope_evidence_cid: scope.root_cid.to_string(),
         governance_parameter_set_cid: parameter_package.root_cid.to_string(),
         parent_canonical_ecosystem_cid: parent.root_cid.to_string(),
         candidate_ecosystem_cid: candidate.root_cid.to_string(),
         affected_repositories: vec!["P2poolBTC".to_string(), "idena-go".to_string()],
-        changed_file_count: 2,
-        patch_bytes: aggregate_patch.car_bytes.len() as u64,
-        source_package_bytes: candidate_sources
-            .iter()
-            .map(|package| package.car_bytes.len() as u64)
-            .sum(),
-        description_bytes: rationale.car_bytes.len() as u32,
+        changed_file_count: scope.value.changed_file_count,
+        patch_bytes: scope.value.patch_bytes,
+        source_package_bytes: scope.value.source_package_bytes,
+        description_bytes: scope.value.description_bytes,
         migration_operation_count: 0,
         base_source_cids: BTreeMap::from([
             (
@@ -611,7 +712,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         review_round_id,
         proposer_address: address(1),
         proposal_bond_atoms: 10 * ONE_IDNA,
-        risk_class: RiskClass::Critical,
+        risk_class: scope.value.derived_risk_class,
         rationale_cid: rationale.root_cid.to_string(),
         migration_notes_cid: migration.root_cid.to_string(),
         test_plan_cid: test_plan.root_cid.to_string(),
@@ -632,7 +733,13 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         voting_end: 210,
         challenge_end: 270,
     };
-    let proposal_package = package_change_proposal(content.clone(), &parameters).unwrap();
+    let proposal_package = package_change_proposal_with_scope(
+        content.clone(),
+        &parameters,
+        &scope.root_cid.to_string(),
+        &scope.value,
+    )
+    .unwrap();
     store.put(
         &proposal_package.content_cid.to_string(),
         &proposal_package.car_bytes,

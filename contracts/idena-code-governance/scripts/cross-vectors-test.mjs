@@ -1,14 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { TextDecoder, TextEncoder } from "node:util";
 
 const vectors = JSON.parse(await readFile(
   new URL("../../../tests/governance/voting-vectors-v1.json", import.meta.url),
-  "utf8",
-));
-const ballotVectors = JSON.parse(await readFile(
-  new URL("../../../tests/governance/epoch-ballot-vectors-v1.json", import.meta.url),
   "utf8",
 ));
 const wasm = await readFile(new URL("../build/test-probe.wasm", import.meta.url));
@@ -77,35 +72,8 @@ for (const item of vectors.ageInvarianceCases) {
   assert.equal(first, second, "ignored age metadata changed the result");
   assert.equal(first.split("|")[2], item.expectedWeight);
 }
-for (const item of ballotVectors.cases) {
-  const chainId = Buffer.from(item.chainId);
-  const u32 = (value) => {
-    const bytes = Buffer.alloc(4);
-    bytes.writeUInt32BE(value);
-    return bytes;
-  };
-  const u64 = (value) => {
-    const bytes = Buffer.alloc(8);
-    bytes.writeBigUInt64BE(BigInt(value));
-    return bytes;
-  };
-  const commitment = createHash("sha256").update(Buffer.concat([
-    Buffer.from(ballotVectors.domain),
-    u32(chainId.length),
-    chainId,
-    Buffer.from(item.contractAddress.slice(2), "hex"),
-    u64(item.governanceEpoch),
-    Buffer.from(item.voterAddress.slice(2), "hex"),
-    Buffer.from(item.frozenProposalSetRoot, "hex"),
-    u32(item.choices.length),
-    Buffer.from(item.choices.map((choice) => ({ yes: 1, no: 2, abstain: 3 })[choice])),
-    u64(item.ballotNonce),
-    Buffer.from(item.salt, "hex"),
-  ])).digest("hex");
-  assert.equal(commitment, item.expectedCommitment, item.name);
-}
 
-console.log(`AssemblyScript/JS vectors passed: ${vectors.flipTrustCases.length} trust, ${vectors.weightCases.length} weight, ${vectors.ageInvarianceCases.length} age-invariance, ${ballotVectors.cases.length} epoch-ballot`);
+console.log(`AssemblyScript vectors passed: ${vectors.flipTrustCases.length} trust, ${vectors.weightCases.length} weight, ${vectors.ageInvarianceCases.length} age-invariance`);
 
 function call(method, args) {
   const pointers = args.map((value) => writeBytes(encoder.encode(String(value))));

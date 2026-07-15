@@ -1,0 +1,674 @@
+diff --git a/bindings.h b/bindings.h
+index 279a363..3a674ab 100644
+--- a/bindings.h
++++ b/bindings.h
+@@ -29,6 +29,10 @@
+ 
+ #define ACTION_READ_IDENTITY 5
+ 
++#define FEATURE_EPOCH_BLOCK (1ULL << 0)
++
++#define GO_API_V2_ABI_VERSION 2
++
+ /**
+  * This enum gives names to the status codes returned from Go callbacks to Rust.
+  *
+@@ -127,6 +131,15 @@ typedef struct GoApi {
+   struct GoApi_vtable vtable;
+ } GoApi;
+ 
++typedef struct GoApi_v2 {
++  const struct api_t *state;
++  const struct gas_meter_t *gas_meter;
++  struct GoApi_vtable vtable;
++  uint32_t abi_version;
++  uint32_t abi_size;
++  int32_t (*epoch_block)(const struct api_t*, uint64_t*, uint64_t*);
++} GoApi_v2;
++
+ typedef struct ByteSliceView {
+   /**
+    * True if and only if the byte slice is nil in Go. If this is true, the other fields must be ignored.
+@@ -159,3 +172,25 @@ uint8_t deploy(struct GoApi api,
+                uint64_t *gas_used,
+                struct UnmanagedVector *action_result,
+                bool is_debug);
++
++uint8_t execute_with_features(struct GoApi_v2 api,
++                              struct ByteSliceView code,
++                              struct ByteSliceView method_name,
++                              struct ByteSliceView args,
++                              struct ByteSliceView invocation_context,
++                              struct ByteSliceView contract_addr,
++                              uint64_t gas_limit,
++                              uint64_t *gas_used,
++                              struct UnmanagedVector *action_result,
++                              bool is_debug,
++                              uint64_t features);
++
++uint8_t deploy_with_features(struct GoApi_v2 api,
++                             struct ByteSliceView code,
++                             struct ByteSliceView args,
++                             struct ByteSliceView contract_addr,
++                             uint64_t gas_limit,
++                             uint64_t *gas_used,
++                             struct UnmanagedVector *action_result,
++                             bool is_debug,
++                             uint64_t features);
+diff --git a/src/backend.rs b/src/backend.rs
+index f3ed80d..12b70c4 100644
+--- a/src/backend.rs
++++ b/src/backend.rs
+@@ -38,6 +38,7 @@ pub trait Backend: Copy + Clone + Send {
+     fn remove_storage(&self, key: Vec<u8>) -> BackendResult<()>;
+     fn block_timestamp(&self) -> BackendResult<i64>;
+     fn block_number(&self) -> BackendResult<u64>;
++    fn epoch_block(&self) -> BackendResult<u64>;
+     fn min_fee_per_gas(&self) -> BackendResult<IDNA>;
+     fn balance(&self) -> BackendResult<IDNA>;
+     fn block_seed(&self) -> BackendResult<Vec<u8>>;
+@@ -128,6 +129,10 @@ impl Backend for MockBackend {
+         todo!()
+     }
+ 
++    fn epoch_block(&self) -> BackendResult<u64> {
++        (Ok(43), 37)
++    }
++
+     fn min_fee_per_gas(&self) -> BackendResult<IDNA> {
+         todo!()
+     }
+diff --git a/src/exports.rs b/src/exports.rs
+index 59d6a39..cc76cfd 100644
+--- a/src/exports.rs
++++ b/src/exports.rs
+@@ -6,10 +6,13 @@ use crate::args::convert_args;
+ use crate::backend::{Backend, BackendError, BackendResult};
+ use crate::costs::{BASE_CALL_COST, BASE_DEPLOY_COST};
+ use crate::errors::VmError;
+-use crate::memory::ByteSliceView;
++use crate::memory::{ByteSliceView, VmResult};
+ use crate::runner::VmRunner;
+ use crate::types::{Action, ActionResult, Address, InvocationContext, IDNA};
+ use crate::{check_go_result, proto};
++use crate::{FEATURE_EPOCH_BLOCK, KNOWN_FEATURES};
++
++pub const GO_API_V2_ABI_VERSION: u32 = 2;
+ 
+ #[repr(C)]
+ pub struct gas_meter_t {
+@@ -202,7 +205,11 @@ impl U8SliceView {
+         match source {
+             Some(data) => Self {
+                 is_none: false,
+-                ptr: data.as_ptr(),
++                ptr: if data.is_empty() {
++                    std::ptr::null()
++                } else {
++                    data.as_ptr()
++                },
+                 len: data.len(),
+             },
+             None => Self {
+@@ -299,14 +306,41 @@ pub struct GoApi {
+     pub vtable: GoApi_vtable,
+ }
+ 
++#[repr(C)]
++#[derive(Copy, Clone)]
++#[allow(non_camel_case_types)]
++pub struct GoApi_v2 {
++    pub state: *const api_t,
++    pub gas_meter: *const gas_meter_t,
++    pub vtable: GoApi_vtable,
++    pub abi_version: u32,
++    pub abi_size: u32,
++    pub epoch_block: Option<extern "C" fn(*const api_t, *mut u64, *mut u64) -> i32>,
++}
++
+ #[allow(non_camel_case_types)]
+ pub struct apiWrapper {
+     api: GoApi,
++    epoch_block: Option<extern "C" fn(*const api_t, *mut u64, *mut u64) -> i32>,
+ }
+ 
+ impl apiWrapper {
+     fn new(api: GoApi) -> Self {
+-        apiWrapper { api }
++        apiWrapper {
++            api,
++            epoch_block: None,
++        }
++    }
++
++    fn new_v2(api: GoApi_v2) -> Self {
++        apiWrapper {
++            api: GoApi {
++                state: api.state,
++                gas_meter: api.gas_meter,
++                vtable: api.vtable,
++            },
++            epoch_block: api.epoch_block,
++        }
+     }
+ }
+ 
+@@ -316,6 +350,7 @@ impl Clone for apiWrapper {
+     fn clone(&self) -> Self {
+         apiWrapper {
+             api: self.api.clone(),
++            epoch_block: self.epoch_block,
+         }
+     }
+ }
+@@ -388,6 +423,27 @@ impl Backend for apiWrapper {
+         return (Ok(height), used_gas);
+     }
+ 
++    fn epoch_block(&self) -> BackendResult<u64> {
++        let callback = match self.epoch_block {
++            Some(callback) => callback,
++            None => {
++                return (
++                    Err(BackendError::new("epoch_block callback is unavailable")),
++                    0,
++                )
++            }
++        };
++        let mut height = 0_u64;
++        let mut used_gas = 0_u64;
++        let go_result = callback(
++            self.api.state,
++            &mut used_gas as *mut u64,
++            &mut height as *mut u64,
++        );
++        check_go_result!(go_result, used_gas, "epoch_block");
++        (Ok(height), used_gas)
++    }
++
+     fn min_fee_per_gas(&self) -> BackendResult<IDNA> {
+         let mut used_gas = 0_u64;
+         let mut data = UnmanagedVector::default();
+@@ -847,7 +903,7 @@ unsafe impl Send for apiWrapper {}
+ unsafe impl Sync for apiWrapper {}
+ 
+ fn do_execute(
+-    api: GoApi,
++    api: apiWrapper,
+     code: ByteSliceView,
+     method_name: ByteSliceView,
+     args: ByteSliceView,
+@@ -856,6 +912,7 @@ fn do_execute(
+     gas_limit: u64,
+     gas_used: &mut u64,
+     is_debug: bool,
++    features: u64,
+ ) -> ActionResult {
+     *gas_used = BASE_CALL_COST;
+ 
+@@ -920,14 +977,12 @@ fn do_execute(
+             .into()
+     }
+     std::panic::catch_unwind(|| {
+-        VmRunner::new(
+-            apiWrapper::new(api),
+-            addr.to_vec(),
+-            gas_limit,
+-            Some(ctx),
+-            is_debug,
++        VmRunner::new(api, addr.to_vec(), gas_limit, Some(ctx), is_debug, features).execute(
++            data,
++            &method,
++            arguments_bytes,
++            &mut gas_used.clone(),
+         )
+-        .execute(data, &method, arguments_bytes, &mut gas_used.clone())
+     })
+     .unwrap_or_else(|_| {
+         action_result_from_err(
+@@ -958,13 +1013,14 @@ fn action_result_from_err(
+ }
+ 
+ fn do_deploy(
+-    api: GoApi,
++    api: apiWrapper,
+     code: ByteSliceView,
+     args: ByteSliceView,
+     contract_addr: ByteSliceView,
+     gas_limit: u64,
+     gas_used: &mut u64,
+     is_debug: bool,
++    features: u64,
+ ) -> ActionResult {
+     *gas_used = BASE_DEPLOY_COST;
+     let addr = contract_addr.read().unwrap_or(&[]);
+@@ -1004,14 +1060,11 @@ fn do_deploy(
+         );
+     }
+     std::panic::catch_unwind(|| {
+-        VmRunner::new(
+-            apiWrapper::new(api),
+-            addr.to_vec(),
+-            gas_limit,
+-            None,
+-            is_debug,
++        VmRunner::new(api, addr.to_vec(), gas_limit, None, is_debug, features).deploy(
++            data,
++            arguments_bytes,
++            &mut gas_used.clone(),
+         )
+-        .deploy(data, arguments_bytes, &mut gas_used.clone())
+     })
+     .unwrap_or_else(|_| {
+         action_result_from_err(
+@@ -1023,6 +1076,44 @@ fn do_deploy(
+     })
+ }
+ 
++pub(crate) fn validate_feature_abi(
++    abi_version: u32,
++    abi_size: u32,
++    epoch_block: Option<extern "C" fn(*const api_t, *mut u64, *mut u64) -> i32>,
++    features: u64,
++) -> VmResult<()> {
++    if abi_version != GO_API_V2_ABI_VERSION {
++        return Err(VmError::custom(format!(
++            "unsupported GoApi_v2 ABI version: expected {}, found {}",
++            GO_API_V2_ABI_VERSION, abi_version
++        )));
++    }
++    if abi_size as usize != mem::size_of::<GoApi_v2>() {
++        return Err(VmError::custom(format!(
++            "unsupported GoApi_v2 ABI size: expected {}, found {}",
++            mem::size_of::<GoApi_v2>(),
++            abi_size
++        )));
++    }
++    if features & !KNOWN_FEATURES != 0 {
++        return Err(VmError::custom(format!(
++            "unsupported runtime feature mask: {:#x}",
++            features
++        )));
++    }
++    if features & FEATURE_EPOCH_BLOCK != 0 && epoch_block.is_none() {
++        return Err(VmError::custom(
++            "epoch_block feature requires the GoApi_v2 callback",
++        ));
++    }
++    Ok(())
++}
++
++fn store_action_result(res: &ActionResult, action_result: &mut UnmanagedVector) {
++    let proto_action = Into::<crate::proto::models::ActionResult>::into(res);
++    *action_result = UnmanagedVector::new(Some(proto_action.write_to_bytes().unwrap_or(vec![])));
++}
++
+ #[no_mangle]
+ pub extern "C" fn execute(
+     api: GoApi,
+@@ -1037,7 +1128,7 @@ pub extern "C" fn execute(
+     is_debug: bool,
+ ) -> u8 {
+     let res = do_execute(
+-        api,
++        apiWrapper::new(api),
+         code,
+         method_name,
+         args,
+@@ -1046,9 +1137,9 @@ pub extern "C" fn execute(
+         gas_limit,
+         gas_used,
+         is_debug,
++        0,
+     );
+-    let proto_action = Into::<crate::proto::models::ActionResult>::into(&res);
+-    *action_result = UnmanagedVector::new(Some(proto_action.write_to_bytes().unwrap_or(vec![])));
++    store_action_result(&res, action_result);
+     0
+ }
+ 
+@@ -1064,15 +1155,85 @@ pub extern "C" fn deploy(
+     is_debug: bool,
+ ) -> u8 {
+     let res = do_deploy(
+-        api,
++        apiWrapper::new(api),
+         code,
+         args,
+         contract_addr,
+         gas_limit,
+         gas_used,
+         is_debug,
++        0,
+     );
+-    let proto_action = Into::<crate::proto::models::ActionResult>::into(&res);
+-    *action_result = UnmanagedVector::new(Some(proto_action.write_to_bytes().unwrap_or(vec![])));
++    store_action_result(&res, action_result);
++    0
++}
++
++#[no_mangle]
++pub extern "C" fn execute_with_features(
++    api: GoApi_v2,
++    code: ByteSliceView,
++    method_name: ByteSliceView,
++    args: ByteSliceView,
++    invocation_context: ByteSliceView,
++    contract_addr: ByteSliceView,
++    gas_limit: u64,
++    gas_used: &mut u64,
++    action_result: &mut UnmanagedVector,
++    is_debug: bool,
++    features: u64,
++) -> u8 {
++    let addr = contract_addr.read().unwrap_or(&[]);
++    let res = match validate_feature_abi(api.abi_version, api.abi_size, api.epoch_block, features) {
++        Ok(()) => do_execute(
++            apiWrapper::new_v2(api),
++            code,
++            method_name,
++            args,
++            invocation_context,
++            contract_addr,
++            gas_limit,
++            gas_used,
++            is_debug,
++            features,
++        ),
++        Err(err) => {
++            *gas_used = 0;
++            action_result_from_err(err, addr, gas_limit, 0)
++        }
++    };
++    store_action_result(&res, action_result);
++    0
++}
++
++#[no_mangle]
++pub extern "C" fn deploy_with_features(
++    api: GoApi_v2,
++    code: ByteSliceView,
++    args: ByteSliceView,
++    contract_addr: ByteSliceView,
++    gas_limit: u64,
++    gas_used: &mut u64,
++    action_result: &mut UnmanagedVector,
++    is_debug: bool,
++    features: u64,
++) -> u8 {
++    let addr = contract_addr.read().unwrap_or(&[]);
++    let res = match validate_feature_abi(api.abi_version, api.abi_size, api.epoch_block, features) {
++        Ok(()) => do_deploy(
++            apiWrapper::new_v2(api),
++            code,
++            args,
++            contract_addr,
++            gas_limit,
++            gas_used,
++            is_debug,
++            features,
++        ),
++        Err(err) => {
++            *gas_used = 0;
++            action_result_from_err(err, addr, gas_limit, 0)
++        }
++    };
++    store_action_result(&res, action_result);
+     0
+ }
+diff --git a/src/imports.rs b/src/imports.rs
+index 4d16932..c4aa3fb 100644
+--- a/src/imports.rs
++++ b/src/imports.rs
+@@ -107,6 +107,16 @@ pub fn block_number<B: Backend>(env: &Env<B>) -> VmResult<u64> {
+     Ok(result?)
+ }
+ 
++pub fn epoch_block<B: Backend>(env: &Env<B>) -> VmResult<u64> {
++    set_left_gas_to_backend(env)?;
++
++    let (result, gas) = env.backend.epoch_block();
++
++    process_gas_info(env, gas)?;
++
++    Ok(result?)
++}
++
+ pub fn block_seed<B: Backend>(env: &Env<B>) -> VmResult<u32> {
+     set_left_gas_to_backend(env)?;
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 8a878c5..fa6da46 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -15,3 +15,6 @@ mod runner;
+ #[cfg(test)]
+ mod tests;
+ mod types;
++
++pub const FEATURE_EPOCH_BLOCK: u64 = 1 << 0;
++pub const KNOWN_FEATURES: u64 = FEATURE_EPOCH_BLOCK;
+diff --git a/src/runner.rs b/src/runner.rs
+index 89575bf..3148f51 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -28,6 +28,7 @@ use crate::types::{
+     InvocationContext, Promise, PromiseResult, ReadShardedDataAction, IDNA,
+ };
+ use crate::unwrap_or_action_res;
++use crate::FEATURE_EPOCH_BLOCK;
+ 
+ pub struct VmRunner<B: Backend + 'static> {
+     pub contact_addr: Address,
+@@ -35,6 +36,7 @@ pub struct VmRunner<B: Backend + 'static> {
+     pub gas_limit: Gas,
+     ctx: Option<InvocationContext>,
+     pub is_debug: bool,
++    features: u64,
+     _wasmer: Option<Box<Instance>>,
+ }
+ 
+@@ -45,6 +47,7 @@ impl<B: Backend + 'static> VmRunner<B> {
+         gas_limit: Gas,
+         ctx: Option<InvocationContext>,
+         is_debug: bool,
++        features: u64,
+     ) -> Self {
+         VmRunner {
+             contact_addr: contract_addr,
+@@ -52,6 +55,7 @@ impl<B: Backend + 'static> VmRunner<B> {
+             gas_limit,
+             ctx,
+             is_debug,
++            features,
+             _wasmer: None,
+         }
+     }
+@@ -171,7 +175,17 @@ impl<B: Backend + 'static> VmRunner<B> {
+                 }
+             };
+         }
+-        let resolver = import_obj_debug.chain_back(import_object);
++        let mut import_obj_features = imports! {};
++        if self.features & FEATURE_EPOCH_BLOCK != 0 {
++            import_obj_features = imports! {
++                "env" => {
++                    "epoch_block" => Function::new_native_with_env(&store, env.clone(), epoch_block)
++                }
++            };
++        }
++        let resolver = import_obj_debug
++            .chain_back(import_obj_features)
++            .chain_back(import_object);
+         let module = match Module::new(&store, code) {
+             Ok(v) => v,
+             Err(err) => {
+diff --git a/src/tests.rs b/src/tests.rs
+index 925cd88..64a5895 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -16,7 +16,7 @@ fn test_empty_args_are_rejected_without_panic() {
+ fn test_deploy_invalid_wasm_returns_failed_action_result() {
+     let mock_backend = crate::backend::MockBackend {};
+     let mut gas_used = 0;
+-    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, false);
++    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, false, 0);
+ 
+     let result = runner.deploy(vec![0, 1, 2, 3], &[0], &mut gas_used);
+ 
+@@ -34,7 +34,7 @@ fn test_deploy_missing_required_exports_returns_failed_action_result() {
+     let contract = wat::parse_str(r#"(module (memory (export "memory") 1))"#).unwrap();
+     let mock_backend = crate::backend::MockBackend {};
+     let mut gas_used = 0;
+-    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, false);
++    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, false, 0);
+ 
+     let result = runner.deploy(contract, &[0], &mut gas_used);
+ 
+@@ -51,9 +51,145 @@ fn test_deploy_missing_required_exports_returns_failed_action_result() {
+ fn test_deploy_erc20() {
+     let mock_backend = crate::backend::MockBackend {};
+     let mut gas_used = 0;
+-    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, true);
++    let runner = crate::runner::VmRunner::new(mock_backend, vec![], 10_000_000, None, true, 0);
+ 
+     let result = runner.deploy(CONTRACT_ERC20.to_vec(), &[1], &mut gas_used);
+ 
+     assert!(result.success, "deploy failed: {}", result.error);
+ }
++
++fn epoch_block_contract() -> Vec<u8> {
++    wat::parse_str(
++        r#"(module
++            (import "env" "epoch_block" (func $epoch_block (result i64)))
++            (memory (export "memory") 1)
++            (func (export "allocate") (param i32) (result i32) i32.const 16)
++            (func (export "read") (result i64) call $epoch_block)
++        )"#,
++    )
++    .unwrap()
++}
++
++#[test]
++fn test_epoch_block_import_is_unresolved_without_feature() {
++    let mut gas_used = 0;
++    let runner = crate::runner::VmRunner::new(
++        crate::backend::MockBackend {},
++        vec![],
++        10_000_000,
++        None,
++        false,
++        0,
++    );
++
++    let result = runner.execute(
++        epoch_block_contract(),
++        &"read".to_string(),
++        &[1],
++        &mut gas_used,
++    );
++
++    assert!(!result.success);
++    assert!(result.error.contains("epoch_block"), "{}", result.error);
++}
++
++#[test]
++fn test_epoch_block_import_resolves_with_feature_and_charges_backend_gas() {
++    use crate::backend::Backend;
++
++    let backend = crate::backend::MockBackend {};
++    let (value, callback_gas) = backend.epoch_block();
++    assert_eq!(value.unwrap(), 43);
++    assert_eq!(callback_gas, 37);
++
++    let mut gas_used = 0;
++    let runner = crate::runner::VmRunner::new(
++        backend,
++        vec![],
++        10_000_000,
++        None,
++        false,
++        crate::FEATURE_EPOCH_BLOCK,
++    );
++
++    let result = runner.execute(
++        epoch_block_contract(),
++        &"read".to_string(),
++        &[1],
++        &mut gas_used,
++    );
++
++    assert!(result.success, "{}", result.error);
++    assert!(gas_used >= crate::costs::BASE_CALL_COST + callback_gas);
++}
++
++extern "C" fn epoch_block_callback(
++    _api: *const crate::exports::api_t,
++    _gas: *mut u64,
++    _height: *mut u64,
++) -> i32 {
++    0
++}
++
++#[test]
++fn test_feature_abi_is_append_only_and_fails_closed() {
++    use std::mem::{offset_of, size_of};
++
++    use crate::exports::{GoApi, GoApi_v2, GoApi_vtable, GO_API_V2_ABI_VERSION};
++
++    assert_eq!(size_of::<GoApi_vtable>(), 31 * size_of::<usize>());
++    assert_eq!(
++        size_of::<GoApi>(),
++        2 * size_of::<usize>() + size_of::<GoApi_vtable>()
++    );
++    assert_eq!(
++        size_of::<GoApi_v2>(),
++        size_of::<GoApi>() + 2 * size_of::<u32>() + size_of::<usize>()
++    );
++    assert_eq!(offset_of!(GoApi_v2, state), offset_of!(GoApi, state));
++    assert_eq!(
++        offset_of!(GoApi_v2, gas_meter),
++        offset_of!(GoApi, gas_meter)
++    );
++    assert_eq!(offset_of!(GoApi_v2, vtable), offset_of!(GoApi, vtable));
++    assert_eq!(offset_of!(GoApi_v2, abi_version), size_of::<GoApi>());
++    assert!(offset_of!(GoApi_v2, abi_size) > offset_of!(GoApi_v2, abi_version));
++    assert!(offset_of!(GoApi_v2, epoch_block) > offset_of!(GoApi_v2, abi_size));
++
++    let size = u32::try_from(size_of::<GoApi_v2>()).unwrap();
++    assert!(crate::exports::validate_feature_abi(
++        GO_API_V2_ABI_VERSION,
++        size,
++        Some(epoch_block_callback),
++        crate::FEATURE_EPOCH_BLOCK,
++    )
++    .is_ok());
++    assert!(crate::exports::validate_feature_abi(
++        GO_API_V2_ABI_VERSION + 1,
++        size,
++        Some(epoch_block_callback),
++        crate::FEATURE_EPOCH_BLOCK,
++    )
++    .is_err());
++    assert!(crate::exports::validate_feature_abi(
++        GO_API_V2_ABI_VERSION,
++        size - 1,
++        Some(epoch_block_callback),
++        crate::FEATURE_EPOCH_BLOCK,
++    )
++    .is_err());
++    assert!(crate::exports::validate_feature_abi(
++        GO_API_V2_ABI_VERSION,
++        size,
++        None,
++        crate::FEATURE_EPOCH_BLOCK,
++    )
++    .is_err());
++    assert!(crate::exports::validate_feature_abi(
++        GO_API_V2_ABI_VERSION,
++        size,
++        Some(epoch_block_callback),
++        1 << 63,
++    )
++    .is_err());
++}

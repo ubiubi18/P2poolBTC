@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/DeploymentReadinessInputV1.schema.json",
+  "title": "DeploymentReadinessInputV1 local evidence paths",
+  "description": "Operational input only. Paths are never part of a canonical governance object.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scopeCar",
+    "buildAttestationCars",
+    "dataAvailabilityAttestationCars",
+    "externalAuditAttestationCars",
+    "requiredAvailabilityThroughBlock"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scopeCar": {"type": "string", "minLength": 1},
+    "buildAttestationCars": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "dataAvailabilityAttestationCars": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "externalAuditAttestationCars": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "requiredAvailabilityThroughBlock": {"type": "integer", "minimum": 0}
+  }
+}

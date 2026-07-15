@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/ProposalScopeEvidenceV1.schema.json",
+  "title": "ProposalScopeEvidenceV1 deterministic human envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "classifierVersion", "parentEcosystemCid", "candidateEcosystemCid",
+    "patchCid", "repositories", "rationaleBytes", "migrationNotesBytes", "testPlanBytes",
+    "changedFileCount", "patchBytes", "sourcePackageBytes", "descriptionBytes",
+    "migrationOperationCount", "derivedRiskClass"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "classifierVersion": {"const": "pohw-objective-risk-classifier-v2"},
+    "parentEcosystemCid": {"$ref": "common.schema.json#/$defs/Cid"},
+    "candidateEcosystemCid": {"$ref": "common.schema.json#/$defs/Cid"},
+    "patchCid": {"$ref": "common.schema.json#/$defs/Cid"},
+    "repositories": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "baseSourceCid", "candidateSourceCid", "patchCid", "patchSha256", "baseManifestDagCborHex", "candidateManifestDagCborHex", "patchDagCborHex", "patchContentBytes", "candidateContentBytes", "changes"],
+        "properties": {
+          "repository": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+          "baseSourceCid": {"$ref": "common.schema.json#/$defs/Cid"},
+          "candidateSourceCid": {"$ref": "common.schema.json#/$defs/Cid"},
+          "patchCid": {"$ref": "common.schema.json#/$defs/Cid"},
+          "patchSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+          "baseManifestDagCborHex": {"type": "string", "pattern": "^[0-9a-f]+$", "maxLength": 1200000},
+          "candidateManifestDagCborHex": {"type": "string", "pattern": "^[0-9a-f]+$", "maxLength": 1200000},
+          "patchDagCborHex": {"type": "string", "pattern": "^[0-9a-f]+$", "maxLength": 1200000},
+          "patchContentBytes": {"type": "integer", "minimum": 0},
+          "candidateContentBytes": {"type": "integer", "minimum": 0},
+          "changes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "changeKind", "size"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "changeKind": {"enum": ["remove", "upsert"]},
+                "size": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        }
+      }
+    },
+    "rationaleBytes": {"type": "integer", "minimum": 1},
+    "migrationNotesBytes": {"type": "integer", "minimum": 0},
+    "testPlanBytes": {"type": "integer", "minimum": 1},
+    "changedFileCount": {"type": "integer", "minimum": 1},
+    "patchBytes": {"type": "integer", "minimum": 0},
+    "sourcePackageBytes": {"type": "integer", "minimum": 0},
+    "descriptionBytes": {"type": "integer", "minimum": 2},
+    "migrationOperationCount": {"type": "integer", "minimum": 0},
+    "derivedRiskClass": {"$ref": "common.schema.json#/$defs/RiskClass"}
+  }
+}

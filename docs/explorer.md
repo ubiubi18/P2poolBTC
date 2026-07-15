@@ -20,6 +20,19 @@ The heavy index is a network-host role, not a participant requirement. Miners,
 Pis, and observers use the public PoHW API and need neither `txindex=1` nor a
 local Electrs/Esplora database.
 
+Experiment 1 address history uses a separate bounded in-process host index. It
+reads only the active fork through the dedicated loopback Core RPC, verifies the
+manifest checkpoints and every active block hash, extends incrementally, and
+rebuilds from the first fork block after a reorganization. Its block,
+transaction, output, and address ceilings are explicit environment settings.
+It also enforces fixed fail-closed ceilings of 4 MiB per block, 10,000 bytes per
+script, 512 MiB of conservative retained-data accounting, and 50 million
+cumulative indexing work units. The overview API reports both consumption and
+limits. These counters bound deterministic payload work; they are not exact RSS
+measurements, and atomic refresh can temporarily hold two bounded copies. The
+index is reconstructed after an API restart and never participates in
+consensus, mining admission, share validation, or payouts.
+
 ## Public API
 
 The versioned read-only API is served by `p2pool-node serve-dashboard-api`:
@@ -74,7 +87,7 @@ Build and run both services on loopback:
 
 ```sh
 cargo build --release
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 
 POHW_WORKDIR="$PWD" \
 POHW_DATADIR="$PWD/.pohw-p2pool" \
@@ -122,6 +135,17 @@ Core for raw transaction and block metadata on demand. The installer requires
 at least 2 TiB free for the initial index and compaction; this is a host role,
 not a participant requirement.
 
+The much smaller Experiment 1 address read model uses these host settings and
+does not require the Esplora database:
+
+```sh
+POHW_EXPLORER_FORK_ADDRESS_INDEX=true
+POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS=60000
+POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS=500000
+POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS=2000000
+POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES=500000
+```
+
 1. Install the native build prerequisites and build the release binary, UI,
    and pinned host indexer.
 2. Install the two non-secret environment profiles.
@@ -135,7 +159,7 @@ sudo apt-get install -y build-essential cmake pkg-config libclang-dev
 
 cd /opt/p2pool
 cargo build --release
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 
 # Run this build command as an unprivileged operator.
 scripts/pohw-build-bitcoin-indexer.sh /srv/bitcoin/electrs-build
@@ -194,6 +218,7 @@ embedded in the public UI artifact or its runtime configuration.
 ```sh
 curl --fail http://127.0.0.1:40407/api/v1/overview
 curl --fail 'http://127.0.0.1:40407/api/v1/fork/blocks?limit=1'
+curl --fail 'http://127.0.0.1:40407/api/v1/fork/addresses/<address>'
 curl --fail 'http://127.0.0.1:40407/api/v1/bitcoin/blocks'
 curl --fail 'http://127.0.0.1:40407/api/v1/sharechain/shares?limit=1'
 curl --fail http://127.0.0.1:5176/
@@ -233,5 +258,11 @@ sudo systemctl daemon-reload
 - The host Esplora index covers Bitcoin history without requiring Core
   `txindex`. It is a read model only and has no influence on fork consensus,
   mining admission, share validation, or payout decisions.
+- The bounded Experiment 1 address index covers addresses appearing in active
+  fork transactions and all UTXOs created on that fork. It attributes inherited
+  inputs when they are consumed, but it cannot enumerate untouched inherited
+  UTXOs by address without the separate full Bitcoin-history index. Its
+  `balanceSats` field therefore means fork-created unspent outputs, not a claim
+  about every inherited output controlled by that key.
 - Idena pages show verified aggregate snapshot data. `rewardSourceCoverage`
   remains explicit and partial until every source is reconstructed exactly.

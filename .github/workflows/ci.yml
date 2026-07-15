@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -26,19 +26,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit Rust dependencies
         run: cargo audit
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace --all-features
+      - name: Build
+        run: cargo build --locked --workspace --all-features
 
   python-and-shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -55,6 +58,7 @@ jobs:
             EXPERIMENT-1.md
             SECURITY.md
             compatibility/experiment-1-full-consensus.json
+            compatibility/experiment-1-miner-registry-candidate.json
             compatibility/governance-build-plan-v1.json
             compatibility/governance-fork-lock.json
             compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
@@ -65,6 +69,11 @@ jobs:
             scripts/pohw-activate-experiment-1-profile.py
             scripts/pohw-host-firewall.py
             scripts/pohw-governance-runtime-gate.py
+            scripts/pohw-miner-registry-runtime-gate.py
+            contracts/idena-pohw-miner-registry/package.json
+            contracts/idena-pohw-miner-registry/pnpm-lock.yaml
+            compatibility/experiment-1-runtime-tests/idena-go/miner_registry_contract_integration_test.go
+            COMMUNITY-EXPERIMENT-1.md
             deploy/bitcoin/bitcoin-pohw-experiment-1.conf.example
             deploy/pohw-experiment-1.env.example
             deploy/systemd/bitcoind-pohw-experiment-1.service
@@ -78,6 +87,7 @@ jobs:
             tests/test_pohw_bootstrap_ci_security.py
             tests/test_pohw_host_firewall.py
             tests/test_pohw_governance_runtime_gate.py
+            tests/test_pohw_miner_registry_runtime_gate.py
           )
           git ls-files --error-unmatch -- "${required[@]}" >/dev/null
           for path in "${required[@]}"; do test -s "$path"; done
@@ -153,7 +163,7 @@ jobs:
         run: shellcheck scripts/*.sh
 
   javascript:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -168,11 +178,11 @@ jobs:
       - name: Build dashboard
         run: corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
       - name: Install contract dependencies
-        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
+        run: corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry install --frozen-lockfile
       - name: Audit contract dependencies
-        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry audit --prod
+        run: corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry audit --prod
       - name: Test contract
-        run: corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+        run: corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry test
       - name: Install governance contract dependencies
         run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance install --frozen-lockfile
       - name: Audit governance contract dependencies
@@ -182,10 +192,21 @@ jobs:
       - name: Test governance contract
         run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance test
       - name: Verify governance contract lock
-        run: python3 scripts/pohw-governance-runtime-gate.py --verify-artifact-only
+        run: >-
+          python3 scripts/pohw-governance-runtime-gate.py
+          --verify-artifact-only
+          --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json
+      - name: Install miner-registry dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry install --frozen-lockfile
+      - name: Audit miner-registry dependencies
+        run: corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry audit --prod
+      - name: Build miner-registry contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry build
+      - name: Test miner-registry contract
+        run: corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry test
 
   governance-production-runtime:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -232,13 +253,19 @@ jobs:
           go_version = lock.get("toolchains", {}).get("go")
           if not isinstance(go_version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", go_version):
               raise SystemExit("governance lock has no exact Go toolchain")
+          rust_version = lock.get("toolchains", {}).get("rust")
           node_version = lock.get("toolchains", {}).get("node")
           pnpm_version = lock.get("toolchains", {}).get("pnpm")
-          for name, version in (("node", node_version), ("pnpm", pnpm_version)):
+          for name, version in (
+              ("rust", rust_version),
+              ("node", node_version),
+              ("pnpm", pnpm_version),
+          ):
               if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                   raise SystemExit(f"governance lock has no exact {name} toolchain")
           with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
               output.write(f"go_version={go_version}\n")
+              output.write(f"rust_version={rust_version}\n")
               output.write(f"node_version={node_version}\n")
               output.write(f"pnpm_version={pnpm_version}\n")
           PY
@@ -249,6 +276,8 @@ jobs:
         run: |
           corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-code-governance install --frozen-lockfile
           corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-code-governance build
+          corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-pohw-miner-registry install --frozen-lockfile
+          corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-pohw-miner-registry build
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ steps.governance_lock.outputs.go_version }}
@@ -269,10 +298,122 @@ jobs:
             test "$(git -C "$destination" rev-parse HEAD)" = "$revision"
             test -z "$(git -C "$destination" status --porcelain=v1 --untracked-files=all)"
           done < "$RUNNER_TEMP/governance-components.tsv"
-      - name: Run production Idena WASM runtime compatibility gate
+      - name: Run miner-registry production runtime gate on exact legacy node
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/governance-components"
+          go -C "$root/idena-go" mod download
+          python3 scripts/pohw-miner-registry-runtime-gate.py \
+            --idena-go "$root/idena-go"
+      - name: Apply exact inactive Governance Day runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/governance-candidate-patches.tsv" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path, PurePosixPath
+
+          candidate = json.loads(
+              Path("compatibility/governance-day-fork-candidate-lock.json").read_text()
+          )
+          if (
+              candidate.get("status") != "experimental-uncommitted-candidate"
+              or candidate.get("authorizedForDeployment") is not False
+              or candidate.get("activation", {}).get("enabled") is not False
+          ):
+              raise SystemExit("governance fork candidate lost its inactive interlock")
+          rows = []
+          for component in candidate.get("components", []):
+              patch = component.get("patch")
+              if patch is None:
+                  continue
+              name = component.get("name")
+              path = patch.get("path")
+              relative = PurePosixPath(path) if isinstance(path, str) else None
+              if (
+                  name not in {"idena-go", "idena-wasm", "idena-wasm-binding"}
+                  or relative is None
+                  or relative.is_absolute()
+                  or any(part in {"", ".", ".."} for part in relative.parts)
+                  or not re.fullmatch(r"[A-Za-z0-9._/+@-]+", path)
+              ):
+                  raise SystemExit(f"invalid candidate patch descriptor: {name!r}")
+              rows.append(f"{name}\t{path}\n")
+          if {row.split("\t", 1)[0] for row in rows} != {
+              "idena-go",
+              "idena-wasm",
+              "idena-wasm-binding",
+          }:
+              raise SystemExit("candidate patch set is incomplete")
+          Path(sys.argv[1]).write_text("".join(sorted(rows)), encoding="utf-8")
+          PY
+          while IFS=$'\t' read -r name patch; do
+            git -C "$RUNNER_TEMP/governance-components/$name" apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C "$RUNNER_TEMP/governance-components/$name" apply "$GITHUB_WORKSPACE/$patch"
+          done < "$RUNNER_TEMP/governance-candidate-patches.tsv"
+      - name: Verify deterministic fork-candidate source CIDs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${{ steps.governance_lock.outputs.rust_version }}" --profile minimal
+          cargo +"${{ steps.governance_lock.outputs.rust_version }}" build \
+            --locked \
+            -p governance-cli
+          python3 scripts/pohw-governance-runtime-gate.py \
+            --idena-go "$RUNNER_TEMP/governance-components/idena-go" \
+            --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json \
+            --component-repo idena-wasm-binding="$RUNNER_TEMP/governance-components/idena-wasm-binding" \
+            --component-repo idena-wasm="$RUNNER_TEMP/governance-components/idena-wasm" \
+            --governance-cli "$GITHUB_WORKSPACE/target/debug/pohw-governance" \
+            --verify-candidate-sources-only
+      - name: Build candidate native WASM runtime and local binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/governance-components"
+          cargo +"${{ steps.governance_lock.outputs.rust_version }}" build \
+            --manifest-path "$root/idena-wasm/Cargo.toml" \
+            --release --locked
+          archive="$root/idena-wasm-binding/lib/libidena_wasm_linux_amd64.a"
+          install -m 0644 "$root/idena-wasm/target/release/libidena_wasm.a" "$archive"
+          python3 - "$root/idena-wasm-binding/lib/SHA256SUMS" "$archive" <<'PY'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          checksums = Path(sys.argv[1])
+          archive = Path(sys.argv[2])
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          rows = checksums.read_text(encoding="ascii").splitlines()
+          if sum(row.endswith("  " + archive.name) for row in rows) != 1:
+              raise SystemExit("candidate archive checksum row is missing or duplicated")
+          checksums.write_text(
+              "\n".join(
+                  f"{digest}  {archive.name}"
+                  if row.endswith("  " + archive.name)
+                  else row
+                  for row in rows
+              )
+              + "\n",
+              encoding="ascii",
+          )
+          PY
+          GOWORK=off go -C "$root/idena-go" mod edit \
+            -replace="github.com/idena-network/idena-wasm-binding=$root/idena-wasm-binding"
+          (
+            cd "$root/idena-wasm-binding"
+            GOWORK=off go test ./...
+          )
+      - name: Run production Idena WASM fork-candidate compatibility gate
         run: |
           python3 scripts/pohw-governance-runtime-gate.py \
-            --idena-go "$RUNNER_TEMP/governance-components/idena-go"
+            --idena-go "$RUNNER_TEMP/governance-components/idena-go" \
+            --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json \
+            --component-repo idena-wasm-binding="$RUNNER_TEMP/governance-components/idena-wasm-binding" \
+            --component-repo idena-wasm="$RUNNER_TEMP/governance-components/idena-wasm"
       - name: Confirm governance release eligibility or inactive interlock
         id: governance_release
         shell: bash
@@ -321,7 +462,7 @@ jobs:
             --require-locked-sources "${args[@]}"
 
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:

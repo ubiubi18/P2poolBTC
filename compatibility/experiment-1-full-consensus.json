@@ -81,7 +81,7 @@
   },
   "build": {
     "patch_path": "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch",
-    "patch_sha256": "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4",
+    "patch_sha256": "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab",
     "cmake_flags": [
       "-DBUILD_GUI=OFF",
       "-DBUILD_TESTS=ON",

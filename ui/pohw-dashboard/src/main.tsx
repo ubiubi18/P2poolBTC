@@ -121,10 +121,12 @@ interface GovernanceDashboardResponse {
   apiVersion: string;
   schemaVersion: number;
   experimental: boolean;
-  status: "unconfigured" | "verified-local-snapshot";
+  status: "unconfigured" | "operator-validated-local-snapshot";
   safetyLabel: string;
   governanceContractAddress: string | null;
   currentCanonicalEcosystemCid: string | null;
+  developmentPolicyCid: string | null;
+  developmentPolicy: DevelopmentPolicy | null;
   identityMetrics: {
     metricsRoot: string;
     sourceEpoch: number;
@@ -142,6 +144,47 @@ interface GovernanceDashboardResponse {
   epochGovernance?: GovernanceEpochView | null;
   canonicalHistory?: GovernanceCanonicalExecution[];
   recovery?: GovernanceRecoveryView | null;
+}
+
+interface DevelopmentPolicy {
+  schemaVersion: number;
+  kind: "pohw-decentralized-human-ai-development-policy-v1";
+  policyId: string;
+  ecosystemId: string;
+  licenseSpdx: "MIT";
+  upstream: Array<{
+    repositoryUrl: string;
+    commit: string;
+    sourceTreeCid: string;
+    licenseSpdx: "MIT";
+  }>;
+  authority: {
+    canonicalAuthority: "idena-wasm-governance-contract";
+    githubIsCanonical: false;
+    maintainerMergeKeyExists: false;
+    agentMayAcceptProposal: false;
+    agentMayExecuteProposal: false;
+    contractOwnerMayReplaceCanonicalCid: false;
+    acceptedExecutionIsPermissionless: true;
+  };
+  sandbox: {
+    networkDisabledByDefault: true;
+    walletKeysExposed: false;
+    providerSecretsExposedToRepositoryScripts: false;
+    readOnlySourceMount: true;
+    isolatedTemporaryBuildDirectory: true;
+    explicitDependencyFetchPhase: true;
+    commandAllowlisting: true;
+    resourceLimitsRequired: true;
+    completeRedactedCommandLog: true;
+  };
+  phases: Array<{
+    id: "specify" | "plan" | "implement" | "review" | "build" | "publish" | "propose" | "vote" | "execute";
+    actor: "human-ai" | "isolated-agent" | "independent-reviewer" | "independent-builder" | "availability-provider" | "eligible-identities" | "any-caller";
+    humanApprovalRequired: boolean;
+    mutatesCandidateSource: boolean;
+    outputSchema: string;
+  }>;
 }
 
 type GovernanceEpochPhase =
@@ -208,6 +251,8 @@ interface GovernanceRecoveryView {
 interface GovernanceProposal {
   proposalId: string;
   proposalCid: string;
+  scopeEvidenceCid: string;
+  scopeEvidenceVerified: boolean;
   candidateEcosystemCid: string;
   parameterSetCid: string;
   reviewRoundId: string;
@@ -302,6 +347,26 @@ interface ExplorerOverview {
   fork: {
     state: string;
     status: ForkChainStatus | null;
+    addressIndex: {
+      state: string;
+      coverage: string;
+      firstIndexedHeight: number | null;
+      indexedTipHeight: number | null;
+      indexedBlockCount: number | null;
+      transactionCount: number | null;
+      outputCount: number | null;
+      addressCount: number | null;
+      maxBlocks: number | null;
+      maxTransactions: number | null;
+      maxOutputs: number | null;
+      maxAddresses: number | null;
+      accountedRetainedBytes: number | null;
+      maxRetainedBytes: number | null;
+      workUnits: number | null;
+      maxWorkUnits: number | null;
+      maxBlockBytes: number | null;
+      maxScriptBytes: number | null;
+    };
   };
   bitcoinHistory: {
     state: string;
@@ -410,6 +475,7 @@ interface ForkTransactionDetail {
   totalInputSats: number | null;
   totalOutputSats: number;
   feeSats: number | null;
+  spendStateComplete: boolean;
   inputs: Array<{
     vin: number;
     coinbase: boolean;
@@ -452,7 +518,10 @@ interface ForkAddressSummary {
   fundedTotalSats: number;
   spentOutputCount: number;
   spentTotalSats: number;
+  inheritedInputCount: number;
+  inheritedInputTotalSats: number;
   balanceSats: number;
+  balanceScope: string;
   firstSeenHeight: number | null;
   lastSeenHeight: number | null;
 }
@@ -1260,7 +1329,7 @@ function GovernanceWorkspace({
   loadState: ExplorerLoadState;
 }) {
   const unavailable = loadState === "unavailable";
-  const configured = data?.status === "verified-local-snapshot";
+  const configured = data?.status === "operator-validated-local-snapshot";
   return (
     <section className="governance-workspace">
       <header className="governance-header">
@@ -1312,6 +1381,18 @@ function GovernanceWorkspace({
             </div>
           </section>
 
+          {data.developmentPolicy && data.developmentPolicyCid ? (
+            <DevelopmentJourney
+              policy={data.developmentPolicy}
+              policyCid={data.developmentPolicyCid}
+            />
+          ) : (
+            <div className="governance-empty warning">
+              <AlertTriangle size={18} />
+              <span>No verified human/AI development policy is attached</span>
+            </div>
+          )}
+
           {data.epochGovernance ? (
             <GovernanceDayOverview epoch={data.epochGovernance} />
           ) : (
@@ -1361,6 +1442,48 @@ function GovernanceWorkspace({
           {data.recovery ? <GovernanceRecovery recovery={data.recovery} /> : null}
         </>
       )}
+    </section>
+  );
+}
+
+function DevelopmentJourney({
+  policy,
+  policyCid
+}: {
+  policy: DevelopmentPolicy;
+  policyCid: string;
+}) {
+  const upstream = policy.upstream[0];
+  return (
+    <section className="governance-development">
+      <div className="governance-section-heading">
+        <div>
+          <span>Content-addressed workflow</span>
+          <h2>Human + AI development</h2>
+        </div>
+        <strong className="development-license">{policy.licenseSpdx}</strong>
+      </div>
+      <div className="development-policy-meta">
+        <span>Policy <code title={captureSafeTitle(policyCid)}>{captureIdentifier(policyCid)}</code></span>
+        <span>Authority <strong>Idena WASM</strong></span>
+        <span>Upstream <code title={captureSafeTitle(upstream?.sourceTreeCid)}>{captureIdentifier(upstream?.sourceTreeCid, "Unavailable")}</code></span>
+      </div>
+      <div className="development-flow" role="list" aria-label="Decentralized development phases">
+        {policy.phases.map((phase, index) => (
+          <div className="development-phase" role="listitem" key={phase.id}>
+            <span className="development-phase-index">{String(index + 1).padStart(2, "0")}</span>
+            <strong>{splitGovernancePhase(phase.id)}</strong>
+            <small>{splitGovernancePhase(phase.actor)}</small>
+            <code>{phase.outputSchema}</code>
+            <span className={phase.humanApprovalRequired ? "development-human-gate required" : "development-human-gate"}>
+              {phase.humanApprovalRequired ? "Human approval" : "Objective gate"}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="governance-boundary">
+        GitHub is a mirror. Agents can propose and attest, but cannot accept or execute. Any caller may execute only after every contract gate passes.
+      </p>
     </section>
   );
 }
@@ -1460,8 +1583,9 @@ function GovernanceRecovery({ recovery }: { recovery: GovernanceRecoveryView }) 
   );
 }
 
-function splitGovernancePhase(phase: GovernanceEpochPhase): string {
-  return phase.replace(/([a-z])([A-Z])/g, "$1 $2");
+function splitGovernancePhase(phase: string): string {
+  const label = phase.replace(/-/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) {
@@ -1515,6 +1639,7 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
         <span>Candidate <code title={captureSafeTitle(proposal.candidateEcosystemCid)}>{shortHash(proposal.candidateEcosystemCid)}</code></span>
         <span>Parameters <code title={captureSafeTitle(proposal.parameterSetCid)}>{shortHash(proposal.parameterSetCid)}</code></span>
         <span>Review round <code title={captureSafeTitle(proposal.reviewRoundId)}>{shortHash(proposal.reviewRoundId)}</code> <strong>{proposal.reviewRoundState}</strong></span>
+        <span>Scope evidence <code title={captureSafeTitle(proposal.scopeEvidenceCid)}>{shortHash(proposal.scopeEvidenceCid)}</code> <strong>{proposal.scopeEvidenceVerified ? "verified" : "invalid"}</strong></span>
         <span>Repositories <strong>{proposal.affectedRepositories.join(", ")}</strong></span>
         <span>Scope <strong>{proposal.changedFileCount} files / {formatBytes(proposal.patchBytes)} patch / {proposal.migrationOperationCount} migrations</strong></span>
       </div>
@@ -1803,6 +1928,7 @@ function ExplorerWorkspace({
 
       {searchState !== "idle" || searchResult ? (
         <ExplorerSearchPanel
+          inheritedSpendingEnabled={forkStatus?.transactionConsensus === "bitcoin-core-v31.1-full"}
           onInspect={(value) => void search(value)}
           onLoadMore={(target) => void loadMoreSearchDetail(target)}
           result={searchResult}
@@ -1978,6 +2104,7 @@ function ExplorerOverviewView({
               ["Difficulty phase", forkStatus?.difficultyPhase ?? "Unavailable"],
               ["Estimated hashrate", formatHashrate(forkStatus?.estimatedHashrateHps)],
               ["Active blocks", formatInt(forkStatus?.activeForkBlockCount ?? 0)],
+              ["Address history", formatStateLabel(overview?.fork.addressIndex.state ?? "not_configured")],
               ["Target spacing", forkStatus ? `${formatInt(forkStatus.targetSpacingSeconds)} s` : "Unavailable"],
               ["Transaction scope", forkStatus?.transactionConsensus ?? "Unavailable"]
             ]}
@@ -2262,11 +2389,13 @@ function IdenaExplorerView({ idena }: { idena: ExplorerIdenaOverview | null }) {
 }
 
 function ExplorerSearchPanel({
+  inheritedSpendingEnabled,
   onInspect,
   onLoadMore,
   result,
   state
 }: {
+  inheritedSpendingEnabled: boolean;
   onInspect: (value: string) => void;
   onLoadMore: (target: ExplorerLoadMoreTarget) => void;
   result: ExplorerSearchResult | null;
@@ -2396,7 +2525,7 @@ function ExplorerSearchPanel({
                   <td>{formatSats(output.valueSats)} sats</td>
                   <td>{formatStateLabel(output.scriptType)}</td>
                   <td><code>{captureIdentifier(output.address ?? output.scriptHash)}</code></td>
-                  <td><ExplorerStateBadge state={output.spentBy ? "spent" : "unspent"} /></td>
+                  <td><ExplorerStateBadge state={transaction.spendStateComplete ? (output.spentBy ? "spent" : "unspent") : "unknown"} /></td>
                 </tr>
               ))}
             </tbody>
@@ -2528,7 +2657,8 @@ function ExplorerSearchPanel({
             ["Fork transactions", formatInt(result.fork?.transactionCount ?? 0)],
             ["Fork funded outputs", formatInt(result.fork?.fundedOutputCount ?? 0)],
             ["Fork spent outputs", formatInt(result.fork?.spentOutputCount ?? 0)],
-            ["Fork balance", `${formatSats(result.fork?.balanceSats ?? 0)} sats`],
+            ["Fork-created UTXOs", `${formatSats(result.fork?.balanceSats ?? 0)} sats`],
+            ["Inherited inputs consumed", `${formatInt(result.fork?.inheritedInputCount ?? 0)} / ${formatSats(result.fork?.inheritedInputTotalSats ?? 0)} sats`],
             ["Fork first height", result.fork?.firstSeenHeight == null ? "No activity" : formatInt(result.fork.firstSeenHeight)],
             ["Fork last height", result.fork?.lastSeenHeight == null ? "No activity" : formatInt(result.fork.lastSeenHeight)]
           ]} />
@@ -2537,7 +2667,7 @@ function ExplorerSearchPanel({
             ["Bitcoin history funded", `${formatSats(bitcoinStats?.funded_txo_sum ?? 0)} sats`],
             ["Bitcoin history spent", `${formatSats(bitcoinStats?.spent_txo_sum ?? 0)} sats`],
             ["Current mainnet balance", `${formatSats((bitcoinStats?.funded_txo_sum ?? 0) - (bitcoinStats?.spent_txo_sum ?? 0))} sats`],
-            ["Fork spendability", "Inherited outputs locked"],
+            ["Fork spendability", inheritedSpendingEnabled ? "Replay-protected inherited spends enabled" : "Inherited outputs locked"],
             ["Participant index", "Not required"]
           ]} />
         </div>
@@ -2989,7 +3119,7 @@ function TopBar({
   const governanceStatuses: ServiceStatus[] = [
     {
       label: "Governance",
-      state: governance?.status === "verified-local-snapshot" ? "connected" : governanceState === "loading" ? "syncing" : "pending",
+      state: governance?.status === "operator-validated-local-snapshot" ? "connected" : governanceState === "loading" ? "syncing" : "pending",
       detail: governance?.status ?? governanceState
     },
     {

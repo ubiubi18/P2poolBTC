@@ -6,30 +6,35 @@ use clap::{Parser, Subcommand};
 use governance_core::{
     agent_attestation_commitment_fields, build_attestation_commitment,
     build_attestation_commitment_fields, checkout_source_car, cid_for, create_source_patch,
-    data_availability_commitment_fields, effective_vote_weight, flip_trust_bps,
-    package_agent_review_attestation, package_build_attestation, package_change_proposal,
-    package_dag_cbor, package_data_availability_attestation, package_ecosystem_manifest,
-    package_ecosystem_patch_manifest, package_governance_parameters,
+    data_availability_commitment_fields, effective_vote_weight, evaluate_deployment_readiness,
+    flip_trust_bps, package_agent_review_attestation, package_build_attestation,
+    package_change_proposal_with_scope, package_dag_cbor, package_data_availability_attestation,
+    package_development_policy, package_ecosystem_manifest, package_ecosystem_patch_manifest,
+    package_external_audit_attestation, package_governance_parameters,
     package_identity_metrics_attestation, package_identity_metrics_snapshot,
-    package_pinset_manifest_for_transition_with_additional, package_release_manifest,
-    package_source_tree_with_artifact_exclusions, package_toolchain_manifest_for_ecosystem,
-    run_local_governance_day_protocol_demo, sha256_hex, stake_score,
-    validate_epoch_governance_parameters, verify_agent_review_attestation_car,
-    verify_build_attestation_car, verify_car_integrity, verify_change_proposal_car,
-    verify_dag_cbor_car, verify_data_availability_attestation_car, verify_ecosystem_manifest_car,
-    verify_ecosystem_patch_manifest_car, verify_ecosystem_transition,
+    package_pinset_manifest_for_transition_with_additional, package_proposal_scope_evidence,
+    package_release_manifest, package_source_tree_with_artifact_exclusions,
+    package_toolchain_manifest_for_ecosystem, run_local_governance_day_protocol_demo, sha256_hex,
+    stake_score, validate_epoch_governance_parameters, validate_proposal_scope_evidence,
+    verify_agent_review_attestation_car, verify_build_attestation_car, verify_car_integrity,
+    verify_change_proposal_car_with_scope, verify_dag_cbor_car,
+    verify_data_availability_attestation_car, verify_development_policy_car,
+    verify_ecosystem_manifest_car, verify_ecosystem_patch_manifest_car,
+    verify_ecosystem_transition, verify_external_audit_attestation_car,
     verify_governance_parameters_car, verify_identity_metrics_attestation_car,
     verify_identity_metrics_snapshot_car, verify_pinset_manifest_car,
-    verify_pinset_manifest_for_transition, verify_release_manifest_car, verify_source_car,
-    verify_source_patch, verify_toolchain_manifest_car,
-    verify_tree_matches_car_with_artifact_exclusions, AcceptanceEvidence, AgentReviewAttestationV1,
+    verify_pinset_manifest_for_transition, verify_proposal_scope_evidence_car,
+    verify_release_manifest_car, verify_source_car, verify_source_patch,
+    verify_toolchain_manifest_car, verify_tree_matches_car_with_artifact_exclusions,
+    AcceptanceEvidence, AddressedAttestationV1, AgentReviewAttestationV1,
     AttestationCommitmentEntryV1, BuildAttestationV1, ChangeProposalContentV1,
-    DataAvailabilityAttestationV1, EcosystemManifestV1, EcosystemPatchManifestV1,
-    EpochGovernanceParameterSetV1, GateResults, GovernanceParameterSetV1,
-    IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1,
-    ReleaseManifestV1, RiskClass, SourcePatchV1, SourceTreeManifestV1, ToolchainManifestV1,
-    AGENT_REVIEW_COMMITMENT_DOMAIN, BUILD_ATTESTATION_COMMITMENT_DOMAIN,
-    DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+    DataAvailabilityAttestationV1, DevelopmentPolicyBundleV1, EcosystemManifestV1,
+    EcosystemPatchManifestV1, EpochGovernanceParameterSetV1, ExternalAuditAttestationV1,
+    ExternalAuditVerdictV1, GateResults, GovernanceParameterSetV1, IdentityMetricsAttestationV1,
+    IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1, ProposalScopeEvidenceV1,
+    ReleaseManifestV1, RepositoryScopeEvidenceV1, RiskClass, ScopeChangeV1, SourcePatchV1,
+    SourceTreeManifestV1, ToolchainManifestV1, AGENT_REVIEW_COMMITMENT_DOMAIN,
+    BUILD_ATTESTATION_COMMITMENT_DOMAIN, DATA_AVAILABILITY_COMMITMENT_DOMAIN,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -126,6 +131,30 @@ enum Command {
         #[arg(long)]
         patch_car: PathBuf,
     },
+    /// Derive objective path, byte-count, and risk evidence from verified CARs.
+    ScopePackage {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Inspect and recompute all counters and the risk class in scope evidence.
+    ScopeInspect {
+        #[arg(long)]
+        car: PathBuf,
+    },
+    /// Package an MIT-licensed human/AI workflow with no maintainer or agent authority.
+    DevelopmentPolicyPackage {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Inspect and verify a decentralized development-policy CAR.
+    DevelopmentPolicyInspect {
+        #[arg(long)]
+        car: PathBuf,
+    },
     /// Derive and package the exact toolchain locks authorized by an ecosystem CAR.
     ToolchainPackage {
         #[arg(long)]
@@ -205,6 +234,8 @@ enum Command {
         #[arg(long)]
         parameters: PathBuf,
         #[arg(long)]
+        scope_car: PathBuf,
+        #[arg(long)]
         output_dir: PathBuf,
     },
     /// Verify a proposal CAR, or verify an exact source patch transition.
@@ -213,6 +244,8 @@ enum Command {
         proposal_car: Option<PathBuf>,
         #[arg(long)]
         parameters: Option<PathBuf>,
+        #[arg(long)]
+        scope_car: Option<PathBuf>,
         #[arg(long)]
         base_car: Option<PathBuf>,
         #[arg(long)]
@@ -224,6 +257,9 @@ enum Command {
     ReviewAttestation {
         #[arg(long)]
         input: PathBuf,
+        /// Verify that agentPolicyCid equals this decentralized policy CAR.
+        #[arg(long)]
+        development_policy: Option<PathBuf>,
         #[arg(long)]
         output_dir: PathBuf,
     },
@@ -240,6 +276,18 @@ enum Command {
         input: PathBuf,
         #[arg(long)]
         output_dir: PathBuf,
+    },
+    /// Package a content-addressed external security-audit attestation.
+    ExternalAuditAttestation {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Fail unless independent build, public-pin, and external-audit evidence is complete.
+    DeploymentReadinessVerify {
+        #[arg(long)]
+        input: PathBuf,
     },
     /// Package an independently operated identity-metrics replay attestation.
     IdentityMetricsAttestation {
@@ -349,6 +397,7 @@ enum CliAttestationKind {
     AgentReview,
     Build,
     DataAvailability,
+    ExternalAudit,
 }
 
 impl CliAttestationKind {
@@ -357,6 +406,7 @@ impl CliAttestationKind {
             Self::AgentReview => AGENT_REVIEW_COMMITMENT_DOMAIN,
             Self::Build => BUILD_ATTESTATION_COMMITMENT_DOMAIN,
             Self::DataAvailability => DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+            Self::ExternalAudit => "external_audit_v1",
         }
     }
 
@@ -365,6 +415,7 @@ impl CliAttestationKind {
             Self::AgentReview => "agent-review-attestation",
             Self::Build => "build-attestation",
             Self::DataAvailability => "data-availability-attestation",
+            Self::ExternalAudit => "external-audit-attestation",
         }
     }
 }
@@ -443,6 +494,49 @@ struct EcosystemPatchView {
     manifest: EcosystemPatchManifestV1,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScopePackageInputV1 {
+    schema_version: u16,
+    parent_ecosystem_car: PathBuf,
+    candidate_ecosystem_car: PathBuf,
+    ecosystem_patch_car: PathBuf,
+    rationale_file: PathBuf,
+    migration_notes_file: PathBuf,
+    test_plan_file: PathBuf,
+    repositories: Vec<ScopeRepositoryInputV1>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScopeRepositoryInputV1 {
+    repository: String,
+    base_car: PathBuf,
+    candidate_car: PathBuf,
+    patch_car: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeploymentReadinessInputV1 {
+    schema_version: u16,
+    scope_car: PathBuf,
+    build_attestation_cars: Vec<PathBuf>,
+    data_availability_attestation_cars: Vec<PathBuf>,
+    external_audit_attestation_cars: Vec<PathBuf>,
+    required_availability_through_block: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeView {
+    schema_version: u16,
+    scope_evidence_cid: String,
+    scope_evidence_sha256: String,
+    car_sha256: String,
+    evidence: ProposalScopeEvidenceV1,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ToolchainView {
@@ -502,6 +596,16 @@ struct ReleaseView {
     release_manifest_sha256: String,
     car_sha256: String,
     manifest: ReleaseManifestV1,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevelopmentPolicyView {
+    schema_version: u16,
+    policy_cid: String,
+    policy_sha256: String,
+    car_sha256: String,
+    policy: DevelopmentPolicyBundleV1,
 }
 
 #[derive(Debug, Serialize)]
@@ -647,6 +751,12 @@ async fn main() -> Result<()> {
             candidate_car,
             patch_car,
         } => ecosystem_verify_command(&parent_car, &candidate_car, &patch_car),
+        Command::ScopePackage { input, output_dir } => scope_package_command(&input, &output_dir),
+        Command::ScopeInspect { car } => scope_inspect_command(&car),
+        Command::DevelopmentPolicyPackage { input, output_dir } => {
+            development_policy_package_command(&input, &output_dir)
+        }
+        Command::DevelopmentPolicyInspect { car } => development_policy_inspect_command(&car),
         Command::ToolchainPackage {
             ecosystem_car,
             output_dir,
@@ -682,30 +792,39 @@ async fn main() -> Result<()> {
         Command::ProposalCreate {
             input,
             parameters,
+            scope_car,
             output_dir,
-        } => proposal_create_command(&input, &parameters, &output_dir),
+        } => proposal_create_command(&input, &parameters, &scope_car, &output_dir),
         Command::ProposalVerify {
             proposal_car,
             parameters,
+            scope_car,
             base_car,
             candidate_car,
             patch_car,
         } => proposal_verify_command(
             proposal_car.as_deref(),
             parameters.as_deref(),
+            scope_car.as_deref(),
             base_car.as_deref(),
             candidate_car.as_deref(),
             patch_car.as_deref(),
         ),
-        Command::ReviewAttestation { input, output_dir } => {
-            review_attestation_command(&input, &output_dir)
-        }
+        Command::ReviewAttestation {
+            input,
+            development_policy,
+            output_dir,
+        } => review_attestation_command(&input, development_policy.as_deref(), &output_dir),
         Command::BuildAttestation { input, output_dir } => {
             build_attestation_command(&input, &output_dir)
         }
         Command::DataAvailabilityAttestation { input, output_dir } => {
             data_availability_attestation_command(&input, &output_dir)
         }
+        Command::ExternalAuditAttestation { input, output_dir } => {
+            external_audit_attestation_command(&input, &output_dir)
+        }
+        Command::DeploymentReadinessVerify { input } => deployment_readiness_verify_command(&input),
         Command::IdentityMetricsAttestation { input, output_dir } => {
             identity_metrics_attestation_command(&input, &output_dir)
         }
@@ -974,6 +1093,282 @@ fn ecosystem_verify_command(
     })
 }
 
+fn scope_package_command(input_path: &Path, output_dir: &Path) -> Result<()> {
+    let input: ScopePackageInputV1 = read_json_file(input_path, "scope package input")?;
+    if input.schema_version != 1 {
+        bail!("scope package input schemaVersion must be 1");
+    }
+    let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent_bytes = read_regular_file(
+        &resolve_input_path(base_dir, &input.parent_ecosystem_car),
+        "parent ecosystem CAR",
+    )?;
+    let candidate_bytes = read_regular_file(
+        &resolve_input_path(base_dir, &input.candidate_ecosystem_car),
+        "candidate ecosystem CAR",
+    )?;
+    let ecosystem_patch_bytes = read_regular_file(
+        &resolve_input_path(base_dir, &input.ecosystem_patch_car),
+        "ecosystem patch CAR",
+    )?;
+    let parent = verify_ecosystem_manifest_car(&parent_bytes)?;
+    let candidate = verify_ecosystem_manifest_car(&candidate_bytes)?;
+    let ecosystem_patch = verify_ecosystem_patch_manifest_car(&ecosystem_patch_bytes)?;
+    let affected = verify_ecosystem_transition(&parent, &candidate, &ecosystem_patch)?;
+    if input.repositories.len() != affected.len() {
+        bail!("scope repository inputs do not exactly cover the ecosystem transition");
+    }
+
+    let mut repository_inputs = input.repositories;
+    repository_inputs.sort_by(|left, right| left.repository.cmp(&right.repository));
+    let mut repositories = Vec::with_capacity(repository_inputs.len());
+    for (index, repository_input) in repository_inputs.iter().enumerate() {
+        if repository_input.repository != affected[index] {
+            bail!("scope repository inputs do not exactly cover the ecosystem transition");
+        }
+        let expected = ecosystem_patch
+            .manifest
+            .repository_patches
+            .iter()
+            .find(|entry| entry.repository == repository_input.repository)
+            .context("aggregate patch is missing an affected repository")?;
+        let base_car = read_regular_file(
+            &resolve_input_path(base_dir, &repository_input.base_car),
+            "repository base CAR",
+        )?;
+        let candidate_car = read_regular_file(
+            &resolve_input_path(base_dir, &repository_input.candidate_car),
+            "repository candidate CAR",
+        )?;
+        let patch_car = read_regular_file(
+            &resolve_input_path(base_dir, &repository_input.patch_car),
+            "repository patch CAR",
+        )?;
+        let base_source = verify_source_car(&base_car)?;
+        let candidate_source = verify_source_car(&candidate_car)?;
+        let verified_patch = verify_source_patch(&base_car, &candidate_car, &patch_car)?;
+        if base_source.manifest.repository != repository_input.repository
+            || candidate_source.manifest.repository != repository_input.repository
+            || verified_patch.patch.repository != repository_input.repository
+            || base_source.root_cid.to_string() != expected.base_source_cid
+            || candidate_source.root_cid.to_string() != expected.candidate_source_cid
+            || verified_patch.patch_cid.to_string() != expected.patch_cid
+            || verified_patch.patch_sha256 != expected.patch_sha256
+        {
+            bail!("repository scope CARs do not match the aggregate ecosystem patch");
+        }
+        let mut changes = verified_patch
+            .patch
+            .removed_paths
+            .iter()
+            .map(|path| ScopeChangeV1 {
+                path: path.clone(),
+                change_kind: "remove".to_string(),
+                size: 0,
+            })
+            .chain(
+                verified_patch
+                    .patch
+                    .upserted_files
+                    .iter()
+                    .map(|entry| ScopeChangeV1 {
+                        path: entry.path.clone(),
+                        change_kind: "upsert".to_string(),
+                        size: entry.size,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        changes.sort_by(|left, right| left.path.cmp(&right.path));
+        let patch_content_bytes = verified_patch
+            .patch
+            .upserted_files
+            .iter()
+            .try_fold(0u64, |total, entry| total.checked_add(entry.size))
+            .context("patch content-byte counter overflow")?;
+        let candidate_content_bytes = candidate_source
+            .manifest
+            .files
+            .iter()
+            .try_fold(0u64, |total, entry| total.checked_add(entry.size))
+            .context("candidate content-byte counter overflow")?;
+        repositories.push(RepositoryScopeEvidenceV1 {
+            repository: repository_input.repository.clone(),
+            base_source_cid: expected.base_source_cid.clone(),
+            candidate_source_cid: expected.candidate_source_cid.clone(),
+            patch_cid: expected.patch_cid.clone(),
+            patch_sha256: expected.patch_sha256.clone(),
+            base_manifest_dag_cbor_hex: hex::encode(&base_source.dag_cbor_bytes),
+            candidate_manifest_dag_cbor_hex: hex::encode(&candidate_source.dag_cbor_bytes),
+            patch_dag_cbor_hex: hex::encode(&verified_patch.dag_cbor_bytes),
+            patch_content_bytes,
+            candidate_content_bytes,
+            changes,
+        });
+    }
+
+    let rationale_bytes = metadata_file_size(base_dir, &input.rationale_file, "rationale")?;
+    let migration_notes_bytes =
+        metadata_file_size(base_dir, &input.migration_notes_file, "migration notes")?;
+    let test_plan_bytes = metadata_file_size(base_dir, &input.test_plan_file, "test plan")?;
+    let mut evidence = ProposalScopeEvidenceV1 {
+        schema_version: 1,
+        classifier_version: governance_core::OBJECTIVE_RISK_CLASSIFIER_V2.to_string(),
+        parent_ecosystem_cid: parent.root_cid.to_string(),
+        candidate_ecosystem_cid: candidate.root_cid.to_string(),
+        patch_cid: ecosystem_patch.root_cid.to_string(),
+        repositories,
+        rationale_bytes,
+        migration_notes_bytes,
+        test_plan_bytes,
+        changed_file_count: 0,
+        patch_bytes: 0,
+        source_package_bytes: 0,
+        description_bytes: 0,
+        migration_operation_count: 0,
+        derived_risk_class: RiskClass::Normal,
+    };
+    populate_scope_derived_fields(&mut evidence)?;
+    let package = package_proposal_scope_evidence(evidence)?;
+    let view = ScopeView {
+        schema_version: 1,
+        scope_evidence_cid: package.root_cid.to_string(),
+        scope_evidence_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&package.car_bytes),
+        evidence: package.value,
+    };
+    let output = secure_output_directory(output_dir)?;
+    write_new(&output.join("proposal-scope.car"), &package.car_bytes)?;
+    write_new(
+        &output.join("proposal-scope.json"),
+        &deterministic_json(&view)?,
+    )?;
+    write_new(
+        &output.join("proposal-scope.cid"),
+        format!("{}\n", view.scope_evidence_cid).as_bytes(),
+    )?;
+    print_json(&view)
+}
+
+fn scope_inspect_command(car: &Path) -> Result<()> {
+    let bytes = read_regular_file(car, "proposal scope CAR")?;
+    let package = verify_proposal_scope_evidence_car(&bytes)?;
+    print_json(&ScopeView {
+        schema_version: 1,
+        scope_evidence_cid: package.root_cid.to_string(),
+        scope_evidence_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&bytes),
+        evidence: package.value,
+    })
+}
+
+fn development_policy_package_command(input: &Path, output_dir: &Path) -> Result<()> {
+    let policy: DevelopmentPolicyBundleV1 =
+        read_json_file(input, "decentralized development policy")?;
+    let package = package_development_policy(policy)?;
+    let view = DevelopmentPolicyView {
+        schema_version: 1,
+        policy_cid: package.root_cid.to_string(),
+        policy_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&package.car_bytes),
+        policy: package.value,
+    };
+    let output = secure_output_directory(output_dir)?;
+    write_new(&output.join("development-policy.car"), &package.car_bytes)?;
+    write_new(
+        &output.join("development-policy.json"),
+        &deterministic_json(&view)?,
+    )?;
+    write_new(
+        &output.join("development-policy.cid"),
+        format!("{}\n", view.policy_cid).as_bytes(),
+    )?;
+    print_json(&view)
+}
+
+fn development_policy_inspect_command(car: &Path) -> Result<()> {
+    let bytes = read_regular_file(car, "decentralized development-policy CAR")?;
+    let package = verify_development_policy_car(&bytes)?;
+    print_json(&DevelopmentPolicyView {
+        schema_version: 1,
+        policy_cid: package.root_cid.to_string(),
+        policy_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&bytes),
+        policy: package.value,
+    })
+}
+
+fn populate_scope_derived_fields(evidence: &mut ProposalScopeEvidenceV1) -> Result<()> {
+    let mut count = 0u32;
+    let mut patch_bytes = 0u64;
+    let mut source_bytes = 0u64;
+    let mut migration_count = 0u32;
+    let mut risk = RiskClass::Normal;
+    for repository in &evidence.repositories {
+        count = count
+            .checked_add(u32::try_from(repository.changes.len())?)
+            .context("changed-file counter overflow")?;
+        patch_bytes = patch_bytes
+            .checked_add(repository.patch_content_bytes)
+            .context("patch-byte counter overflow")?;
+        source_bytes = source_bytes
+            .checked_add(repository.candidate_content_bytes)
+            .context("source-byte counter overflow")?;
+        for change in &repository.changes {
+            if change.path.starts_with("migrations/")
+                || change.path.contains("/migrations/")
+                || change.path.starts_with("migration/")
+                || change.path.contains("/migration/")
+            {
+                migration_count = migration_count
+                    .checked_add(1)
+                    .context("migration counter overflow")?;
+            }
+            risk = max_scope_risk(
+                risk,
+                governance_core::classify_repository_path(&repository.repository, &change.path),
+            );
+        }
+    }
+    evidence.changed_file_count = count;
+    evidence.patch_bytes = patch_bytes;
+    evidence.source_package_bytes = source_bytes;
+    evidence.description_bytes = evidence
+        .rationale_bytes
+        .checked_add(evidence.migration_notes_bytes)
+        .and_then(|value| value.checked_add(evidence.test_plan_bytes))
+        .context("description-byte counter overflow")?;
+    evidence.migration_operation_count = migration_count;
+    evidence.derived_risk_class = risk;
+    Ok(())
+}
+
+fn max_scope_risk(left: RiskClass, right: RiskClass) -> RiskClass {
+    let rank = |risk| match risk {
+        RiskClass::Normal => 0,
+        RiskClass::Critical => 1,
+        RiskClass::Migration => 2,
+        RiskClass::Consensus => 3,
+    };
+    if rank(right) > rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn metadata_file_size(base_dir: &Path, path: &Path, label: &str) -> Result<u32> {
+    let bytes = read_regular_file(&resolve_input_path(base_dir, path), label)?;
+    u32::try_from(bytes.len()).with_context(|| format!("{label} exceeds the u32 size limit"))
+}
+
+fn resolve_input_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
 fn toolchain_package_command(ecosystem_car: &Path, output_dir: &Path) -> Result<()> {
     let ecosystem_bytes = read_regular_file(ecosystem_car, "ecosystem CAR")?;
     let ecosystem = verify_ecosystem_manifest_car(&ecosystem_bytes)?;
@@ -1187,11 +1582,24 @@ fn artifact_inspect_command(file: &Path) -> Result<()> {
     })
 }
 
-fn proposal_create_command(input: &Path, parameters: &Path, output_dir: &Path) -> Result<()> {
+fn proposal_create_command(
+    input: &Path,
+    parameters: &Path,
+    scope_car: &Path,
+    output_dir: &Path,
+) -> Result<()> {
     let content: ChangeProposalContentV1 = read_json_file(input, "proposal input")?;
     let parameters: GovernanceParameterSetV1 =
         read_json_file(parameters, "governance parameter set")?;
-    let package = package_change_proposal(content, &parameters)?;
+    let scope_bytes = read_regular_file(scope_car, "proposal scope CAR")?;
+    let scope: governance_core::ProposalScopePackage = verify_dag_cbor_car(&scope_bytes)?;
+    validate_proposal_scope_evidence(&scope.value)?;
+    let package = package_change_proposal_with_scope(
+        content,
+        &parameters,
+        &scope.root_cid.to_string(),
+        &scope.value,
+    )?;
     let view = ProposalView {
         proposal_id: package.proposal_id,
         proposal_cid: package.content_cid.to_string(),
@@ -1216,6 +1624,7 @@ fn proposal_create_command(input: &Path, parameters: &Path, output_dir: &Path) -
 fn proposal_verify_command(
     proposal_car: Option<&Path>,
     parameters: Option<&Path>,
+    scope_car: Option<&Path>,
     base_car: Option<&Path>,
     candidate_car: Option<&Path>,
     patch_car: Option<&Path>,
@@ -1225,10 +1634,18 @@ fn proposal_verify_command(
             bail!("proposal verification and patch verification are separate modes");
         }
         let parameters = parameters.context("--parameters is required with --proposal-car")?;
+        let scope_car = scope_car.context("--scope-car is required with --proposal-car")?;
         let parameters: GovernanceParameterSetV1 =
             read_json_file(parameters, "governance parameter set")?;
         let bytes = read_regular_file(proposal_car, "proposal CAR")?;
-        let package = verify_change_proposal_car(&bytes, &parameters)?;
+        let scope_bytes = read_regular_file(scope_car, "proposal scope CAR")?;
+        let scope = verify_proposal_scope_evidence_car(&scope_bytes)?;
+        let package = verify_change_proposal_car_with_scope(
+            &bytes,
+            &parameters,
+            &scope.root_cid.to_string(),
+            &scope.value,
+        )?;
         return print_json(&ProposalView {
             proposal_id: package.proposal_id,
             proposal_cid: package.content_cid.to_string(),
@@ -1237,8 +1654,8 @@ fn proposal_verify_command(
             content: package.content,
         });
     }
-    if parameters.is_some() {
-        bail!("--parameters is only valid with --proposal-car");
+    if parameters.is_some() || scope_car.is_some() {
+        bail!("--parameters and --scope-car are only valid with --proposal-car");
     }
     let base_car = base_car.context("--base-car is required in patch verification mode")?;
     let candidate_car =
@@ -1259,8 +1676,19 @@ fn proposal_verify_command(
     })
 }
 
-fn review_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
+fn review_attestation_command(
+    input: &Path,
+    development_policy: Option<&Path>,
+    output_dir: &Path,
+) -> Result<()> {
     let payload: AgentReviewAttestationV1 = read_json_file(input, "agent review attestation")?;
+    if let Some(policy_path) = development_policy {
+        let policy_bytes = read_regular_file(policy_path, "decentralized development-policy CAR")?;
+        let policy = verify_development_policy_car(&policy_bytes)?;
+        if payload.agent_policy_cid != policy.root_cid.to_string() {
+            bail!("agentPolicyCid does not match the verified decentralized policy CAR");
+        }
+    }
     let package = package_agent_review_attestation(payload)?;
     let unresolved_critical = package.value.unresolved_critical_findings;
     let fields = agent_attestation_commitment_fields(
@@ -1307,6 +1735,108 @@ fn data_availability_attestation_command(input: &Path, output_dir: &Path) -> Res
         &package,
         fields,
     )
+}
+
+fn external_audit_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
+    let payload: ExternalAuditAttestationV1 = read_json_file(input, "external audit attestation")?;
+    let package = package_external_audit_attestation(payload)?;
+    let verdict = match package.value.verdict {
+        ExternalAuditVerdictV1::Pass => "pass",
+        ExternalAuditVerdictV1::Fail => "fail",
+    };
+    let fields = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        package.root_cid,
+        package.value.candidate_ecosystem_cid,
+        package.value.scope_evidence_cid,
+        package.value.auditor_organization_id,
+        package.value.auditor_identity,
+        verdict,
+        package.value.unresolved_critical_findings,
+        package.value.unresolved_high_findings,
+    );
+    write_attestation_artifacts(
+        CliAttestationKind::ExternalAudit,
+        output_dir,
+        &package,
+        fields,
+    )
+}
+
+fn deployment_readiness_verify_command(input_path: &Path) -> Result<()> {
+    let input: DeploymentReadinessInputV1 =
+        read_json_file(input_path, "deployment readiness input")?;
+    if input.schema_version != 1 {
+        bail!("deployment readiness schemaVersion must be 1");
+    }
+    if input.build_attestation_cars.len() > 256
+        || input.data_availability_attestation_cars.len() > 256
+        || input.external_audit_attestation_cars.len() > 64
+    {
+        bail!("deployment readiness evidence list exceeds its deterministic limit");
+    }
+    let base = input_path.parent().unwrap_or_else(|| Path::new("."));
+    let resolve = |path: &Path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base.join(path)
+        }
+    };
+    let scope_bytes = read_regular_file(&resolve(&input.scope_car), "scope evidence CAR")?;
+    let scope = verify_proposal_scope_evidence_car(&scope_bytes)?;
+    let builds = input
+        .build_attestation_cars
+        .iter()
+        .map(|path| {
+            let bytes = read_regular_file(&resolve(path), "build attestation CAR")?;
+            let package = verify_build_attestation_car(&bytes)?;
+            Ok(AddressedAttestationV1 {
+                cid: package.root_cid.to_string(),
+                value: package.value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let availability = input
+        .data_availability_attestation_cars
+        .iter()
+        .map(|path| {
+            let bytes = read_regular_file(&resolve(path), "availability attestation CAR")?;
+            let package = verify_data_availability_attestation_car(&bytes)?;
+            Ok(AddressedAttestationV1 {
+                cid: package.root_cid.to_string(),
+                value: package.value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let audits = input
+        .external_audit_attestation_cars
+        .iter()
+        .map(|path| {
+            let bytes = read_regular_file(&resolve(path), "external audit attestation CAR")?;
+            let package = verify_external_audit_attestation_car(&bytes)?;
+            Ok(AddressedAttestationV1 {
+                cid: package.root_cid.to_string(),
+                value: package.value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let report = evaluate_deployment_readiness(
+        &scope.root_cid.to_string(),
+        &scope.value,
+        &builds,
+        &availability,
+        &audits,
+        input.required_availability_through_block,
+    )?;
+    print_json(&report)?;
+    if !report.ready {
+        bail!(
+            "deployment readiness gate failed: {}",
+            report.failure_codes.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn identity_metrics_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
@@ -1399,6 +1929,17 @@ fn attestation_verify_command(kind: CliAttestationKind, car: &Path) -> Result<()
         }
         CliAttestationKind::DataAvailability => {
             let package = verify_data_availability_attestation_car(&bytes)?;
+            print_json(&AttestationView {
+                schema_version: 1,
+                attestation_kind: kind.domain(),
+                attestation_cid: package.root_cid.to_string(),
+                attestation_sha256: package.root_sha256,
+                car_sha256: sha256_hex(&bytes),
+                payload: package.value,
+            })
+        }
+        CliAttestationKind::ExternalAudit => {
+            let package = verify_external_audit_attestation_car(&bytes)?;
             print_json(&AttestationView {
                 schema_version: 1,
                 attestation_kind: kind.domain(),
@@ -1567,9 +2108,9 @@ fn simulate_command(
     reported_authored_flips: u64,
 ) -> Result<()> {
     let state = IdentityState::from(state);
-    let status_bps = state
-        .status_bps()
-        .expect("CLI exposes only eligible states");
+    let Some(status_bps) = state.status_bps() else {
+        bail!("selected identity state is not eligible for governance");
+    };
     let trust_bps = flip_trust_bps(finalized_authored_flips, reported_authored_flips)?;
     let weight = effective_vote_weight(stake_atoms, status_bps, trust_bps)?;
     print_json(&SimulationOutput {
@@ -1938,5 +2479,21 @@ mod scenario_tests {
         let report = run_local_governance_day_protocol_demo().unwrap();
         assert!(report.local_test_data);
         assert!(!report.code_installed_automatically);
+    }
+
+    #[test]
+    fn executable_proposal_verification_requires_scope_evidence() {
+        let error = proposal_verify_command(
+            Some(Path::new("/not/read/proposal.car")),
+            Some(Path::new("/not/read/parameters.json")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--scope-car is required with --proposal-car"));
     }
 }

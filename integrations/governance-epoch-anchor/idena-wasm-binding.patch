@@ -1,0 +1,522 @@
+diff --git a/lib/bindings.h b/lib/bindings.h
+index 279a363..3a674ab 100644
+--- a/lib/bindings.h
++++ b/lib/bindings.h
+@@ -29,6 +29,10 @@
+ 
+ #define ACTION_READ_IDENTITY 5
+ 
++#define FEATURE_EPOCH_BLOCK (1ULL << 0)
++
++#define GO_API_V2_ABI_VERSION 2
++
+ /**
+  * This enum gives names to the status codes returned from Go callbacks to Rust.
+  *
+@@ -127,6 +131,15 @@ typedef struct GoApi {
+   struct GoApi_vtable vtable;
+ } GoApi;
+ 
++typedef struct GoApi_v2 {
++  const struct api_t *state;
++  const struct gas_meter_t *gas_meter;
++  struct GoApi_vtable vtable;
++  uint32_t abi_version;
++  uint32_t abi_size;
++  int32_t (*epoch_block)(const struct api_t*, uint64_t*, uint64_t*);
++} GoApi_v2;
++
+ typedef struct ByteSliceView {
+   /**
+    * True if and only if the byte slice is nil in Go. If this is true, the other fields must be ignored.
+@@ -159,3 +172,25 @@ uint8_t deploy(struct GoApi api,
+                uint64_t *gas_used,
+                struct UnmanagedVector *action_result,
+                bool is_debug);
++
++uint8_t execute_with_features(struct GoApi_v2 api,
++                              struct ByteSliceView code,
++                              struct ByteSliceView method_name,
++                              struct ByteSliceView args,
++                              struct ByteSliceView invocation_context,
++                              struct ByteSliceView contract_addr,
++                              uint64_t gas_limit,
++                              uint64_t *gas_used,
++                              struct UnmanagedVector *action_result,
++                              bool is_debug,
++                              uint64_t features);
++
++uint8_t deploy_with_features(struct GoApi_v2 api,
++                             struct ByteSliceView code,
++                             struct ByteSliceView args,
++                             struct ByteSliceView contract_addr,
++                             uint64_t gas_limit,
++                             uint64_t *gas_used,
++                             struct UnmanagedVector *action_result,
++                             bool is_debug,
++                             uint64_t features);
+diff --git a/lib/callbacks.go b/lib/callbacks.go
+index 17baa72..ab724e0 100644
+--- a/lib/callbacks.go
++++ b/lib/callbacks.go
+@@ -2,8 +2,13 @@ package lib
+ 
+ /*
+ #include "bindings.h"
++#include <stddef.h>
+ #include <stdlib.h>
+ 
++_Static_assert(offsetof(GoApi_v2, state) == offsetof(GoApi, state), "GoApi_v2 state offset changed");
++_Static_assert(offsetof(GoApi_v2, gas_meter) == offsetof(GoApi, gas_meter), "GoApi_v2 gas meter offset changed");
++_Static_assert(offsetof(GoApi_v2, vtable) == offsetof(GoApi, vtable), "GoApi_v2 vtable offset changed");
++_Static_assert(offsetof(GoApi_v2, abi_version) == sizeof(GoApi), "GoApi_v2 is not append-only");
+ 
+ typedef GoResult (*set_remaining_gas_fn)(api_t *ptr, uint64_t remaining_gas);
+ GoResult cset_remaining_gas(api_t *ptr, uint64_t remaining_gas);
+@@ -23,6 +28,9 @@ GoResult cblock_timestamp(api_t *ptr, uint64_t *used_gas,  int64_t *block_timest
+ typedef GoResult (*block_number_fn)(api_t *ptr, uint64_t *used_gas,  uint64_t *block_number);
+ GoResult cblock_number(api_t *ptr, uint64_t *used_gas,  uint64_t *block_number);
+ 
++typedef GoResult (*epoch_block_fn)(api_t *ptr, uint64_t *used_gas,  uint64_t *epoch_block);
++GoResult cepoch_block(api_t *ptr, uint64_t *used_gas,  uint64_t *epoch_block);
++
+ typedef GoResult (*min_fee_per_gas_fn)(api_t *ptr, uint64_t *used_gas,  UnmanagedVector *data);
+ GoResult cmin_fee_per_gas(api_t *ptr, uint64_t *used_gas,   UnmanagedVector *data);
+ 
+@@ -122,8 +130,10 @@ const ActionReadContractData = 4
+ const ActionReadIdentity = 5
+ 
+ type GoAPI struct {
+-	host     HostEnv
+-	gasMeter *GasMeter
++	host           HostEnv
++	gasMeter       *GasMeter
++	features       FeatureMask
++	usesFeatureABI bool
+ }
+ 
+ func NewGoAPI(env HostEnv, gasMeter *GasMeter) *GoAPI {
+@@ -169,7 +179,7 @@ var api_vtable = C.GoApi_vtable{
+ 
+ var apiHandles sync.Map
+ 
+-func buildAPI(api *GoAPI) (C.GoApi, func()) {
++func registerAPI(api *GoAPI) (*C.api_t, func()) {
+ 	state := C.malloc(1)
+ 	if state == nil {
+ 		panic("failed to allocate C API handle")
+@@ -178,14 +188,34 @@ func buildAPI(api *GoAPI) (C.GoApi, func()) {
+ 	statePtr := (*C.api_t)(state)
+ 	apiHandles.Store(uintptr(state), api)
+ 
++	return statePtr, func() {
++		apiHandles.Delete(uintptr(state))
++		C.free(state)
++	}
++}
++
++func buildAPI(api *GoAPI) (C.GoApi, func()) {
++	state, cleanup := registerAPI(api)
+ 	return C.GoApi{
+-			state:     statePtr,
+-			gas_meter: nil,
+-			vtable:    api_vtable,
+-		}, func() {
+-			apiHandles.Delete(uintptr(state))
+-			C.free(state)
+-		}
++		state:     state,
++		gas_meter: nil,
++		vtable:    api_vtable,
++	}, cleanup
++}
++
++func buildFeatureAPI(api *GoAPI, features FeatureMask) (C.GoApi_v2, func()) {
++	runtimeAPI := *api
++	runtimeAPI.features = features
++	runtimeAPI.usesFeatureABI = true
++	state, cleanup := registerAPI(&runtimeAPI)
++	return C.GoApi_v2{
++		state:       state,
++		gas_meter:   nil,
++		vtable:      api_vtable,
++		abi_version: C.uint32_t(C.GO_API_V2_ABI_VERSION),
++		abi_size:    C.uint32_t(C.sizeof_struct_GoApi_v2),
++		epoch_block: (C.epoch_block_fn)(C.cepoch_block),
++	}, cleanup
+ }
+ 
+ func apiFromPtr(ptr *C.api_t) *GoAPI {
+@@ -287,6 +317,17 @@ func cblock_number(ptr *C.api_t, gasUsed *cu64, blockNumer *cu64) (ret C.GoResul
+ 	return C.GoResult_Ok
+ }
+ 
++//export cepoch_block
++func cepoch_block(ptr *C.api_t, gasUsed *cu64, epochBlock *cu64) (ret C.GoResult) {
++	api := apiFromPtr(ptr)
++	defer recoverPanicAndResetGasUsed(&ret, api, gasUsed)
++	gasBefore := api.gasMeter.GasConsumed()
++
++	*epochBlock = cu64(api.host.EpochBlock(api.gasMeter))
++	*gasUsed = cu64(api.gasMeter.GasConsumed() - gasBefore)
++	return C.GoResult_Ok
++}
++
+ //export cmin_fee_per_gas
+ func cmin_fee_per_gas(ptr *C.api_t, gasUsed *cu64, data *C.UnmanagedVector) (ret C.GoResult) {
+ 
+@@ -400,10 +441,12 @@ func ccall(ptr *C.api_t, addr C.U8SliceView, method C.U8SliceView, args C.U8Slic
+ 	}
+ 	meter := GasMeter{}
+ 	subApi := &GoAPI{
+-		host:     subHost,
+-		gasMeter: &meter,
++		host:           subHost,
++		gasMeter:       &meter,
++		features:       api.features,
++		usesFeatureABI: api.usesFeatureABI,
+ 	}
+-	subCallGasUsed, actionResultBytes, err := execute(subApi, code, pMethod, pArgs, pInvocationContext, address, uint64(gasLimit), subHost.IsDebug())
++	subCallGasUsed, actionResultBytes, err := executeNested(subApi, code, pMethod, pArgs, pInvocationContext, address, uint64(gasLimit), subHost.IsDebug())
+ 	if err == nil {
+ 		subHost.Commit()
+ 		api.host.Commit()
+@@ -461,11 +504,13 @@ func cdeploy(ptr *C.api_t, code C.U8SliceView, args C.U8SliceView, nonce C.U8Sli
+ 	}
+ 	meter := GasMeter{}
+ 	subApi := &GoAPI{
+-		host:     subHost,
+-		gasMeter: &meter,
++		host:           subHost,
++		gasMeter:       &meter,
++		features:       api.features,
++		usesFeatureABI: api.usesFeatureABI,
+ 	}
+ 	subHost.Deploy(pCode)
+-	subCallGasUsed, actionResultBytes, err := deploy(subApi, pCode, pArgs, addr, uint64(gasLimit), subHost.IsDebug())
++	subCallGasUsed, actionResultBytes, err := deployNested(subApi, pCode, pArgs, addr, uint64(gasLimit), subHost.IsDebug())
+ 	if err == nil {
+ 		subHost.Commit()
+ 		api.host.Commit()
+diff --git a/lib/env.go b/lib/env.go
+index de28ccf..4f90ba9 100644
+--- a/lib/env.go
++++ b/lib/env.go
+@@ -17,6 +17,7 @@ type HostEnv interface {
+ 	GetStorage(*GasMeter, []byte) []byte
+ 	RemoveStorage(*GasMeter, []byte)
+ 	BlockNumber(*GasMeter) uint64
++	EpochBlock(*GasMeter) uint64
+ 	BlockTimestamp(*GasMeter) int64
+ 	MinFeePerGas(meter *GasMeter) *big.Int
+ 	Balance(meter *GasMeter) *big.Int
+diff --git a/lib/lib.go b/lib/lib.go
+index 0585186..9d8c35d 100644
+--- a/lib/lib.go
++++ b/lib/lib.go
+@@ -30,6 +30,12 @@ type cu8_ptr = *C.uint8_t
+ const ArgsPlainFormat = 0x0
+ const ArgsProtobufFormat = 0x1
+ 
++type FeatureMask uint64
++
++const (
++	FeatureEpochBlock FeatureMask = 1 << 0
++)
++
+ func copyAndDestroyUnmanagedVector(v C.UnmanagedVector) []byte {
+ 	var out []byte
+ 	if v.is_none {
+@@ -58,24 +64,49 @@ func errorWithMessage(err int, b C.UnmanagedVector) error {
+ }
+ 
+ func Execute(api *GoAPI, code []byte, method string, args [][]byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
+-
+-	gas, actionResult, err := execute(api, code, []byte(method), PackArguments(args), []byte{}, contractAddr, gasLimit, is_debug)
++	gas, actionResult, err := executeLegacy(api, code, []byte(method), PackArguments(args), []byte{}, contractAddr, gasLimit, is_debug)
+ 	return gas, actionResult, err
+ }
+ 
++func ExecuteWithFeatures(api *GoAPI, code []byte, method string, args [][]byte, contractAddr Address, gasLimit uint64, is_debug bool, features FeatureMask) (uint64, []byte, error) {
++	return executeWithFeatures(api, code, []byte(method), PackArguments(args), []byte{}, contractAddr, gasLimit, is_debug, features)
++}
++
+ func Deploy(api *GoAPI, code []byte, args [][]byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
+-	gas, actionResult, err := deploy(api, code, PackArguments(args), contractAddr, gasLimit, is_debug)
++	gas, actionResult, err := deployLegacy(api, code, PackArguments(args), contractAddr, gasLimit, is_debug)
+ 	return gas, actionResult, err
+ }
+ 
+-func execute(api *GoAPI, code []byte, method []byte, args []byte, invocationContext []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
++func DeployWithFeatures(api *GoAPI, code []byte, args [][]byte, contractAddr Address, gasLimit uint64, is_debug bool, features FeatureMask) (uint64, []byte, error) {
++	return deployWithFeatures(api, code, PackArguments(args), contractAddr, gasLimit, is_debug, features)
++}
+ 
++func executeLegacy(api *GoAPI, code []byte, method []byte, args []byte, invocationContext []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
+ 	actionResult := newUnmanagedVector(nil)
+-
+ 	var gasUsed cu64
+ 	goAPI, cleanup := buildAPI(api)
+ 	defer cleanup()
+ 	C.execute(goAPI, makeView(code), makeView(method), makeView(args), makeView(invocationContext), makeView(contractAddr[:]), cu64(gasLimit), &gasUsed, &actionResult, cbool(is_debug))
++	return decodeActionResult(gasUsed, actionResult)
++}
++
++func executeWithFeatures(api *GoAPI, code []byte, method []byte, args []byte, invocationContext []byte, contractAddr Address, gasLimit uint64, is_debug bool, features FeatureMask) (uint64, []byte, error) {
++	actionResult := newUnmanagedVector(nil)
++	var gasUsed cu64
++	goAPI, cleanup := buildFeatureAPI(api, features)
++	defer cleanup()
++	C.execute_with_features(goAPI, makeView(code), makeView(method), makeView(args), makeView(invocationContext), makeView(contractAddr[:]), cu64(gasLimit), &gasUsed, &actionResult, cbool(is_debug), cu64(features))
++	return decodeActionResult(gasUsed, actionResult)
++}
++
++func executeNested(api *GoAPI, code []byte, method []byte, args []byte, invocationContext []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
++	if api.usesFeatureABI {
++		return executeWithFeatures(api, code, method, args, invocationContext, contractAddr, gasLimit, is_debug, api.features)
++	}
++	return executeLegacy(api, code, method, args, invocationContext, contractAddr, gasLimit, is_debug)
++}
++
++func decodeActionResult(gasUsed cu64, actionResult C.UnmanagedVector) (uint64, []byte, error) {
+ 	actionResultBytes := copyAndDestroyUnmanagedVector(actionResult)
+ 	protoModel := models.ActionResult{}
+ 	if err := proto.Unmarshal(actionResultBytes, &protoModel); err != nil {
+@@ -104,23 +135,29 @@ func truncateActionResultData(actionResult *models.ActionResult, depth int) {
+ 	}
+ }
+ 
+-func deploy(api *GoAPI, code []byte, args []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
++func deployLegacy(api *GoAPI, code []byte, args []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
+ 	actionResult := newUnmanagedVector(nil)
+-
+ 	var gasUsed cu64
+ 	goAPI, cleanup := buildAPI(api)
+ 	defer cleanup()
+ 	C.deploy(goAPI, makeView(code), makeView(args), makeView(contractAddr[:]), cu64(gasLimit), &gasUsed, &actionResult, cbool(is_debug))
+-	actionResultBytes := copyAndDestroyUnmanagedVector(actionResult)
+-	protoModel := models.ActionResult{}
+-	if err := proto.Unmarshal(actionResultBytes, &protoModel); err != nil {
+-		return uint64(gasUsed), actionResultBytes, err
+-	}
+-	truncateActionResultData(&protoModel, 1)
+-	if protoModel.Success {
+-		return protoModel.GasUsed, actionResultBytes, nil
++	return decodeActionResult(gasUsed, actionResult)
++}
++
++func deployWithFeatures(api *GoAPI, code []byte, args []byte, contractAddr Address, gasLimit uint64, is_debug bool, features FeatureMask) (uint64, []byte, error) {
++	actionResult := newUnmanagedVector(nil)
++	var gasUsed cu64
++	goAPI, cleanup := buildFeatureAPI(api, features)
++	defer cleanup()
++	C.deploy_with_features(goAPI, makeView(code), makeView(args), makeView(contractAddr[:]), cu64(gasLimit), &gasUsed, &actionResult, cbool(is_debug), cu64(features))
++	return decodeActionResult(gasUsed, actionResult)
++}
++
++func deployNested(api *GoAPI, code []byte, args []byte, contractAddr Address, gasLimit uint64, is_debug bool) (uint64, []byte, error) {
++	if api.usesFeatureABI {
++		return deployWithFeatures(api, code, args, contractAddr, gasLimit, is_debug, api.features)
+ 	}
+-	return protoModel.GasUsed, actionResultBytes, errors.New(protoModel.Error)
++	return deployLegacy(api, code, args, contractAddr, gasLimit, is_debug)
+ }
+ 
+ func PackArguments(args [][]byte) []byte {
+diff --git a/tests/lib_test.go b/tests/lib_test.go
+index 8df2dd6..cb39cdb 100644
+--- a/tests/lib_test.go
++++ b/tests/lib_test.go
+@@ -10,10 +10,12 @@ import (
+ 	"testing"
+ 
+ 	"github.com/idena-network/idena-wasm-binding/lib"
++	models "github.com/idena-network/idena-wasm-binding/lib/protobuf"
+ 	"github.com/idena-network/idena-wasm-binding/tests/testdata"
+ 	"github.com/stretchr/testify/require"
+ 	db "github.com/tendermint/tm-db"
+ 	"golang.org/x/crypto/sha3"
++	"google.golang.org/protobuf/proto"
+ )
+ 
+ type contractValue struct {
+@@ -74,6 +76,7 @@ type MockHostEnv struct {
+ 	blockHeaders          map[uint64][]byte
+ 	globalState           []byte
+ 	events                []mockEvent
++	epochBlockCalls       *int
+ }
+ 
+ func (e *MockHostEnv) Burn(meter *lib.GasMeter, amount *big.Int) error {
+@@ -105,6 +108,7 @@ func (e *MockHostEnv) IsDebug() bool {
+ }
+ 
+ func NewMockHostEnv() *MockHostEnv {
++	epochBlockCalls := 0
+ 	env := &MockHostEnv{
+ 		db: &MockDb{
+ 			db: db.NewMemDB(),
+@@ -121,6 +125,7 @@ func NewMockHostEnv() *MockHostEnv {
+ 		contractStoreCache:    map[lib.Address]map[string]*contractValue{},
+ 		identities:            map[lib.Address][]byte{},
+ 		blockHeaders:          map[uint64][]byte{},
++		epochBlockCalls:       &epochBlockCalls,
+ 	}
+ 	env.setBalance(env.ctx.ContractAddr(), big.NewInt(1_000_000))
+ 	return env
+@@ -138,6 +143,7 @@ func newChildMockHostEnv(parent *MockHostEnv, contract lib.Address, payAmount *b
+ 		identities:            map[lib.Address][]byte{},
+ 		blockHeaders:          map[uint64][]byte{},
+ 		globalState:           cloneBytes(parent.globalState),
++		epochBlockCalls:       parent.epochBlockCalls,
+ 	}
+ 	child.setBalance(contract, new(big.Int).Add(parent.getBalance(contract), cloneBig(payAmount)))
+ 	return child
+@@ -264,6 +270,12 @@ func (e *MockHostEnv) BlockNumber(meter *lib.GasMeter) uint64 {
+ 	return 1
+ }
+ 
++func (e *MockHostEnv) EpochBlock(meter *lib.GasMeter) uint64 {
++	consumeGas(meter, 37)
++	(*e.epochBlockCalls)++
++	return 43
++}
++
+ func (e *MockHostEnv) BlockTimestamp(meter *lib.GasMeter) int64 {
+ 	consumeGas(meter, 10)
+ 	return 1_700_000_000
+@@ -507,6 +519,9 @@ func TestMockHostEnvDeterministicReads(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, expectedHash, env.Keccak256(meter, []byte("abc")))
+ 	require.Equal(t, uint64(1), env.BlockNumber(meter))
++	gasBeforeEpochBlock := meter.GasConsumed()
++	require.Equal(t, uint64(43), env.EpochBlock(meter))
++	require.Equal(t, uint64(37), meter.GasConsumed()-gasBeforeEpochBlock)
+ 	require.Equal(t, int64(1_700_000_000), env.BlockTimestamp(meter))
+ 	require.Equal(t, big.NewInt(1), env.MinFeePerGas(meter))
+ 	require.Len(t, env.BlockSeed(meter), 32)
+@@ -598,6 +613,124 @@ func TestMockHostEnvSubEnvCommit(t *testing.T) {
+ 	require.Equal(t, [][]byte{[]byte("arg")}, parent.events[0].args)
+ }
+ 
++const epochCallContractHex = "0061736d01000000010a026000017e60017f017f02130103656e760b65706f63685f626c6f636b000003030201000503010001071c03066d656d6f7279020008616c6c6f636174650001047265616400020a0c02050041c0000b040010000b0015046e616d65010e01000b65706f63685f626c6f636b"
++const epochDeployContractHex = "0061736d01000000010d036000017e60017f017f60000002130103656e760b65706f63685f626c6f636b000003030201020503010001071e03066d656d6f7279020008616c6c6f636174650001066465706c6f7900020a0d02050041c0000b050010001a0b0015046e616d65010e01000b65706f63685f626c6f636b"
++const nestedCallContractHex = "0061736d0100000001120360057f7f7f7f7f017f60017f017f60000002240103656e761c6372656174655f63616c6c5f66756e6374696f6e5f70726f6d697365000003030201020503010001071b03066d656d6f7279020008616c6c6f6361746500010372756e00020a1902050041c0000b11004110411c4128410041c0843d10001a0b0b49020041100b24800000001400000014000000940000000400000004000000980000000100000001000000004180010b1902000000000000000000000000000000000000007265616401000e046e616d65010701000463616c6c"
++const nestedDeployContractHex = "0061736d0100000001120360057f7f7f7f7f017f60017f017f60000002260103656e761e6372656174655f6465706c6f795f636f6e74726163745f70726f6d697365000003030201020503010001071b03066d656d6f7279020008616c6c6f6361746500010372756e00020a1a02050041c0000b12004110411c41284100418092f40110001a0b0bae01020041100b24800000007c0000007c000000fc0000000100000001000000fd0000000100000001000000004180010b7e0061736d01000000010d036000017e60017f017f60000002130103656e760b65706f63685f626c6f636b000003030201020503010001071e03066d656d6f7279020008616c6c6f636174650001066465706c6f7900020a0d02050041c0000b050010001a0b0015046e616d65010e01000b65706f63685f626c6f636b01010010046e616d6501090100066465706c6f79"
++
++func decodeHexContract(t *testing.T, encoded string) []byte {
++	t.Helper()
++	code, err := hex.DecodeString(encoded)
++	require.NoError(t, err)
++	return code
++}
++
++func decodeActionResult(t *testing.T, encoded []byte) *models.ActionResult {
++	t.Helper()
++	result := new(models.ActionResult)
++	require.NoError(t, proto.Unmarshal(encoded, result))
++	return result
++}
++
++func TestEpochBlockFeatureIsExplicitAndLegacyEntryPointsStayDisabled(t *testing.T) {
++	callCode := decodeHexContract(t, epochCallContractHex)
++	deployCode := decodeHexContract(t, epochDeployContractHex)
++
++	disabled := NewMockHostEnv()
++	_, _, err := lib.Execute(
++		lib.NewGoAPI(disabled, &lib.GasMeter{}), callCode, "read", nil,
++		lib.Address{}, 1_000_000, false,
++	)
++	require.ErrorContains(t, err, "epoch_block")
++	require.Zero(t, *disabled.epochBlockCalls)
++	_, _, err = lib.Deploy(
++		lib.NewGoAPI(disabled, &lib.GasMeter{}), deployCode, nil,
++		lib.Address{}, 4_000_000, false,
++	)
++	require.ErrorContains(t, err, "epoch_block")
++	require.Zero(t, *disabled.epochBlockCalls)
++
++	enabled := NewMockHostEnv()
++	gas, _, err := lib.ExecuteWithFeatures(
++		lib.NewGoAPI(enabled, &lib.GasMeter{}), callCode, "read", nil,
++		lib.Address{}, 1_000_000, false, lib.FeatureEpochBlock,
++	)
++	require.NoError(t, err)
++	require.GreaterOrEqual(t, gas, uint64(100_000+37))
++	require.Equal(t, 1, *enabled.epochBlockCalls)
++	_, _, err = lib.DeployWithFeatures(
++		lib.NewGoAPI(enabled, &lib.GasMeter{}), deployCode, nil,
++		lib.Address{}, 4_000_000, false, lib.FeatureEpochBlock,
++	)
++	require.NoError(t, err)
++	require.Equal(t, 2, *enabled.epochBlockCalls)
++
++	_, _, err = lib.ExecuteWithFeatures(
++		lib.NewGoAPI(enabled, &lib.GasMeter{}), callCode, "read", nil,
++		lib.Address{}, 1_000_000, false, lib.FeatureMask(1<<63),
++	)
++	require.ErrorContains(t, err, "unsupported runtime feature mask")
++	require.Equal(t, 2, *enabled.epochBlockCalls)
++}
++
++func TestEpochBlockFeaturePropagatesThroughNestedCallsAndDeploys(t *testing.T) {
++	callChild := decodeHexContract(t, epochCallContractHex)
++	callParent := decodeHexContract(t, nestedCallContractHex)
++	childAddress := lib.Address{0x2}
++
++	disabledCall := NewMockHostEnv()
++	disabledCall.deployedContractCache[childAddress] = ContractData{Code: callChild}
++	_, raw, err := lib.Execute(
++		lib.NewGoAPI(disabledCall, &lib.GasMeter{}), callParent, "run", nil,
++		lib.Address{0x1}, 3_000_000, false,
++	)
++	require.NoError(t, err)
++	disabledCallResult := decodeActionResult(t, raw)
++	require.Len(t, disabledCallResult.SubActionResults, 1)
++	require.False(t, disabledCallResult.SubActionResults[0].Success)
++	require.Contains(t, disabledCallResult.SubActionResults[0].Error, "epoch_block")
++	require.Zero(t, *disabledCall.epochBlockCalls)
++
++	enabledCall := NewMockHostEnv()
++	enabledCall.deployedContractCache[childAddress] = ContractData{Code: callChild}
++	_, raw, err = lib.ExecuteWithFeatures(
++		lib.NewGoAPI(enabledCall, &lib.GasMeter{}), callParent, "run", nil,
++		lib.Address{0x1}, 3_000_000, false, lib.FeatureEpochBlock,
++	)
++	require.NoError(t, err)
++	enabledCallResult := decodeActionResult(t, raw)
++	require.Len(t, enabledCallResult.SubActionResults, 1)
++	require.True(t, enabledCallResult.SubActionResults[0].Success)
++	require.Equal(t, 1, *enabledCall.epochBlockCalls)
++
++	deployParent := decodeHexContract(t, nestedDeployContractHex)
++	disabledDeploy := NewMockHostEnv()
++	_, raw, err = lib.Execute(
++		lib.NewGoAPI(disabledDeploy, &lib.GasMeter{}), deployParent, "run", nil,
++		lib.Address{0x1}, 8_000_000, false,
++	)
++	require.NoError(t, err)
++	disabledDeployResult := decodeActionResult(t, raw)
++	require.Len(t, disabledDeployResult.SubActionResults, 1)
++	require.False(t, disabledDeployResult.SubActionResults[0].Success)
++	require.Contains(t, disabledDeployResult.SubActionResults[0].Error, "epoch_block")
++	require.Zero(t, *disabledDeploy.epochBlockCalls)
++
++	enabledDeploy := NewMockHostEnv()
++	_, raw, err = lib.ExecuteWithFeatures(
++		lib.NewGoAPI(enabledDeploy, &lib.GasMeter{}), deployParent, "run", nil,
++		lib.Address{0x1}, 8_000_000, false, lib.FeatureEpochBlock,
++	)
++	require.NoError(t, err)
++	enabledDeployResult := decodeActionResult(t, raw)
++	require.Len(t, enabledDeployResult.SubActionResults, 1)
++	require.True(
++		t, enabledDeployResult.SubActionResults[0].Success,
++		"nested deploy failed: %s", enabledDeployResult.SubActionResults[0].Error,
++	)
++	require.Equal(t, 1, *enabledDeploy.epochBlockCalls)
++}
++
+ func TestSum(t *testing.T) {
+ 	code, _ := testdata.Sum()
+ 

@@ -2,6 +2,7 @@ mod bitcoin_explorer_index;
 mod bitcoin_rpc;
 mod dashboard_api;
 mod explorer_api;
+mod fork_address_index;
 mod fork_chain;
 mod fork_explorer;
 mod frost_signer_daemon;
@@ -355,6 +356,32 @@ enum Command {
         explorer_fork_activation_manifest: Option<PathBuf>,
         #[arg(long, env = "POHW_EXPLORER_POHW_CORE_MANIFEST")]
         explorer_pohw_core_manifest: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_FORK_ADDRESS_INDEX")]
+        explorer_fork_address_index: bool,
+        #[arg(
+            long,
+            env = "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS",
+            default_value_t = fork_address_index::DEFAULT_MAX_BLOCKS
+        )]
+        explorer_fork_address_index_max_blocks: u64,
+        #[arg(
+            long,
+            env = "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS",
+            default_value_t = fork_address_index::DEFAULT_MAX_TRANSACTIONS
+        )]
+        explorer_fork_address_index_max_transactions: usize,
+        #[arg(
+            long,
+            env = "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS",
+            default_value_t = fork_address_index::DEFAULT_MAX_OUTPUTS
+        )]
+        explorer_fork_address_index_max_outputs: usize,
+        #[arg(
+            long,
+            env = "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES",
+            default_value_t = fork_address_index::DEFAULT_MAX_ADDRESSES
+        )]
+        explorer_fork_address_index_max_addresses: usize,
         #[arg(long, env = "POHW_EXPLORER_BITCOIN_INDEX_URL")]
         explorer_bitcoin_index_url: Option<String>,
         #[arg(long, env = "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX")]
@@ -2040,6 +2067,11 @@ async fn main() -> Result<()> {
             explorer_fork_chain_rpc_addr,
             explorer_fork_activation_manifest,
             explorer_pohw_core_manifest,
+            explorer_fork_address_index,
+            explorer_fork_address_index_max_blocks,
+            explorer_fork_address_index_max_transactions,
+            explorer_fork_address_index_max_outputs,
+            explorer_fork_address_index_max_addresses,
             explorer_bitcoin_index_url,
             explorer_allow_remote_bitcoin_index,
             governance_dashboard_state_file,
@@ -2084,6 +2116,19 @@ async fn main() -> Result<()> {
                     "legacy fork RPC and the Experiment 1 Bitcoin Core explorer cannot be enabled together"
                 );
             }
+            if explorer_fork_address_index && explorer_pohw_core_manifest.is_none() {
+                bail!("--explorer-fork-address-index requires --explorer-pohw-core-manifest");
+            }
+            let fork_address_index_limits = explorer_fork_address_index
+                .then(|| {
+                    fork_address_index::ForkAddressIndexLimits::new(
+                        explorer_fork_address_index_max_blocks,
+                        explorer_fork_address_index_max_transactions,
+                        explorer_fork_address_index_max_outputs,
+                        explorer_fork_address_index_max_addresses,
+                    )
+                })
+                .transpose()?;
             let fork_explorer_client = if let Some(manifest_path) = explorer_pohw_core_manifest {
                 if !bitcoin_rpc_configured {
                     bail!(
@@ -2096,7 +2141,11 @@ async fn main() -> Result<()> {
                     allow_remote_rpc,
                 )?;
                 Some(fork_explorer::ExplorerForkClient::PohwCore(Box::new(
-                    fork_explorer::PohwCoreExplorerClient::from_manifest(rpc, &manifest_path)?,
+                    fork_explorer::PohwCoreExplorerClient::from_manifest(
+                        rpc,
+                        &manifest_path,
+                        fork_address_index_limits,
+                    )?,
                 )))
             } else {
                 legacy_fork_client.map(fork_explorer::ExplorerForkClient::Legacy)
@@ -2112,6 +2161,10 @@ async fn main() -> Result<()> {
                     .status()
                     .await
                     .context("fork explorer backend failed its startup binding check")?;
+                client
+                    .prepare_address_index()
+                    .await
+                    .context("fork address index failed its startup binding check")?;
             }
             let bitcoin_index_client = explorer_bitcoin_index_url
                 .as_deref()

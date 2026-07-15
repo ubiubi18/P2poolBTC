@@ -3,6 +3,8 @@ import { sha256 } from "./sha256";
 import { isCanonicalManifestCid } from "./validation";
 
 const MAX_DAG_CBOR_BYTES = 65536;
+const MAX_SCOPE_DAG_CBOR_BYTES = 1400000;
+const MAX_SOURCE_PROOF_DAG_CBOR_BYTES = 600000;
 const MAX_OBJECTIVE_RESULT_BYTES = 64;
 const MAX_DEPTH = 24;
 const MAX_ITEMS = 20000;
@@ -275,10 +277,29 @@ class CanonicalCborReader {
 }
 
 export function verifiedCanonicalDagCborMap(cid: string, hexBytes: string): CanonicalDagCborMap {
+  return verifiedCanonicalDagCborMapWithLimit(cid, hexBytes, MAX_DAG_CBOR_BYTES);
+}
+
+export function verifiedCanonicalScopeDagCborMap(cid: string, hexBytes: string): CanonicalDagCborMap {
+  return verifiedCanonicalDagCborMapWithLimit(cid, hexBytes, MAX_SCOPE_DAG_CBOR_BYTES);
+}
+
+export function verifiedCanonicalSourceProofDagCborMap(
+  cid: string,
+  hexBytes: string,
+): CanonicalDagCborMap {
+  return verifiedCanonicalDagCborMapWithLimit(cid, hexBytes, MAX_SOURCE_PROOF_DAG_CBOR_BYTES);
+}
+
+function verifiedCanonicalDagCborMapWithLimit(
+  cid: string,
+  hexBytes: string,
+  maximumBytes: i32,
+): CanonicalDagCborMap {
   assert(isCanonicalManifestCid(cid), "content CID must be canonical DAG-CBOR CIDv1");
-  assert(hexBytes.length > 0 && hexBytes.length <= MAX_DAG_CBOR_BYTES * 2, "DAG-CBOR payload exceeds contract limit");
+  assert(hexBytes.length > 0 && hexBytes.length <= maximumBytes * 2, "DAG-CBOR payload exceeds contract limit");
   const bytes = hexToBytes(hexBytes);
-  assert(bytes.length <= MAX_DAG_CBOR_BYTES, "DAG-CBOR payload exceeds contract limit");
+  assert(bytes.length <= maximumBytes, "DAG-CBOR payload exceeds contract limit");
   assert(cidForDagCbor(bytes) == cid, "DAG-CBOR payload does not match its declared CID");
   return new CanonicalCborReader(bytes).readTopLevelMap();
 }

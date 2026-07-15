@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -18,7 +19,10 @@ HEX_32 = re.compile(r"^[0-9a-f]{64}$")
 HEX_20 = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_UPSTREAM_COMMIT = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
 PREVIOUS_ACTIVATION_ID = "3aed5c759ab096064957555c1f374c0fba6e35c88a3e0ca069ac392df4fec63a"
+EXPECTED_ACTIVATION_ID = "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8"
 EXPECTED_FIRST_FORK_HASH = "64d2122b44c111f2f593869ce404117d34c6c830f4390eb70245c11dcc503d01"
+ACTIVATION_PATCH_SHA256 = "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4"
+EXPECTED_PATCH_SHA256 = "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab"
 
 
 class ManifestError(ValueError):
@@ -26,8 +30,14 @@ class ManifestError(ValueError):
 
 
 def canonical_payload(manifest: dict[str, Any]) -> bytes:
-    payload = dict(manifest)
+    payload = copy.deepcopy(manifest)
     payload.pop("activation_id", None)
+    # Test-only patch revisions are artifact metadata, not a new activation.
+    # Preserve the published activation preimage and validate the live artifact
+    # digest independently in validate().
+    build = payload.get("build")
+    if isinstance(build, dict) and "patch_sha256" in build:
+        build["patch_sha256"] = ACTIVATION_PATCH_SHA256
     return json.dumps(
         payload,
         sort_keys=True,
@@ -38,6 +48,15 @@ def canonical_payload(manifest: dict[str, Any]) -> bytes:
 
 def activation_id(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(TAG + canonical_payload(manifest)).hexdigest()
+
+
+def activation_manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    """Reconstruct the immutable activation-era manifest serialization."""
+    payload = copy.deepcopy(manifest)
+    build = payload.get("build")
+    if isinstance(build, dict):
+        build["patch_sha256"] = ACTIVATION_PATCH_SHA256
+    return (json.dumps(payload, indent=2, ensure_ascii=True) + "\n").encode("ascii")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -172,6 +191,7 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
     patch_rel = str(build.get("patch_path", ""))
     patch_hash = str(build.get("patch_sha256", ""))
     _require(bool(HEX_32.fullmatch(patch_hash)), "patch_sha256 must be lowercase 32-byte hex")
+    _require(patch_hash == EXPECTED_PATCH_SHA256, "patch_sha256 does not match the exact released patch")
     _require(patch_rel.startswith("vendor/bitcoin-core/patches/"), "patch must remain under vendor/bitcoin-core/patches")
     patch_path = (repo_root / patch_rel).resolve()
     _require(repo_root.resolve() in patch_path.parents, "patch path escapes repository")
@@ -203,11 +223,18 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
             "FindAnyByte",
             "CChainParams::PoHW",
             "ChainType::POHW",
+            "feature_pohw_replay.py",
+            "pohw_replay_test",
+            "-testactivationheight=pohw-replay@",
+            "self.setup_clean_chain = True",
+            'assert_equal(unprotected_result["reject-reason"], REPLAY_REJECT_REASON)',
+            'assert_equal(protected_result["allowed"], True)',
         ):
             _require(required in patch_text, f"pinned patch is missing consensus marker: {required}")
 
     actual_activation = str(manifest.get("activation_id", ""))
     _require(bool(HEX_32.fullmatch(actual_activation)), "activation_id must be lowercase 32-byte hex")
+    _require(actual_activation == EXPECTED_ACTIVATION_ID, "Experiment 1 activation ID must remain pinned")
     _require(actual_activation == activation_id(manifest), "activation_id does not match canonical manifest payload")
 
     risks = manifest.get("risk_acknowledgements", [])

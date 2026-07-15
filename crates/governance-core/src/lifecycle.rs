@@ -1,14 +1,15 @@
 use crate::{
     cid_for, effective_vote_weight, evaluate_gates, normalize_address, package_dag_cbor,
-    package_toolchain_manifest_for_ecosystem, stake_score, verify_agent_review_attestation_car,
-    verify_build_attestation_car, verify_dag_cbor_car, verify_data_availability_attestation_car,
-    verify_ecosystem_manifest_car, verify_ecosystem_patch_manifest_car,
-    verify_ecosystem_transition, verify_identity_metrics_attestation_car,
-    verify_identity_metrics_proof, verify_pinset_manifest_car,
-    verify_pinset_manifest_for_transition, AcceptanceEvidence, ArtifactManifestV1, BuildArtifactV1,
+    package_toolchain_manifest_for_ecosystem, stake_score, validate_proposal_scope_evidence,
+    verify_agent_review_attestation_car, verify_build_attestation_car, verify_dag_cbor_car,
+    verify_data_availability_attestation_car, verify_ecosystem_manifest_car,
+    verify_ecosystem_patch_manifest_car, verify_ecosystem_transition,
+    verify_identity_metrics_attestation_car, verify_identity_metrics_proof,
+    verify_pinset_manifest_car, verify_pinset_manifest_for_transition,
+    verify_proposal_scope_evidence_car, AcceptanceEvidence, ArtifactManifestV1, BuildArtifactV1,
     DagCborPackage, GateResults, GovernanceIdentityMetricsLeafV1, GovernanceIdentityMetricsProofV1,
-    GovernanceParameterSetV1, IdentityState, RepositoryCidV1, ReviewVerdictV1, RiskClass,
-    VoteChoice,
+    GovernanceParameterSetV1, IdentityState, ProposalScopeEvidenceV1, RepositoryCidV1,
+    ReviewVerdictV1, RiskClass, VoteChoice,
 };
 use cid::Cid;
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,7 @@ pub struct OpenReviewRoundInputV1<'a> {
     pub candidate_car: &'a [u8],
     pub patch_car: &'a [u8],
     pub pinset_car: &'a [u8],
+    pub scope_car: &'a [u8],
     pub opener_address: &'a str,
     pub attached_bond_atoms: u128,
 }
@@ -64,6 +66,7 @@ pub enum ProposalState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewRoundState {
     Open,
+    AvailabilityOpen,
     Frozen,
     Claimed,
     Expired,
@@ -94,6 +97,7 @@ pub struct AttestationCommitmentEntryV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeProposalContentV1 {
     pub schema_version: u16,
+    pub scope_evidence_cid: String,
     pub governance_parameter_set_cid: String,
     pub parent_canonical_ecosystem_cid: String,
     pub candidate_ecosystem_cid: String,
@@ -300,6 +304,7 @@ pub struct ReviewRoundView {
     pub parent_cid: String,
     pub candidate_cid: String,
     pub patch_cid: String,
+    pub scope_evidence_cid: String,
     pub opener_address: String,
     pub opened_block: u64,
     pub end_block: u64,
@@ -372,6 +377,8 @@ pub enum GovernanceError {
     IneligibleVoter,
     #[error("withdrawal exceeds unscheduled active stake")]
     InsufficientActiveStake,
+    #[error("stake remains reserved for an unsettled slashable governance action")]
+    StakeSlashReserved,
     #[error("objective challenge payload is malformed")]
     InvalidChallenge,
     #[error("refund balance is empty")]
@@ -412,18 +419,21 @@ struct VoterSnapshot {
 struct BondedAgentAttestation {
     input: AgentAttestationInputV1,
     settled: bool,
+    invalid: bool,
 }
 
 #[derive(Debug, Clone)]
 struct BondedBuildAttestation {
     input: BuildAttestationInputV1,
     settled: bool,
+    invalid: bool,
 }
 
 #[derive(Debug, Clone)]
 struct BondedDataAvailabilityAttestation {
     input: DataAvailabilityAttestationInputV1,
     settled: bool,
+    invalid: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,6 +479,8 @@ struct ReviewRoundRecord {
     parent_cid: String,
     candidate_cid: String,
     patch_cid: String,
+    scope_evidence_cid: String,
+    scope_evidence: ProposalScopeEvidenceV1,
     affected_repositories: Vec<String>,
     base_source_cids: BTreeMap<String, String>,
     candidate_source_cids: BTreeMap<String, String>,
@@ -510,7 +522,6 @@ struct IdentityMetricsCertificationRecord {
     descriptor_operators: BTreeMap<String, BTreeSet<String>>,
     operator_attestations: BTreeMap<String, (String, String)>,
     finalized_descriptor: Option<String>,
-    conflict: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -543,6 +554,14 @@ impl GovernanceEngine {
         validate_canonical_cid(governance_parameter_set_cid)?;
         validate_sha256(metrics_root)?;
         validate_governance_parameters(&parameters)?;
+        let parameter_package = package_dag_cbor(parameters.clone()).map_err(|_| {
+            GovernanceError::InvalidContentAddress(governance_parameter_set_cid.to_string())
+        })?;
+        if parameter_package.root_cid.to_string() != governance_parameter_set_cid {
+            return Err(GovernanceError::InvalidContentAddress(
+                governance_parameter_set_cid.to_string(),
+            ));
+        }
         Ok(Self {
             canonical_ecosystem_cid: initial_canonical_ecosystem_cid.to_string(),
             governance_parameter_set_cid: governance_parameter_set_cid.to_string(),
@@ -634,6 +653,13 @@ impl GovernanceEngine {
             return Err(GovernanceError::Duplicate);
         }
         if record
+            .finalized_descriptor
+            .as_ref()
+            .is_some_and(|finalized| finalized != &descriptor_hash)
+        {
+            return Err(GovernanceError::InvalidAttestation);
+        }
+        if record
             .descriptors
             .get(&descriptor_hash)
             .is_some_and(|existing| existing != &descriptor)
@@ -653,12 +679,8 @@ impl GovernanceEngine {
             .entry(descriptor_hash.clone())
             .or_default();
         count.insert(caller);
-        if count.len() >= minimum as usize {
-            match &record.finalized_descriptor {
-                None => record.finalized_descriptor = Some(descriptor_hash),
-                Some(finalized) if finalized != &descriptor_hash => record.conflict = true,
-                Some(_) => {}
-            }
+        if count.len() >= minimum as usize && record.finalized_descriptor.is_none() {
+            record.finalized_descriptor = Some(descriptor_hash);
         }
         Ok(identity_metrics_certification_view(
             &key.0, key.1, record, minimum,
@@ -770,19 +792,23 @@ impl GovernanceEngine {
         clock: GovernanceClock,
     ) -> Result<u128, GovernanceError> {
         let caller = normalize_governance_address(caller)?;
+        if self.has_unsettled_slashable_action(&caller) {
+            return Err(GovernanceError::StakeSlashReserved);
+        }
         let position = self.stakes.entry(caller.clone()).or_default();
         sync_position(position, clock.epoch)?;
         let mut released = 0u128;
-        position.unbonding.retain(|item| {
+        let mut remaining = Vec::with_capacity(position.unbonding.len());
+        for item in std::mem::take(&mut position.unbonding) {
             if item.release_epoch <= clock.epoch {
                 released = released
                     .checked_add(item.atoms)
-                    .expect("unbonding sum was bounded by deposits");
-                false
+                    .ok_or(GovernanceError::Overflow)?;
             } else {
-                true
+                remaining.push(item);
             }
-        });
+        }
+        position.unbonding = remaining;
         if released == 0 {
             return Err(GovernanceError::NoRefund);
         }
@@ -826,6 +852,7 @@ impl GovernanceEngine {
             candidate_car,
             patch_car,
             pinset_car,
+            scope_car,
             opener_address,
             attached_bond_atoms,
         } = input;
@@ -837,6 +864,8 @@ impl GovernanceEngine {
             .map_err(|_| GovernanceError::InvalidProposal)?;
         let pinset =
             verify_pinset_manifest_car(pinset_car).map_err(|_| GovernanceError::InvalidProposal)?;
+        let scope = verify_proposal_scope_evidence_car(scope_car)
+            .map_err(|_| GovernanceError::InvalidProposal)?;
         let affected_repositories = verify_ecosystem_transition(&parent, &candidate, &patch)
             .map_err(|_| GovernanceError::InvalidProposal)?;
         verify_pinset_manifest_for_transition(&pinset, &candidate, &patch)
@@ -844,6 +873,7 @@ impl GovernanceEngine {
         let parent_cid = parent.root_cid.to_string();
         let candidate_cid = candidate.root_cid.to_string();
         let patch_cid = patch.root_cid.to_string();
+        let scope_evidence_cid = scope.root_cid.to_string();
         if parent_cid != self.canonical_ecosystem_cid {
             return Err(GovernanceError::StaleParent);
         }
@@ -874,6 +904,35 @@ impl GovernanceEngine {
             .iter()
             .map(|name| (name.clone(), candidate_sources[name].clone()))
             .collect::<BTreeMap<_, _>>();
+        if scope.value.parent_ecosystem_cid != parent_cid
+            || scope.value.candidate_ecosystem_cid != candidate_cid
+            || scope.value.patch_cid != patch_cid
+            || scope
+                .value
+                .repositories
+                .iter()
+                .map(|repository| repository.repository.clone())
+                .collect::<Vec<_>>()
+                != affected_repositories
+        {
+            return Err(GovernanceError::InvalidProposal);
+        }
+        for repository in &scope.value.repositories {
+            let expected_patch = patch
+                .manifest
+                .repository_patches
+                .iter()
+                .find(|entry| entry.repository == repository.repository)
+                .ok_or(GovernanceError::InvalidProposal)?;
+            if base_source_cids.get(&repository.repository) != Some(&repository.base_source_cid)
+                || candidate_source_cids.get(&repository.repository)
+                    != Some(&repository.candidate_source_cid)
+                || expected_patch.patch_cid != repository.patch_cid
+                || expected_patch.patch_sha256 != repository.patch_sha256
+            {
+                return Err(GovernanceError::InvalidProposal);
+            }
+        }
         let all_candidate_source_cids = candidate
             .manifest
             .repositories
@@ -896,6 +955,9 @@ impl GovernanceEngine {
             .to_string();
         let pinset_cid = pinset.root_cid.to_string();
         let pinset_cids = pinset.manifest.cids;
+        if !pinset_cids.contains(&scope_evidence_cid) {
+            return Err(GovernanceError::InvalidProposal);
+        }
         let required_availability_cids = pinset_cids.iter().cloned().collect();
         let opener_address = normalize_governance_address(opener_address)?;
         if !self
@@ -927,6 +989,7 @@ impl GovernanceEngine {
             &parent_cid,
             &candidate_cid,
             &patch_cid,
+            &scope_evidence_cid,
             &opener_address,
             clock.block,
         );
@@ -941,6 +1004,8 @@ impl GovernanceEngine {
                 parent_cid,
                 candidate_cid,
                 patch_cid,
+                scope_evidence_cid,
+                scope_evidence: scope.value,
                 affected_repositories,
                 base_source_cids,
                 candidate_source_cids,
@@ -975,27 +1040,61 @@ impl GovernanceEngine {
         review_round_id: &str,
         clock: GovernanceClock,
     ) -> Result<ReviewRoundView, GovernanceError> {
-        let (agent_root, build_root, availability_root) = {
+        let state = self
+            .review_rounds
+            .get(review_round_id)
+            .ok_or(GovernanceError::ReviewRoundNotFound)?
+            .state;
+        if state == ReviewRoundState::Open {
+            let (agent_root, build_root) = {
+                let round = self
+                    .review_rounds
+                    .get(review_round_id)
+                    .ok_or(GovernanceError::ReviewRoundNotFound)?;
+                if clock.block < round.end_block || clock.block > round.claim_deadline {
+                    return Err(GovernanceError::InvalidDeadline);
+                }
+                if round.parent_cid != self.canonical_ecosystem_cid {
+                    return Err(GovernanceError::StaleParent);
+                }
+                let (agents, builders) = review_evidence_commitments(round)?;
+                (agents.root, builders.root)
+            };
+            let round = self
+                .review_rounds
+                .get_mut(review_round_id)
+                .ok_or(GovernanceError::ReviewRoundNotFound)?;
+            round.agent_review_root = Some(agent_root);
+            round.build_attestation_root = Some(build_root);
+            round.state = ReviewRoundState::AvailabilityOpen;
+            return Ok(review_round_view(round));
+        }
+        let availability_root = {
             let round = self
                 .review_rounds
                 .get(review_round_id)
                 .ok_or(GovernanceError::ReviewRoundNotFound)?;
-            require_review_round_state(round, ReviewRoundState::Open)?;
-            if clock.block < round.end_block || clock.block > round.claim_deadline {
+            require_review_round_state(round, ReviewRoundState::AvailabilityOpen)?;
+            if clock.block > round.claim_deadline {
                 return Err(GovernanceError::InvalidDeadline);
             }
             if round.parent_cid != self.canonical_ecosystem_cid {
                 return Err(GovernanceError::StaleParent);
             }
-            let (agents, builders, availability) = review_round_commitments(round)?;
-            (agents.root, builders.root, availability.root)
+            let minimum_providers = if round.scope_evidence.derived_risk_class.is_critical() {
+                self.parameters.critical.minimum_data_availability_providers
+            } else {
+                self.parameters.normal.minimum_data_availability_providers
+            };
+            if complete_review_availability_provider_count(round) < minimum_providers {
+                return Err(GovernanceError::InvalidAttestation);
+            }
+            review_availability_commitment(round)?.root
         };
         let round = self
             .review_rounds
             .get_mut(review_round_id)
             .ok_or(GovernanceError::ReviewRoundNotFound)?;
-        round.agent_review_root = Some(agent_root);
-        round.build_attestation_root = Some(build_root);
         round.data_availability_root = Some(availability_root);
         round.state = ReviewRoundState::Frozen;
         Ok(review_round_view(round))
@@ -1029,7 +1128,9 @@ impl GovernanceEngine {
                 .ok_or(GovernanceError::ReviewRoundNotFound)?;
             if !matches!(
                 round.state,
-                ReviewRoundState::Open | ReviewRoundState::Frozen
+                ReviewRoundState::Open
+                    | ReviewRoundState::AvailabilityOpen
+                    | ReviewRoundState::Frozen
             ) {
                 return Err(GovernanceError::InvalidReviewRoundState(round.state));
             }
@@ -1108,7 +1209,22 @@ impl GovernanceEngine {
     ) -> Result<String, GovernanceError> {
         self.sync_all_stakes(clock.epoch)?;
         content.proposer_address = normalize_governance_address(&content.proposer_address)?;
-        validate_proposal_content(&content, &self.parameters, clock)?;
+        let (scope_evidence_cid, scope_evidence) = self
+            .review_rounds
+            .get(&content.review_round_id)
+            .map(|round| {
+                (
+                    round.scope_evidence_cid.clone(),
+                    round.scope_evidence.clone(),
+                )
+            })
+            .ok_or(GovernanceError::ReviewRoundNotFound)?;
+        validate_change_proposal_content_with_scope(
+            &content,
+            &self.parameters,
+            &scope_evidence_cid,
+            &scope_evidence,
+        )?;
         if content.governance_parameter_set_cid != self.governance_parameter_set_cid {
             return Err(GovernanceError::InvalidProposal);
         }
@@ -1163,6 +1279,7 @@ impl GovernanceEngine {
                 || round.parent_cid != content.parent_canonical_ecosystem_cid
                 || round.candidate_cid != content.candidate_ecosystem_cid
                 || round.patch_cid != content.patch_cid
+                || round.scope_evidence_cid != content.scope_evidence_cid
                 || round.affected_repositories != content.affected_repositories
                 || round.base_source_cids != content.base_source_cids
                 || round.candidate_source_cids != content.candidate_source_cids
@@ -1290,6 +1407,7 @@ impl GovernanceEngine {
         mut input: AgentAttestationInputV1,
         clock: GovernanceClock,
     ) -> Result<(), GovernanceError> {
+        self.sync_all_stakes(clock.epoch)?;
         let package = verify_agent_review_attestation_car(&input.attestation_car)
             .map_err(|_| GovernanceError::InvalidAttestation)?;
         let payload = &package.value;
@@ -1303,10 +1421,15 @@ impl GovernanceEngine {
         };
         input.owner_address = normalize_governance_address(&input.owner_address)?;
         let minimum = parse_atoms(&self.parameters.minimum_reviewer_bond_atoms)?;
+        let minimum_active_stake = parse_atoms(&self.parameters.minimum_active_stake_atoms)?;
         let metrics_valid = self
             .registered_metrics
             .get(&input.owner_address)
             .is_some_and(|value| value.source_epoch == self.metrics_epoch);
+        let stake_valid = self
+            .stakes
+            .get(&input.owner_address)
+            .is_some_and(|position| position.active_atoms >= minimum_active_stake);
         let round = self.review_round_mut(review_round_id)?;
         require_review_round_submission(round, clock)?;
         let _commitment_fields = agent_attestation_commitment_fields(
@@ -1317,6 +1440,7 @@ impl GovernanceEngine {
         )?;
         if input.bond_atoms < minimum
             || !metrics_valid
+            || !stake_valid
             || package.root_cid.to_string() != input.attestation_cid
             || payload_owner != input.owner_address
             || payload.parent_ecosystem_cid != input.parent_ecosystem_cid
@@ -1393,6 +1517,7 @@ impl GovernanceEngine {
             BondedAgentAttestation {
                 input,
                 settled: false,
+                invalid: false,
             },
         );
         Ok(())
@@ -1404,18 +1529,29 @@ impl GovernanceEngine {
         mut input: BuildAttestationInputV1,
         clock: GovernanceClock,
     ) -> Result<(), GovernanceError> {
+        self.sync_all_stakes(clock.epoch)?;
         let package = verify_build_attestation_car(&input.attestation_car)
             .map_err(|_| GovernanceError::InvalidAttestation)?;
         let payload = &package.value;
+        let attested_artifact_keys = payload
+            .artifacts
+            .iter()
+            .map(build_artifact_key)
+            .collect::<BTreeSet<_>>();
         let payload_owner = normalize_governance_address(&payload.builder_identity)?;
         let payload_bond = parse_atoms(&payload.builder_bond_atoms)
             .map_err(|_| GovernanceError::InvalidAttestation)?;
         input.builder_address = normalize_governance_address(&input.builder_address)?;
         let minimum = parse_atoms(&self.parameters.minimum_builder_bond_atoms)?;
+        let minimum_active_stake = parse_atoms(&self.parameters.minimum_active_stake_atoms)?;
         let metrics_valid = self
             .registered_metrics
             .get(&input.builder_address)
             .is_some_and(|value| value.source_epoch == self.metrics_epoch);
+        let stake_valid = self
+            .stakes
+            .get(&input.builder_address)
+            .is_some_and(|position| position.active_atoms >= minimum_active_stake);
         let round = self.review_round_mut(review_round_id)?;
         require_review_round_submission(round, clock)?;
         let _commitment_fields = build_attestation_commitment_fields(
@@ -1427,6 +1563,7 @@ impl GovernanceEngine {
         )?;
         if input.bond_atoms < minimum
             || !metrics_valid
+            || !stake_valid
             || package.root_cid.to_string() != input.attestation_cid
             || payload_owner != input.builder_address
             || payload.candidate_ecosystem_cid != input.candidate_ecosystem_cid
@@ -1441,11 +1578,8 @@ impl GovernanceEngine {
             || input.candidate_ecosystem_cid != round.candidate_cid
             || payload.source_cids != round.all_candidate_source_cids
             || payload.toolchain_cid != round.toolchain_cid
-            || payload.artifacts.iter().any(|artifact| {
-                !round
-                    .candidate_artifact_keys
-                    .contains(&build_artifact_key(artifact))
-            })
+            || payload.scope_evidence_cid != round.scope_evidence_cid
+            || attested_artifact_keys != round.candidate_artifact_keys
             || input.runtime_family.is_empty()
             || input.architecture.is_empty()
             || validate_sha256(&input.core_artifact_digest).is_err()
@@ -1490,6 +1624,7 @@ impl GovernanceEngine {
             BondedBuildAttestation {
                 input,
                 settled: false,
+                invalid: false,
             },
         );
         Ok(())
@@ -1501,6 +1636,7 @@ impl GovernanceEngine {
         mut input: DataAvailabilityAttestationInputV1,
         clock: GovernanceClock,
     ) -> Result<(), GovernanceError> {
+        self.sync_all_stakes(clock.epoch)?;
         let package = verify_data_availability_attestation_car(&input.attestation_car)
             .map_err(|_| GovernanceError::InvalidAttestation)?;
         let payload = &package.value;
@@ -1509,23 +1645,36 @@ impl GovernanceEngine {
             parse_atoms(&payload.bond_atoms).map_err(|_| GovernanceError::InvalidAttestation)?;
         input.operator_address = normalize_governance_address(&input.operator_address)?;
         let minimum = parse_atoms(&self.parameters.minimum_data_availability_bond_atoms)?;
+        let minimum_active_stake = parse_atoms(&self.parameters.minimum_active_stake_atoms)?;
         let metrics_valid = self
             .registered_metrics
             .get(&input.operator_address)
             .is_some_and(|value| value.source_epoch == self.metrics_epoch);
+        let stake_valid = self
+            .stakes
+            .get(&input.operator_address)
+            .is_some_and(|position| position.active_atoms >= minimum_active_stake);
         let lifecycle_after_claim = self
             .parameters
             .review_period_blocks
             .checked_add(self.parameters.voting_period_blocks)
             .and_then(|value| value.checked_add(self.parameters.challenge_period_blocks))
             .ok_or(GovernanceError::Overflow)?;
-        let challenge_period_blocks = self.parameters.challenge_period_blocks;
+        let post_vote_lifecycle = self
+            .parameters
+            .challenge_period_blocks
+            .checked_add(self.parameters.timelock_blocks)
+            .and_then(|value| value.checked_add(self.parameters.execution_window_blocks))
+            .ok_or(GovernanceError::Overflow)?;
         let round = self.review_round_mut(review_round_id)?;
-        require_review_round_submission(round, clock)?;
-        let latest_challenge_end = round
+        require_review_round_state(round, ReviewRoundState::AvailabilityOpen)?;
+        if clock.block > round.claim_deadline {
+            return Err(GovernanceError::InvalidDeadline);
+        }
+        let latest_execution_expiry = round
             .claim_deadline
             .checked_add(lifecycle_after_claim)
-            .and_then(|value| value.checked_add(challenge_period_blocks))
+            .and_then(|value| value.checked_add(post_vote_lifecycle))
             .ok_or(GovernanceError::Overflow)?;
         let _commitment_fields = data_availability_commitment_fields(
             &input.attestation_cid,
@@ -1536,6 +1685,7 @@ impl GovernanceEngine {
         )?;
         if input.bond_atoms < minimum
             || !metrics_valid
+            || !stake_valid
             || package.root_cid.to_string() != input.attestation_cid
             || payload_owner != input.operator_address
             || payload.candidate_ecosystem_cid != input.candidate_ecosystem_cid
@@ -1557,7 +1707,7 @@ impl GovernanceEngine {
                 .all(|cid| input.verified_cids.contains(cid))
             || !input.verified_cids.contains(&input.probe_result_cid)
             || input.provider_id.is_empty()
-            || input.expires_at_block < latest_challenge_end
+            || input.expires_at_block < latest_execution_expiry
             || validate_canonical_cid(&input.pinset_cid).is_err()
             || validate_raw_content_cid(&input.probe_result_cid).is_err()
         {
@@ -1588,6 +1738,7 @@ impl GovernanceEngine {
             BondedDataAvailabilityAttestation {
                 input,
                 settled: false,
+                invalid: false,
             },
         );
         Ok(())
@@ -1770,7 +1921,10 @@ impl GovernanceEngine {
                     .agents
                     .get(&input.attestation_cid)
                     .ok_or(GovernanceError::InvalidChallenge)?;
-                if attestation.input.test_result_cid != input.evidence_cid {
+                if attestation.invalid
+                    || attestation.settled
+                    || attestation.input.test_result_cid != input.evidence_cid
+                {
                     return Err(GovernanceError::InvalidChallenge);
                 }
                 BondTarget::Agent
@@ -1780,7 +1934,10 @@ impl GovernanceEngine {
                     .builders
                     .get(&input.attestation_cid)
                     .ok_or(GovernanceError::InvalidChallenge)?;
-                if attestation.input.test_result_cid != input.evidence_cid {
+                if attestation.invalid
+                    || attestation.settled
+                    || attestation.input.test_result_cid != input.evidence_cid
+                {
                     return Err(GovernanceError::InvalidChallenge);
                 }
                 BondTarget::Builder
@@ -1790,7 +1947,10 @@ impl GovernanceEngine {
                     .availability
                     .get(&input.attestation_cid)
                     .ok_or(GovernanceError::InvalidChallenge)?;
-                if attestation.input.probe_result_cid != input.evidence_cid {
+                if attestation.invalid
+                    || attestation.settled
+                    || attestation.input.probe_result_cid != input.evidence_cid
+                {
                     return Err(GovernanceError::InvalidChallenge);
                 }
                 BondTarget::Availability
@@ -1828,10 +1988,48 @@ impl GovernanceEngine {
             &challenge,
         )?;
         if successful {
-            self.settle_successful_challenge(proposal_id, &challenge)?;
-            let proposal = self.proposal_mut(proposal_id)?;
-            proposal.pending_challenge = None;
-            proposal.state = ProposalState::Rejected;
+            let offender = self.invalidate_and_slash_attestation(proposal_id, &challenge)?;
+            let proposer = self
+                .proposals
+                .get(proposal_id)
+                .ok_or(GovernanceError::ProposalNotFound)?
+                .content
+                .proposer_address
+                .clone();
+            if proposer == offender {
+                {
+                    let proposal = self.proposal_mut(proposal_id)?;
+                    proposal.pending_challenge = None;
+                    proposal.state = ProposalState::Rejected;
+                }
+                self.settle_fraudulent_proposer(proposal_id)?;
+            } else {
+                let gates = {
+                    let proposal = self
+                        .proposals
+                        .get(proposal_id)
+                        .ok_or(GovernanceError::ProposalNotFound)?;
+                    evaluate_gates(
+                        proposal.content.risk_class,
+                        &self.parameters.normal,
+                        &self.parameters.critical,
+                        &acceptance_evidence(proposal),
+                    )
+                };
+                {
+                    let proposal = self.proposal_mut(proposal_id)?;
+                    proposal.pending_challenge = None;
+                    proposal.gates = Some(gates.clone());
+                    proposal.state = if gates.accepted {
+                        ProposalState::AcceptedPendingChallenge
+                    } else {
+                        ProposalState::Expired
+                    };
+                }
+                if !gates.accepted {
+                    self.settle_full_refund(proposal_id)?;
+                }
+            }
         } else {
             let proposal = self.proposal_mut(proposal_id)?;
             proposal.pending_challenge = None;
@@ -1860,7 +2058,7 @@ impl GovernanceEngine {
         clock: GovernanceClock,
     ) -> Result<GovernanceEvent, GovernanceError> {
         let old_canonical = self.canonical_ecosystem_cid.clone();
-        let (state, parent, execution_not_before, execution_expires) = {
+        let (state, parent, risk_class, execution_not_before, execution_expires) = {
             let proposal = self
                 .proposals
                 .get(proposal_id)
@@ -1868,6 +2066,7 @@ impl GovernanceEngine {
             (
                 proposal.state,
                 proposal.content.parent_canonical_ecosystem_cid.clone(),
+                proposal.content.risk_class,
                 proposal.execution_not_before,
                 proposal.execution_expires,
             )
@@ -1885,6 +2084,18 @@ impl GovernanceEngine {
         if clock.block > execution_expires {
             self.expire_proposal(proposal_id, clock)?;
             return Err(GovernanceError::InvalidDeadline);
+        }
+        let minimum_live_providers = if risk_class.is_critical() {
+            self.parameters.critical.minimum_data_availability_providers
+        } else {
+            self.parameters.normal.minimum_data_availability_providers
+        };
+        let proposal = self
+            .proposals
+            .get(proposal_id)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        if live_data_availability_provider_count(proposal, clock.block) < minimum_live_providers {
+            return Err(GovernanceError::InvalidAttestation);
         }
         self.with_atomic_state(|engine| engine.execute_ready_proposal(proposal_id, old_canonical))
     }
@@ -2108,6 +2319,50 @@ impl GovernanceEngine {
         Ok(())
     }
 
+    fn has_unsettled_slashable_action(&self, address: &str) -> bool {
+        let review_round_reservation = self.review_rounds.values().any(|round| {
+            if !matches!(
+                round.state,
+                ReviewRoundState::Open
+                    | ReviewRoundState::AvailabilityOpen
+                    | ReviewRoundState::Frozen
+            ) {
+                return false;
+            }
+            (!round.bond_settled && round.opener_address == address)
+                || round
+                    .agents
+                    .values()
+                    .any(|item| !item.settled && item.input.owner_address == address)
+                || round
+                    .builders
+                    .values()
+                    .any(|item| !item.settled && item.input.builder_address == address)
+                || round
+                    .availability
+                    .values()
+                    .any(|item| !item.settled && item.input.operator_address == address)
+        });
+        if review_round_reservation {
+            return true;
+        }
+        self.proposals.values().any(|proposal| {
+            (!proposal.proposal_bond_settled && proposal.content.proposer_address == address)
+                || proposal
+                    .agents
+                    .values()
+                    .any(|item| !item.settled && item.input.owner_address == address)
+                || proposal
+                    .builders
+                    .values()
+                    .any(|item| !item.settled && item.input.builder_address == address)
+                || proposal
+                    .availability
+                    .values()
+                    .any(|item| !item.settled && item.input.operator_address == address)
+        })
+    }
+
     fn build_voter_snapshot(
         &self,
         identity_metrics_epoch: u16,
@@ -2201,71 +2456,115 @@ impl GovernanceEngine {
         self.release_review_candidate_for_proposal(proposal_id)
     }
 
-    fn settle_successful_challenge(
+    fn invalidate_and_slash_attestation(
         &mut self,
         proposal_id: &str,
         challenge: &PendingChallenge,
-    ) -> Result<(), GovernanceError> {
-        let (proposer, offender, proposal_bond, settled) = {
+    ) -> Result<String, GovernanceError> {
+        let reviewer_slash_bps = self
+            .parameters
+            .objective_slash_policy
+            .fraudulent_reviewer_slash_bps;
+        let builder_slash_bps = self
+            .parameters
+            .objective_slash_policy
+            .fraudulent_builder_slash_bps;
+        let availability_slash_bps = self
+            .parameters
+            .objective_slash_policy
+            .unavailable_data_slash_bps;
+        let (offender, bond, slash_bps) = {
+            let proposal = self.proposal_mut(proposal_id)?;
+            match challenge.target_type {
+                BondTarget::Agent => {
+                    let item = proposal
+                        .agents
+                        .get_mut(&challenge.input.attestation_cid)
+                        .ok_or(GovernanceError::InvalidChallenge)?;
+                    if item.settled || item.invalid {
+                        return Err(GovernanceError::InvalidChallenge);
+                    }
+                    item.settled = true;
+                    item.invalid = true;
+                    (
+                        item.input.owner_address.clone(),
+                        item.input.bond_atoms,
+                        reviewer_slash_bps,
+                    )
+                }
+                BondTarget::Builder => {
+                    let item = proposal
+                        .builders
+                        .get_mut(&challenge.input.attestation_cid)
+                        .ok_or(GovernanceError::InvalidChallenge)?;
+                    if item.settled || item.invalid {
+                        return Err(GovernanceError::InvalidChallenge);
+                    }
+                    item.settled = true;
+                    item.invalid = true;
+                    (
+                        item.input.builder_address.clone(),
+                        item.input.bond_atoms,
+                        builder_slash_bps,
+                    )
+                }
+                BondTarget::Availability => {
+                    let item = proposal
+                        .availability
+                        .get_mut(&challenge.input.attestation_cid)
+                        .ok_or(GovernanceError::InvalidChallenge)?;
+                    if item.settled || item.invalid {
+                        return Err(GovernanceError::InvalidChallenge);
+                    }
+                    item.settled = true;
+                    item.invalid = true;
+                    (
+                        item.input.operator_address.clone(),
+                        item.input.bond_atoms,
+                        availability_slash_bps,
+                    )
+                }
+            }
+        };
+        let burned = apply_bps(bond, slash_bps)?;
+        self.credit_refund(&offender, bond - burned)?;
+        self.burned_atoms = self
+            .burned_atoms
+            .checked_add(burned)
+            .ok_or(GovernanceError::Overflow)?;
+        let slash_bps = self
+            .parameters
+            .objective_slash_policy
+            .fraudulent_actor_stake_slash_bps;
+        self.slash_governance_stake(&offender, slash_bps)?;
+        Ok(offender)
+    }
+
+    fn settle_fraudulent_proposer(&mut self, proposal_id: &str) -> Result<(), GovernanceError> {
+        let (proposer, proposal_bond, settled) = {
             let proposal = self.proposal_mut(proposal_id)?;
             let settled = proposal.proposal_bond_settled;
             proposal.proposal_bond_settled = true;
-            let offender = match challenge.target_type {
-                BondTarget::Agent => proposal
-                    .agents
-                    .get(&challenge.input.attestation_cid)
-                    .map(|item| item.input.owner_address.clone()),
-                BondTarget::Builder => proposal
-                    .builders
-                    .get(&challenge.input.attestation_cid)
-                    .map(|item| item.input.builder_address.clone()),
-                BondTarget::Availability => proposal
-                    .availability
-                    .get(&challenge.input.attestation_cid)
-                    .map(|item| item.input.operator_address.clone()),
-            }
-            .ok_or(GovernanceError::InvalidChallenge)?;
             (
                 proposal.content.proposer_address.clone(),
-                offender,
                 proposal.content.proposal_bond_atoms,
                 settled,
             )
         };
-        let proposer_is_offender = proposer == offender;
         if !settled {
-            let slash = if proposer_is_offender {
-                apply_bps(
-                    proposal_bond,
-                    self.parameters
-                        .objective_slash_policy
-                        .fraudulent_proposal_slash_bps,
-                )?
-            } else {
-                let refund = apply_bps(
-                    proposal_bond,
-                    self.parameters.proposal_bond_policy.rejected_return_bps,
-                )?;
-                proposal_bond - refund
-            };
+            let slash = apply_bps(
+                proposal_bond,
+                self.parameters
+                    .objective_slash_policy
+                    .fraudulent_proposal_slash_bps,
+            )?;
             self.burned_atoms = self
                 .burned_atoms
                 .checked_add(slash)
                 .ok_or(GovernanceError::Overflow)?;
             self.credit_refund(&proposer, proposal_bond - slash)?;
         }
-        self.refund_unsettled_attestations(
-            proposal_id,
-            Some((
-                challenge.target_type,
-                challenge.input.attestation_cid.as_str(),
-            )),
-        )?;
-        let slash_bps = self
-            .parameters
-            .objective_slash_policy
-            .fraudulent_actor_stake_slash_bps;
-        self.slash_governance_stake(&offender, slash_bps)?;
+        self.refund_unsettled_attestations(proposal_id, None)?;
         self.release_review_candidate_for_proposal(proposal_id)
     }
 
@@ -2565,16 +2864,19 @@ fn review_round_id(
     parent_cid: &str,
     candidate_cid: &str,
     patch_cid: &str,
+    scope_evidence_cid: &str,
     opener_address: &str,
     opened_block: u64,
 ) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"IDENA_GOV_REVIEW_ROUND_V1\0");
+    hash.update(b"IDENA_GOV_REVIEW_ROUND_V2\0");
     hash.update(parent_cid.as_bytes());
     hash.update(b"|");
     hash.update(candidate_cid.as_bytes());
     hash.update(b"|");
     hash.update(patch_cid.as_bytes());
+    hash.update(b"|");
+    hash.update(scope_evidence_cid.as_bytes());
     hash.update(b"|");
     hash.update(opener_address.trim_start_matches("0x").as_bytes());
     hash.update(b"|");
@@ -2629,6 +2931,30 @@ pub fn package_change_proposal(
     })
 }
 
+pub fn package_change_proposal_with_scope(
+    mut content: ChangeProposalContentV1,
+    parameters: &GovernanceParameterSetV1,
+    scope_cid: &str,
+    scope: &ProposalScopeEvidenceV1,
+) -> Result<ChangeProposalPackage, GovernanceError> {
+    content.proposer_address = normalize_governance_address(&content.proposer_address)?;
+    validate_change_proposal_content_with_scope(&content, parameters, scope_cid, scope)?;
+    let package =
+        package_dag_cbor(content.clone()).map_err(|_| GovernanceError::InvalidProposal)?;
+    if package.dag_cbor_bytes.len() > MAX_CONTRACT_DAG_CBOR_BYTES {
+        return Err(GovernanceError::InvalidProposal);
+    }
+    let proposal_id = proposal_id(&content)?;
+    Ok(ChangeProposalPackage {
+        proposal_id,
+        content_cid: package.root_cid,
+        content_sha256: package.root_sha256,
+        content,
+        dag_cbor_bytes: package.dag_cbor_bytes,
+        car_bytes: package.car_bytes,
+    })
+}
+
 pub fn verify_change_proposal_car(
     bytes: &[u8],
     parameters: &GovernanceParameterSetV1,
@@ -2636,6 +2962,21 @@ pub fn verify_change_proposal_car(
     let package: DagCborPackage<ChangeProposalContentV1> =
         verify_dag_cbor_car(bytes).map_err(|_| GovernanceError::InvalidProposal)?;
     let expected = package_change_proposal(package.value, parameters)?;
+    if expected.content_cid != package.root_cid || expected.car_bytes != bytes {
+        return Err(GovernanceError::InvalidProposal);
+    }
+    Ok(expected)
+}
+
+pub fn verify_change_proposal_car_with_scope(
+    bytes: &[u8],
+    parameters: &GovernanceParameterSetV1,
+    scope_cid: &str,
+    scope: &ProposalScopeEvidenceV1,
+) -> Result<ChangeProposalPackage, GovernanceError> {
+    let package: DagCborPackage<ChangeProposalContentV1> =
+        verify_dag_cbor_car(bytes).map_err(|_| GovernanceError::InvalidProposal)?;
+    let expected = package_change_proposal_with_scope(package.value, parameters, scope_cid, scope)?;
     if expected.content_cid != package.root_cid || expected.car_bytes != bytes {
         return Err(GovernanceError::InvalidProposal);
     }
@@ -2663,18 +3004,79 @@ pub fn validate_change_proposal_content(
     Ok(())
 }
 
+pub fn validate_change_proposal_content_with_scope(
+    content: &ChangeProposalContentV1,
+    parameters: &GovernanceParameterSetV1,
+    scope_cid: &str,
+    scope: &ProposalScopeEvidenceV1,
+) -> Result<(), GovernanceError> {
+    validate_governance_parameters(parameters)?;
+    validate_proposal_content_internal(
+        content,
+        parameters,
+        GovernanceClock {
+            block: content.creation_block,
+            epoch: content.creation_epoch,
+        },
+        true,
+    )?;
+    validate_proposal_scope_evidence(scope).map_err(|_| GovernanceError::InvalidProposal)?;
+    validate_canonical_cid(scope_cid)?;
+    if content.scope_evidence_cid != scope_cid
+        || scope.parent_ecosystem_cid != content.parent_canonical_ecosystem_cid
+        || scope.candidate_ecosystem_cid != content.candidate_ecosystem_cid
+        || scope.patch_cid != content.patch_cid
+        || scope.changed_file_count != content.changed_file_count
+        || scope.patch_bytes != content.patch_bytes
+        || scope.source_package_bytes != content.source_package_bytes
+        || scope.description_bytes != content.description_bytes
+        || scope.migration_operation_count != content.migration_operation_count
+        || scope.derived_risk_class != content.risk_class
+        || scope.repositories.len() != content.affected_repositories.len()
+    {
+        return Err(GovernanceError::InvalidProposal);
+    }
+    for (repository, affected) in scope
+        .repositories
+        .iter()
+        .zip(content.affected_repositories.iter())
+    {
+        if repository.repository != *affected
+            || content.base_source_cids.get(affected) != Some(&repository.base_source_cid)
+            || content.candidate_source_cids.get(affected) != Some(&repository.candidate_source_cid)
+        {
+            return Err(GovernanceError::InvalidProposal);
+        }
+    }
+    normalize_governance_address(&content.proposer_address)?;
+    let minimum = parse_atoms(&parameters.proposal_bond_policy.minimum_bond_atoms)?;
+    if content.proposal_bond_atoms < minimum {
+        return Err(GovernanceError::InsufficientAmount);
+    }
+    Ok(())
+}
+
 fn validate_proposal_content(
     content: &ChangeProposalContentV1,
     parameters: &GovernanceParameterSetV1,
     clock: GovernanceClock,
 ) -> Result<(), GovernanceError> {
-    if content.schema_version != 1
+    validate_proposal_content_internal(content, parameters, clock, false)
+}
+
+fn validate_proposal_content_internal(
+    content: &ChangeProposalContentV1,
+    parameters: &GovernanceParameterSetV1,
+    clock: GovernanceClock,
+    objective_scope_verified: bool,
+) -> Result<(), GovernanceError> {
+    if content.schema_version != 2
         || content.creation_block != clock.block
         || content.creation_epoch != clock.epoch
         || content.staking_epoch != content.creation_epoch
         // Until an objective source/path classifier is committed on-chain, a
         // proposer must not be able to select the lower normal-proposal gates.
-        || content.risk_class == RiskClass::Normal
+        || (content.risk_class == RiskClass::Normal && !objective_scope_verified)
     {
         return Err(GovernanceError::InvalidProposal);
     }
@@ -2695,6 +3097,7 @@ fn validate_proposal_content(
         return Err(GovernanceError::InvalidProposal);
     }
     for cid in [
+        &content.scope_evidence_cid,
         &content.governance_parameter_set_cid,
         &content.parent_canonical_ecosystem_cid,
         &content.candidate_ecosystem_cid,
@@ -2902,7 +3305,9 @@ fn acceptance_evidence(proposal: &ProposalRecord) -> AcceptanceEvidence {
         .agents
         .values()
         .filter(|item| {
-            item.input.verdict == AttestationVerdict::Approve && item.input.tests_passed_claim
+            !item.invalid
+                && item.input.verdict == AttestationVerdict::Approve
+                && item.input.tests_passed_claim
         })
         .collect::<Vec<_>>();
     let unique_agent_instances = approved_agents
@@ -2922,11 +3327,22 @@ fn acceptance_evidence(proposal: &ProposalRecord) -> AcceptanceEvidence {
         .iter()
         .map(|item| item.input.owner_address.clone())
         .collect::<BTreeSet<_>>();
-    let unresolved = proposal
+    let unresolved_owners = proposal
         .agents
         .values()
-        .map(|item| item.input.unresolved_critical_findings)
-        .sum::<u32>();
+        .filter(|item| !item.invalid && item.input.unresolved_critical_findings > 0)
+        .map(|item| item.input.owner_address.clone())
+        .collect::<BTreeSet<_>>();
+    let corroboration_threshold = if proposal.content.risk_class.is_critical() {
+        3
+    } else {
+        2
+    };
+    let unresolved = if unresolved_owners.len() >= corroboration_threshold {
+        unresolved_owners.len() as u32
+    } else {
+        0
+    };
     let unresolved = if unresolved > 0
         && proposal.content.risk_class.is_critical()
         && proposal.content.critical_finding_waiver_cid.is_some()
@@ -2940,7 +3356,7 @@ fn acceptance_evidence(proposal: &ProposalRecord) -> AcceptanceEvidence {
     for item in proposal
         .builders
         .values()
-        .filter(|item| item.input.tests_passed_claim)
+        .filter(|item| !item.invalid && item.input.tests_passed_claim)
     {
         let group = build_groups
             .entry(item.input.core_artifact_digest.clone())
@@ -2969,8 +3385,9 @@ fn acceptance_evidence(proposal: &ProposalRecord) -> AcceptanceEvidence {
         .availability
         .values()
         .filter(|item| {
-            item.input.available_claim
-                && item.input.expires_at_block >= proposal.challenge_end
+            !item.invalid
+                && item.input.available_claim
+                && item.input.expires_at_block >= proposal.execution_expires
                 && proposal
                     .required_availability_cids
                     .iter()
@@ -2998,6 +3415,24 @@ fn acceptance_evidence(proposal: &ProposalRecord) -> AcceptanceEvidence {
         matching_core_artifact_digests: selected_build_group.is_some(),
         independent_data_availability_providers: provider_owners.len() as u32,
     }
+}
+
+fn live_data_availability_provider_count(proposal: &ProposalRecord, block: u64) -> u32 {
+    proposal
+        .availability
+        .values()
+        .filter(|item| {
+            !item.invalid
+                && item.input.available_claim
+                && item.input.expires_at_block >= block
+                && proposal
+                    .required_availability_cids
+                    .iter()
+                    .all(|cid| item.input.verified_cids.contains(cid))
+        })
+        .map(|item| item.input.operator_address.clone())
+        .collect::<BTreeSet<_>>()
+        .len() as u32
 }
 
 fn objective_challenge_succeeds(
@@ -3127,12 +3562,20 @@ fn verify_attestation_roots(proposal: &ProposalRecord) -> Result<(), GovernanceE
     Ok(())
 }
 
+#[cfg(test)]
 fn review_round_commitments(
     round: &ReviewRoundRecord,
 ) -> Result<(BuiltCidCommitment, BuiltCidCommitment, BuiltCidCommitment), GovernanceError> {
+    let (agents, builders) = review_evidence_commitments(round)?;
+    let availability = review_availability_commitment(round)?;
+    Ok((agents, builders, availability))
+}
+
+fn review_evidence_commitments(
+    round: &ReviewRoundRecord,
+) -> Result<(BuiltCidCommitment, BuiltCidCommitment), GovernanceError> {
     if round.agents.len() > MAX_REVIEW_ATTESTATIONS_PER_CLASS
         || round.builders.len() > MAX_REVIEW_ATTESTATIONS_PER_CLASS
-        || round.availability.len() > MAX_REVIEW_ATTESTATIONS_PER_CLASS
     {
         return Err(GovernanceError::ReviewRoundFull);
     }
@@ -3167,7 +3610,19 @@ fn review_round_commitments(
             })
         })
         .collect::<Result<Vec<_>, GovernanceError>>()?;
-    let availability_entries = round
+    Ok((
+        build_attestation_commitment(AGENT_REVIEW_COMMITMENT_DOMAIN, &agent_entries)?,
+        build_attestation_commitment(BUILD_ATTESTATION_COMMITMENT_DOMAIN, &build_entries)?,
+    ))
+}
+
+fn review_availability_commitment(
+    round: &ReviewRoundRecord,
+) -> Result<BuiltCidCommitment, GovernanceError> {
+    if round.availability.len() > MAX_REVIEW_ATTESTATIONS_PER_CLASS {
+        return Err(GovernanceError::ReviewRoundFull);
+    }
+    let entries = round
         .availability
         .values()
         .map(|item| {
@@ -3183,11 +3638,24 @@ fn review_round_commitments(
             })
         })
         .collect::<Result<Vec<_>, GovernanceError>>()?;
-    Ok((
-        build_attestation_commitment(AGENT_REVIEW_COMMITMENT_DOMAIN, &agent_entries)?,
-        build_attestation_commitment(BUILD_ATTESTATION_COMMITMENT_DOMAIN, &build_entries)?,
-        build_attestation_commitment(DATA_AVAILABILITY_COMMITMENT_DOMAIN, &availability_entries)?,
-    ))
+    build_attestation_commitment(DATA_AVAILABILITY_COMMITMENT_DOMAIN, &entries)
+}
+
+fn complete_review_availability_provider_count(round: &ReviewRoundRecord) -> u32 {
+    round
+        .availability
+        .values()
+        .filter(|item| {
+            !item.invalid
+                && item.input.available_claim
+                && round
+                    .required_availability_cids
+                    .iter()
+                    .all(|cid| item.input.verified_cids.contains(cid))
+        })
+        .map(|item| item.input.operator_address.clone())
+        .collect::<BTreeSet<_>>()
+        .len() as u32
 }
 
 fn identity_metrics_certification_descriptor_hash(
@@ -3213,9 +3681,6 @@ fn identity_metrics_certification_passes(
     record: &IdentityMetricsCertificationRecord,
     minimum: u32,
 ) -> bool {
-    if record.conflict {
-        return false;
-    }
     record
         .finalized_descriptor
         .as_ref()
@@ -3233,22 +3698,18 @@ fn identity_metrics_certification_view(
     record: &IdentityMetricsCertificationRecord,
     minimum: u32,
 ) -> IdentityMetricsCertificationView {
-    let attestation_count = if record.conflict {
-        0
-    } else {
-        record
-            .finalized_descriptor
-            .as_ref()
-            .and_then(|descriptor| record.descriptor_operators.get(descriptor))
-            .map_or(0, BTreeSet::len)
-    };
+    let attestation_count = record
+        .finalized_descriptor
+        .as_ref()
+        .and_then(|descriptor| record.descriptor_operators.get(descriptor))
+        .map_or(0, BTreeSet::len);
     IdentityMetricsCertificationView {
         metrics_root: metrics_root.to_string(),
         source_epoch,
         attestation_count,
         minimum_required: minimum,
         certified: identity_metrics_certification_passes(record, minimum),
-        conflict: record.conflict,
+        conflict: false,
         descriptor_hash: record.finalized_descriptor.clone(),
     }
 }
@@ -3260,6 +3721,7 @@ fn review_round_view(round: &ReviewRoundRecord) -> ReviewRoundView {
         parent_cid: round.parent_cid.clone(),
         candidate_cid: round.candidate_cid.clone(),
         patch_cid: round.patch_cid.clone(),
+        scope_evidence_cid: round.scope_evidence_cid.clone(),
         opener_address: round.opener_address.clone(),
         opened_block: round.opened_block,
         end_block: round.end_block,
@@ -3670,11 +4132,15 @@ mod tests {
         package_build_attestation, package_data_availability_attestation,
         package_ecosystem_manifest, package_ecosystem_patch_manifest,
         package_identity_metrics_attestation,
-        package_pinset_manifest_for_transition_with_additional, AgentReviewAttestationV1,
-        BuildArtifactV1, BuildAttestationV1, BuiltIdentityMetricsSnapshot, CommandExecutionV1,
-        DataAvailabilityAttestationV1, EcosystemManifestPackage, EcosystemManifestV1,
-        EcosystemPatchManifestPackage, EcosystemPatchManifestV1, IdentityMetricsAttestationV1,
-        RepositoryManifestV1, RepositoryPatchManifestV1, ReviewVerdictV1,
+        package_pinset_manifest_for_transition_with_additional, package_proposal_scope_evidence,
+        sha256_hex,
+        source::{encode_source_manifest, encode_source_patch},
+        AgentReviewAttestationV1, BuildArtifactV1, BuildAttestationV1,
+        BuiltIdentityMetricsSnapshot, CommandExecutionV1, DataAvailabilityAttestationV1,
+        EcosystemManifestPackage, EcosystemManifestV1, EcosystemPatchManifestPackage,
+        EcosystemPatchManifestV1, IdentityMetricsAttestationV1, ProposalScopeEvidenceV1,
+        RepositoryManifestV1, RepositoryPatchManifestV1, RepositoryScopeEvidenceV1,
+        ReviewVerdictV1, ScopeChangeV1, SourceFileEntryV1, SourcePatchV1, SourceTreeManifestV1,
     };
 
     fn cid(label: &str) -> String {
@@ -3689,6 +4155,7 @@ mod tests {
         parent: EcosystemManifestPackage,
         candidate: EcosystemManifestPackage,
         patch: EcosystemPatchManifestPackage,
+        scope: crate::ProposalScopePackage,
         toolchain_cid: String,
         pinset_cid: String,
         pinset_cids: Vec<String>,
@@ -3696,7 +4163,35 @@ mod tests {
     }
 
     fn review_fixture(prefix: &str) -> ReviewFixture {
-        let base_source = cid("p2pool-base");
+        let governance_parameter_set_cid =
+            package_dag_cbor(GovernanceParameterSetV1::experimental_defaults())
+                .unwrap()
+                .root_cid
+                .to_string();
+        let base_bytes = b"shared base implementation".to_vec();
+        let candidate_bytes = format!("{prefix} candidate documentation").into_bytes();
+        let source_entry = |bytes: &[u8]| SourceFileEntryV1 {
+            path: "src/guide.rs".to_string(),
+            mode: 0o644,
+            size: bytes.len() as u64,
+            cid: cid_for(RAW_CODEC, bytes).to_string(),
+            sha256: sha256_hex(bytes),
+        };
+        let base_manifest = SourceTreeManifestV1 {
+            schema_version: 1,
+            kind: "pohw-source-tree-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            files: vec![source_entry(&base_bytes)],
+        };
+        let candidate_source_manifest = SourceTreeManifestV1 {
+            schema_version: 1,
+            kind: "pohw-source-tree-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            files: vec![source_entry(&candidate_bytes)],
+        };
+        let base_manifest_bytes = encode_source_manifest(&base_manifest).unwrap();
+        let candidate_manifest_bytes = encode_source_manifest(&candidate_source_manifest).unwrap();
+        let base_source = cid_for(DAG_CBOR_CODEC, &base_manifest_bytes).to_string();
         let base_source_sha = hex::encode(base_source.parse::<Cid>().unwrap().hash().digest());
         let artifact_cid = raw_cid("deterministic-artifact");
         let artifact_sha = hex::encode(artifact_cid.parse::<Cid>().unwrap().hash().digest());
@@ -3728,18 +4223,28 @@ mod tests {
                 ("rust".to_string(), "1.97.0".to_string()),
             ]),
             governance_contract_version: "0.1.0".to_string(),
-            governance_parameter_set_cid: cid("parameters"),
+            governance_parameter_set_cid,
         })
         .unwrap();
         let mut candidate_manifest = parent.manifest.clone();
         candidate_manifest.ecosystem_id = format!("pohw-{prefix}");
         candidate_manifest.parent_ecosystem_cid = Some(parent.root_cid.to_string());
-        let candidate_source = cid(&format!("{prefix}-candidate-source"));
+        let candidate_source = cid_for(DAG_CBOR_CODEC, &candidate_manifest_bytes).to_string();
         candidate_manifest.repositories[0].source_tree_sha256 =
             hex::encode(candidate_source.parse::<Cid>().unwrap().hash().digest());
         candidate_manifest.repositories[0].source_tree_cid = candidate_source.clone();
         let candidate = package_ecosystem_manifest(candidate_manifest).unwrap();
-        let repository_patch_cid = cid(&format!("{prefix}-repository-patch"));
+        let source_patch = SourcePatchV1 {
+            schema_version: 1,
+            kind: "pohw-source-patch-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            base_source_cid: base_source.clone(),
+            candidate_source_cid: candidate_source.clone(),
+            removed_paths: vec![],
+            upserted_files: candidate_source_manifest.files.clone(),
+        };
+        let source_patch_bytes = encode_source_patch(&source_patch).unwrap();
+        let repository_patch_cid = cid_for(DAG_CBOR_CODEC, &source_patch_bytes).to_string();
         let repository_patch_sha =
             hex::encode(repository_patch_cid.parse::<Cid>().unwrap().hash().digest());
         let patch = package_ecosystem_patch_manifest(EcosystemPatchManifestV1 {
@@ -3749,11 +4254,45 @@ mod tests {
             candidate_ecosystem_cid: candidate.root_cid.to_string(),
             repository_patches: vec![RepositoryPatchManifestV1 {
                 repository: "P2poolBTC".to_string(),
+                base_source_cid: base_source.clone(),
+                candidate_source_cid: candidate_source.clone(),
+                patch_cid: repository_patch_cid.clone(),
+                patch_sha256: repository_patch_sha.clone(),
+            }],
+        })
+        .unwrap();
+        let scope = package_proposal_scope_evidence(ProposalScopeEvidenceV1 {
+            schema_version: 1,
+            classifier_version: crate::OBJECTIVE_RISK_CLASSIFIER_V2.to_string(),
+            parent_ecosystem_cid: parent.root_cid.to_string(),
+            candidate_ecosystem_cid: candidate.root_cid.to_string(),
+            patch_cid: patch.root_cid.to_string(),
+            repositories: vec![RepositoryScopeEvidenceV1 {
+                repository: "P2poolBTC".to_string(),
                 base_source_cid: base_source,
                 candidate_source_cid: candidate_source,
                 patch_cid: repository_patch_cid,
                 patch_sha256: repository_patch_sha,
+                base_manifest_dag_cbor_hex: hex::encode(base_manifest_bytes),
+                candidate_manifest_dag_cbor_hex: hex::encode(candidate_manifest_bytes),
+                patch_dag_cbor_hex: hex::encode(source_patch_bytes),
+                patch_content_bytes: candidate_bytes.len() as u64,
+                candidate_content_bytes: candidate_bytes.len() as u64,
+                changes: vec![ScopeChangeV1 {
+                    path: "src/guide.rs".to_string(),
+                    change_kind: "upsert".to_string(),
+                    size: candidate_bytes.len() as u64,
+                }],
             }],
+            rationale_bytes: 40,
+            migration_notes_bytes: 20,
+            test_plan_bytes: 40,
+            changed_file_count: 1,
+            patch_bytes: candidate_bytes.len() as u64,
+            source_package_bytes: candidate_bytes.len() as u64,
+            description_bytes: 100,
+            migration_operation_count: 0,
+            derived_risk_class: RiskClass::Critical,
         })
         .unwrap();
         let toolchain_cid = package_toolchain_manifest_for_ecosystem(&candidate.manifest)
@@ -3763,13 +4302,19 @@ mod tests {
         let pinset = package_pinset_manifest_for_transition_with_additional(
             &candidate,
             &patch,
-            &[cid("rationale"), cid("migration"), cid("test-plan")],
+            &[
+                cid("rationale"),
+                cid("migration"),
+                cid("test-plan"),
+                scope.root_cid.to_string(),
+            ],
         )
         .unwrap();
         ReviewFixture {
             parent,
             candidate,
             patch,
+            scope,
             toolchain_cid,
             pinset_cid: pinset.root_cid.to_string(),
             pinset_cids: pinset.manifest.cids,
@@ -3820,15 +4365,51 @@ mod tests {
                 .collect(),
         )
         .unwrap();
+        let parameters = GovernanceParameterSetV1::experimental_defaults();
+        let parameter_cid = package_dag_cbor(parameters.clone())
+            .unwrap()
+            .root_cid
+            .to_string();
         let engine = GovernanceEngine::initialize(
             &fixture.parent.root_cid.to_string(),
-            &cid("parameters"),
-            GovernanceParameterSetV1::experimental_defaults(),
+            &parameter_cid,
+            parameters,
             &snapshot.root,
             2,
         )
         .unwrap();
         (engine, snapshot)
+    }
+
+    #[test]
+    fn parameter_cid_is_bound_to_the_exact_canonical_parameter_object() {
+        let fixture = review_fixture("parameter-binding");
+        let parameters = GovernanceParameterSetV1::experimental_defaults();
+        let parameter_package = package_dag_cbor(parameters.clone()).unwrap();
+        assert!(GovernanceEngine::initialize(
+            &fixture.parent.root_cid.to_string(),
+            &parameter_package.root_cid.to_string(),
+            parameters.clone(),
+            &"11".repeat(32),
+            2,
+        )
+        .is_ok());
+
+        for delta in [1, 2, 10, 1_000] {
+            let mut substituted = parameters.clone();
+            substituted.review_period_blocks += delta;
+            assert!(matches!(
+                GovernanceEngine::initialize(
+                    &fixture.parent.root_cid.to_string(),
+                    &parameter_package.root_cid.to_string(),
+                    substituted,
+                    &"11".repeat(32),
+                    2,
+                ),
+                Err(GovernanceError::InvalidContentAddress(ref value))
+                    if value == &parameter_package.root_cid.to_string()
+            ));
+        }
     }
 
     fn certify_current_metrics(
@@ -3887,15 +4468,20 @@ mod tests {
             .source_tree_cid
             .clone();
         ChangeProposalContentV1 {
-            schema_version: 1,
-            governance_parameter_set_cid: cid("parameters"),
+            schema_version: 2,
+            scope_evidence_cid: fixture.scope.root_cid.to_string(),
+            governance_parameter_set_cid: fixture
+                .parent
+                .manifest
+                .governance_parameter_set_cid
+                .clone(),
             parent_canonical_ecosystem_cid: fixture.parent.root_cid.to_string(),
             candidate_ecosystem_cid: fixture.candidate.root_cid.to_string(),
             affected_repositories: vec!["P2poolBTC".to_string()],
             changed_file_count: 1,
-            patch_bytes: 100,
-            source_package_bytes: 1_000,
-            description_bytes: 100,
+            patch_bytes: fixture.scope.value.patch_bytes,
+            source_package_bytes: fixture.scope.value.source_package_bytes,
+            description_bytes: fixture.scope.value.description_bytes,
             migration_operation_count: 0,
             base_source_cids: BTreeMap::from([("P2poolBTC".to_string(), base_source)]),
             candidate_source_cids: BTreeMap::from([("P2poolBTC".to_string(), candidate_source)]),
@@ -3935,6 +4521,36 @@ mod tests {
         let challenge_end = content.challenge_end;
         let execution_not_before = content.challenge_end + engine.parameters.timelock_blocks;
         let execution_expires = execution_not_before + engine.parameters.execution_window_blocks;
+        let availability = (0..3u8)
+            .map(|index| {
+                let attestation_cid = cid(&format!("execution-availability-{index}"));
+                (
+                    attestation_cid.clone(),
+                    BondedDataAvailabilityAttestation {
+                        input: DataAvailabilityAttestationInputV1 {
+                            attestation_cid,
+                            attestation_car: Vec::new(),
+                            candidate_ecosystem_cid: content.candidate_ecosystem_cid.clone(),
+                            provider_id: format!("execution-provider-{index}"),
+                            operator_address: address(20 + index),
+                            pinset_cid: cid("execution-pinset"),
+                            verified_cids: Vec::new(),
+                            probe_result_cid: raw_cid(&format!("execution-probe-{index}")),
+                            available_claim: true,
+                            expires_at_block: execution_expires,
+                            bond_atoms: 0,
+                            commitment_proof: CidCommitmentProofV1 {
+                                index: 0,
+                                leaf_count: 1,
+                                siblings: Vec::new(),
+                            },
+                        },
+                        settled: false,
+                        invalid: false,
+                    },
+                )
+            })
+            .collect();
         engine.proposals.insert(
             id.clone(),
             ProposalRecord {
@@ -3944,7 +4560,7 @@ mod tests {
                 proposal_bond_settled: false,
                 agents: BTreeMap::new(),
                 builders: BTreeMap::new(),
-                availability: BTreeMap::new(),
+                availability,
                 required_availability_cids: BTreeSet::new(),
                 voter_snapshot: BTreeMap::new(),
                 votes: BTreeMap::new(),
@@ -4032,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_certification_resists_first_writer_poisoning_and_fails_on_quorum_conflict() {
+    fn metrics_certification_resists_first_writer_and_post_quorum_poisoning() {
         let (mut engine, snapshot) = setup_engine();
         for index in 1..=6 {
             engine
@@ -4045,8 +4661,44 @@ mod tests {
         let snapshot_cid = cid("identity-metrics-snapshot");
         let parsed_snapshot_cid: Cid = snapshot_cid.parse().unwrap();
         let snapshot_sha256 = hex::encode(parsed_snapshot_cid.hash().digest());
-        let mut submit = |operator: u8, replay_byte: &str| {
-            let package = package_identity_metrics_attestation(IdentityMetricsAttestationV1 {
+        let certified = {
+            let mut submit = |operator: u8, replay_byte: &str| {
+                let package = package_identity_metrics_attestation(IdentityMetricsAttestationV1 {
+                    schema_version: 1,
+                    metrics_root: snapshot.root.clone(),
+                    snapshot_cid: snapshot_cid.clone(),
+                    snapshot_sha256: snapshot_sha256.clone(),
+                    source_epoch: 2,
+                    source_block_height: 100,
+                    source_block_hash: "11".repeat(32),
+                    replay_start_height: 1,
+                    replay_commitment: replay_byte.repeat(32),
+                    indexer_implementation_cid: cid("metrics-indexer-implementation"),
+                    operator_idena_address: address(operator),
+                    observed_at_block_or_timestamp: 9,
+                    authentication: "on-chain-submitter".to_string(),
+                })
+                .unwrap();
+                engine
+                    .submit_identity_metrics_attestation(
+                        &address(operator),
+                        &package.root_cid.to_string(),
+                        &package.car_bytes,
+                        GovernanceClock { block: 9, epoch: 2 },
+                    )
+                    .unwrap()
+            };
+
+            submit(1, "44");
+            submit(2, "33");
+            submit(3, "33");
+            submit(4, "33")
+        };
+        assert!(certified.certified);
+        assert!(!certified.conflict);
+
+        let conflicting_package =
+            package_identity_metrics_attestation(IdentityMetricsAttestationV1 {
                 schema_version: 1,
                 metrics_root: snapshot.root.clone(),
                 snapshot_cid: snapshot_cid.clone(),
@@ -4055,35 +4707,28 @@ mod tests {
                 source_block_height: 100,
                 source_block_hash: "11".repeat(32),
                 replay_start_height: 1,
-                replay_commitment: replay_byte.repeat(32),
+                replay_commitment: "44".repeat(32),
                 indexer_implementation_cid: cid("metrics-indexer-implementation"),
-                operator_idena_address: address(operator),
+                operator_idena_address: address(5),
                 observed_at_block_or_timestamp: 9,
                 authentication: "on-chain-submitter".to_string(),
             })
             .unwrap();
-            engine
-                .submit_identity_metrics_attestation(
-                    &address(operator),
-                    &package.root_cid.to_string(),
-                    &package.car_bytes,
-                    GovernanceClock { block: 9, epoch: 2 },
-                )
-                .unwrap()
-        };
-
-        submit(1, "44");
-        submit(2, "33");
-        submit(3, "33");
-        let certified = submit(4, "33");
-        assert!(certified.certified);
-        assert!(!certified.conflict);
-
-        submit(5, "44");
-        let conflicted = submit(6, "44");
-        assert!(conflicted.conflict);
-        assert!(!conflicted.certified);
-        assert_eq!(conflicted.attestation_count, 0);
+        assert_eq!(
+            engine.submit_identity_metrics_attestation(
+                &address(5),
+                &conflicting_package.root_cid.to_string(),
+                &conflicting_package.car_bytes,
+                GovernanceClock { block: 9, epoch: 2 },
+            ),
+            Err(GovernanceError::InvalidAttestation)
+        );
+        let still_certified = engine
+            .identity_metrics_certification(&snapshot.root, 2)
+            .unwrap();
+        assert!(still_certified.certified);
+        assert!(!still_certified.conflict);
+        assert_eq!(still_certified.attestation_count, 3);
     }
 
     #[test]
@@ -4096,9 +4741,38 @@ mod tests {
                     snapshot.proofs[&address(index)].clone(),
                 )
                 .unwrap();
+            engine
+                .register_stake(
+                    &address(index),
+                    1_000_000_000_000_000_000,
+                    GovernanceClock { block: 1, epoch: 1 },
+                )
+                .unwrap();
         }
         certify_current_metrics(&mut engine, &snapshot, &[1, 2, 3]);
         let fixture = review_fixture("main");
+        let mut substituted_scope = fixture.scope.value.clone();
+        substituted_scope.test_plan_bytes += 1;
+        substituted_scope.description_bytes += 1;
+        let substituted_scope = package_proposal_scope_evidence(substituted_scope).unwrap();
+        assert_eq!(
+            engine.open_review_round(
+                OpenReviewRoundInputV1 {
+                    parent_car: &fixture.parent.car_bytes,
+                    candidate_car: &fixture.candidate.car_bytes,
+                    patch_car: &fixture.patch.car_bytes,
+                    pinset_car: &fixture.pinset_car,
+                    scope_car: &substituted_scope.car_bytes,
+                    opener_address: &address(1),
+                    attached_bond_atoms: 10_000_000_000_000_000_000,
+                },
+                GovernanceClock {
+                    block: 10,
+                    epoch: 2,
+                },
+            ),
+            Err(GovernanceError::InvalidProposal)
+        );
         let round_id = engine
             .open_review_round(
                 OpenReviewRoundInputV1 {
@@ -4106,6 +4780,7 @@ mod tests {
                     candidate_car: &fixture.candidate.car_bytes,
                     patch_car: &fixture.patch.car_bytes,
                     pinset_car: &fixture.pinset_car,
+                    scope_car: &fixture.scope.car_bytes,
                     opener_address: &address(1),
                     attached_bond_atoms: 10_000_000_000_000_000_000,
                 },
@@ -4125,7 +4800,6 @@ mod tests {
         let clean_digest = "11".repeat(32);
         let adverse_digest = "22".repeat(32);
         let agent_cid = cid("agent");
-        let availability_cid = cid("availability");
         {
             let round = engine.review_rounds.get_mut(&round_id).unwrap();
             round.agents.insert(
@@ -4150,6 +4824,7 @@ mod tests {
                         commitment_proof: proof.clone(),
                     },
                     settled: false,
+                    invalid: false,
                 },
             );
             for (attestation_cid, digest, owner) in [
@@ -4173,30 +4848,49 @@ mod tests {
                             commitment_proof: proof.clone(),
                         },
                         settled: false,
+                        invalid: false,
                     },
                 );
             }
-            round.availability.insert(
-                availability_cid.clone(),
-                BondedDataAvailabilityAttestation {
-                    input: DataAvailabilityAttestationInputV1 {
-                        attestation_cid: availability_cid,
-                        attestation_car: vec![],
-                        candidate_ecosystem_cid: cid("candidate-ecosystem"),
-                        provider_id: "provider-a".to_string(),
-                        operator_address: address(1),
-                        pinset_cid: cid("pinset"),
-                        verified_cids: vec![cid("candidate-ecosystem")],
-                        probe_result_cid: raw_cid("probe-result"),
-                        available_claim: true,
-                        expires_at_block: 400,
-                        bond_atoms: 1_000_000_000_000_000_000,
-                        commitment_proof: proof,
+            let verified_cids = round
+                .required_availability_cids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            for index in 0..3 {
+                let availability_cid = cid(&format!("availability-{index}"));
+                round.availability.insert(
+                    availability_cid.clone(),
+                    BondedDataAvailabilityAttestation {
+                        input: DataAvailabilityAttestationInputV1 {
+                            attestation_cid: availability_cid,
+                            attestation_car: vec![],
+                            candidate_ecosystem_cid: cid("candidate-ecosystem"),
+                            provider_id: format!("provider-{index}"),
+                            operator_address: address((index + 1) as u8),
+                            pinset_cid: cid("pinset"),
+                            verified_cids: verified_cids.clone(),
+                            probe_result_cid: raw_cid(&format!("probe-result-{index}")),
+                            available_claim: true,
+                            expires_at_block: 2_000,
+                            bond_atoms: 1_000_000_000_000_000_000,
+                            commitment_proof: proof.clone(),
+                        },
+                        settled: false,
+                        invalid: false,
                     },
-                    settled: false,
-                },
-            );
+                );
+            }
         }
+        engine
+            .freeze_review_round(
+                &round_id,
+                GovernanceClock {
+                    block: 50,
+                    epoch: 2,
+                },
+            )
+            .unwrap();
         let frozen = engine
             .freeze_review_round(
                 &round_id,
@@ -4257,6 +4951,7 @@ mod tests {
                     candidate_car: &fixture.candidate.car_bytes,
                     patch_car: &fixture.patch.car_bytes,
                     pinset_car: &fixture.pinset_car,
+                    scope_car: &fixture.scope.car_bytes,
                     opener_address: &address(1),
                     attached_bond_atoms: 10_000_000_000_000_000_000,
                 },
@@ -4296,6 +4991,7 @@ mod tests {
                         commitment_proof: proof.clone(),
                     },
                     settled: false,
+                    invalid: false,
                 },
             );
         }
@@ -4331,6 +5027,7 @@ mod tests {
                     candidate_car: &fixture.candidate.car_bytes,
                     patch_car: &fixture.patch.car_bytes,
                     pinset_car: &fixture.pinset_car,
+                    scope_car: &fixture.scope.car_bytes,
                     opener_address: &address(1),
                     attached_bond_atoms: 10_000_000_000_000_000_000,
                 },
@@ -4406,12 +5103,13 @@ mod tests {
             Err(GovernanceError::InvalidAttestation)
         );
 
-        for (label, source_cid, toolchain_cid, artifact_cid) in [
+        for (label, source_cid, toolchain_cid, artifact_cid, scope_evidence_cid) in [
             (
                 "source",
                 cid("substituted-source"),
                 fixture.toolchain_cid.clone(),
                 raw_cid("deterministic-artifact"),
+                fixture.scope.root_cid.to_string(),
             ),
             (
                 "toolchain",
@@ -4420,6 +5118,7 @@ mod tests {
                     .clone(),
                 cid("substituted-toolchain"),
                 raw_cid("deterministic-artifact"),
+                fixture.scope.root_cid.to_string(),
             ),
             (
                 "artifact",
@@ -4428,6 +5127,16 @@ mod tests {
                     .clone(),
                 fixture.toolchain_cid.clone(),
                 raw_cid("substituted-artifact"),
+                fixture.scope.root_cid.to_string(),
+            ),
+            (
+                "scope",
+                fixture.candidate.manifest.repositories[0]
+                    .source_tree_cid
+                    .clone(),
+                fixture.toolchain_cid.clone(),
+                raw_cid("deterministic-artifact"),
+                cid("substituted-scope"),
             ),
         ] {
             let artifact_sha = hex::encode(artifact_cid.parse::<Cid>().unwrap().hash().digest());
@@ -4446,6 +5155,7 @@ mod tests {
                     cid: source_cid,
                 }],
                 toolchain_cid,
+                scope_evidence_cid,
                 builder_identity: address(2),
                 runtime_family: "linux".to_string(),
                 architecture: "x86_64".to_string(),
@@ -4483,14 +5193,101 @@ mod tests {
             );
         }
 
+        let secondary_bytes = b"secondary-artifact";
+        let secondary_cid = cid_for(RAW_CODEC, secondary_bytes).to_string();
+        let secondary_manifest = ArtifactManifestV1 {
+            name: "secondary".to_string(),
+            cid: secondary_cid.clone(),
+            sha256: hex::encode(secondary_cid.parse::<Cid>().unwrap().hash().digest()),
+            size: secondary_bytes.len() as u64,
+        };
+        engine
+            .review_rounds
+            .get_mut(&round_id)
+            .unwrap()
+            .candidate_artifact_keys
+            .insert(candidate_artifact_key(&secondary_manifest));
+        let artifact_bytes = b"deterministic-artifact";
+        let artifact_cid = cid_for(RAW_CODEC, artifact_bytes).to_string();
+        let artifacts = vec![BuildArtifactV1 {
+            name: "core".to_string(),
+            cid: artifact_cid.clone(),
+            sha256: hex::encode(artifact_cid.parse::<Cid>().unwrap().hash().digest()),
+            size: artifact_bytes.len() as u64,
+            core: true,
+        }];
+        let omitted_artifact_build = package_build_attestation(BuildAttestationV1 {
+            schema_version: 1,
+            candidate_ecosystem_cid: fixture.candidate.root_cid.to_string(),
+            source_cids: vec![RepositoryCidV1 {
+                repository: "P2poolBTC".to_string(),
+                cid: fixture.candidate.manifest.repositories[0]
+                    .source_tree_cid
+                    .clone(),
+            }],
+            toolchain_cid: fixture.toolchain_cid.clone(),
+            scope_evidence_cid: fixture.scope.root_cid.to_string(),
+            builder_identity: address(2),
+            runtime_family: "linux".to_string(),
+            architecture: "x86_64".to_string(),
+            commands: vec![command("cargo build --workspace --locked")],
+            test_results_cid: raw_cid("omitted-artifact-result"),
+            tests_passed: true,
+            sbom_cid: raw_cid("omitted-artifact-sbom"),
+            core_artifact_digest: crate::core_artifact_set_digest(&artifacts).unwrap(),
+            artifacts,
+            builder_bond_atoms: "1000000000000000000".to_string(),
+            creation_block_or_timestamp: 20,
+            authentication: "on-chain-submitter".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            engine.submit_build_attestation(
+                &round_id,
+                BuildAttestationInputV1 {
+                    attestation_cid: omitted_artifact_build.root_cid.to_string(),
+                    attestation_car: omitted_artifact_build.car_bytes,
+                    candidate_ecosystem_cid: omitted_artifact_build.value.candidate_ecosystem_cid,
+                    builder_address: omitted_artifact_build.value.builder_identity,
+                    runtime_family: omitted_artifact_build.value.runtime_family,
+                    architecture: omitted_artifact_build.value.architecture,
+                    core_artifact_digest: omitted_artifact_build.value.core_artifact_digest,
+                    test_result_cid: omitted_artifact_build.value.test_results_cid,
+                    tests_passed_claim: true,
+                    bond_atoms: 1_000_000_000_000_000_000,
+                    commitment_proof: proof.clone(),
+                },
+                clock,
+            ),
+            Err(GovernanceError::InvalidAttestation),
+            "build attestation omitted an artifact authorized by the candidate manifest"
+        );
+        engine
+            .review_rounds
+            .get_mut(&round_id)
+            .unwrap()
+            .candidate_artifact_keys
+            .remove(&candidate_artifact_key(&secondary_manifest));
+
+        // This test deliberately submits no valid evidence attestations. Move the
+        // isolated round to its availability phase so the final substitution is
+        // rejected by content binding rather than by phase ordering.
+        engine.review_rounds.get_mut(&round_id).unwrap().state = ReviewRoundState::AvailabilityOpen;
+
+        let probe_result_cid = raw_cid("availability-substitution-result");
+        let mut verified_cids = vec![
+            fixture.candidate.root_cid.to_string(),
+            probe_result_cid.clone(),
+        ];
+        verified_cids.sort();
         let availability = package_data_availability_attestation(DataAvailabilityAttestationV1 {
             schema_version: 1,
             candidate_ecosystem_cid: fixture.candidate.root_cid.to_string(),
             pinset_cid: cid("substituted-pinset"),
             provider_id: "provider-a".to_string(),
             operator_identity: address(3),
-            verified_cids: vec![fixture.candidate.root_cid.to_string()],
-            probe_result_cid: raw_cid("availability-substitution-result"),
+            verified_cids,
+            probe_result_cid,
             available: true,
             observed_at_block_or_timestamp: 20,
             expires_at_block: 400,
@@ -4564,6 +5361,137 @@ mod tests {
                 .unwrap(),
             5_000_000_000_000_000_000
         );
+    }
+
+    #[test]
+    fn corrupted_unbonding_sum_fails_closed_without_partial_release() {
+        let (mut engine, _) = setup_engine();
+        engine.stakes.insert(
+            address(1),
+            StakePosition {
+                unbonding: vec![
+                    ScheduledWithdrawal {
+                        atoms: u128::MAX,
+                        start_epoch: 2,
+                        release_epoch: 3,
+                    },
+                    ScheduledWithdrawal {
+                        atoms: 1,
+                        start_epoch: 2,
+                        release_epoch: 3,
+                    },
+                ],
+                ..StakePosition::default()
+            },
+        );
+
+        assert_eq!(
+            engine.finalize_unbonding(
+                &address(1),
+                GovernanceClock {
+                    block: 10,
+                    epoch: 7
+                }
+            ),
+            Err(GovernanceError::Overflow)
+        );
+        let position = &engine.stakes[&address(1)];
+        assert_eq!(position.unbonding.len(), 2);
+        assert_eq!(position.unbonding[0].atoms, u128::MAX);
+        assert_eq!(position.unbonding[1].atoms, 1);
+        assert!(!engine.refunds.contains_key(&address(1)));
+    }
+
+    #[test]
+    fn matured_unbonding_remains_locked_while_governance_slashing_is_unsettled() {
+        let (mut engine, _) = setup_engine();
+        let commitment = build_attestation_commitment(
+            AGENT_REVIEW_COMMITMENT_DOMAIN,
+            &[AttestationCommitmentEntryV1 {
+                attestation_cid: cid("slash-reservation-attestation"),
+                canonical_fields: "slash-reservation".to_string(),
+            }],
+        )
+        .unwrap();
+        let proposal_id = insert_test_proposal(
+            &mut engine,
+            proposal_content(&address(1), &commitment, &commitment, &commitment),
+            ProposalState::AcceptedPendingChallenge,
+        );
+        for owner in [address(1), address(2)] {
+            engine.stakes.insert(
+                owner,
+                StakePosition {
+                    unbonding: vec![ScheduledWithdrawal {
+                        atoms: 1_000_000_000_000_000_000,
+                        start_epoch: 2,
+                        release_epoch: 3,
+                    }],
+                    ..StakePosition::default()
+                },
+            );
+        }
+        engine
+            .proposals
+            .get_mut(&proposal_id)
+            .unwrap()
+            .agents
+            .insert(
+                cid("slash-reservation-attestation"),
+                BondedAgentAttestation {
+                    input: AgentAttestationInputV1 {
+                        attestation_cid: cid("slash-reservation-attestation"),
+                        attestation_car: Vec::new(),
+                        parent_ecosystem_cid: cid("initial-ecosystem"),
+                        candidate_ecosystem_cid: cid("candidate-ecosystem"),
+                        patch_cid: cid("patch"),
+                        owner_address: address(2),
+                        model_identifier: "model-a".to_string(),
+                        model_revision: None,
+                        runtime_identifier: "runtime-a".to_string(),
+                        independence_group: "family-a".to_string(),
+                        verdict: AttestationVerdict::Approve,
+                        unresolved_critical_findings: 0,
+                        test_result_cid: raw_cid("slash-reservation-result"),
+                        tests_passed_claim: true,
+                        bond_atoms: 1_000_000_000_000_000_000,
+                        commitment_proof: commitment.proofs[&cid("slash-reservation-attestation")]
+                            .clone(),
+                    },
+                    settled: false,
+                    invalid: false,
+                },
+            );
+
+        for owner in [address(1), address(2)] {
+            assert_eq!(
+                engine.finalize_unbonding(
+                    &owner,
+                    GovernanceClock {
+                        block: 10,
+                        epoch: 7
+                    }
+                ),
+                Err(GovernanceError::StakeSlashReserved)
+            );
+        }
+        let proposal = engine.proposals.get_mut(&proposal_id).unwrap();
+        proposal.proposal_bond_settled = true;
+        proposal.agents.values_mut().next().unwrap().settled = true;
+        for owner in [address(1), address(2)] {
+            assert_eq!(
+                engine
+                    .finalize_unbonding(
+                        &owner,
+                        GovernanceClock {
+                            block: 11,
+                            epoch: 7
+                        }
+                    )
+                    .unwrap(),
+                1_000_000_000_000_000_000
+            );
+        }
     }
 
     #[test]
@@ -4641,6 +5569,7 @@ mod tests {
                     candidate_ecosystem_cid: fixture.candidate.root_cid.to_string(),
                     source_cids: repository_cids.clone(),
                     toolchain_cid: fixture.toolchain_cid.clone(),
+                    scope_evidence_cid: fixture.scope.root_cid.to_string(),
                     builder_identity: address((index + 1) as u8),
                     runtime_family: if index == 1 { "macos" } else { "linux" }.to_string(),
                     architecture: if index == 1 { "arm64" } else { "x86_64" }.to_string(),
@@ -4699,7 +5628,7 @@ mod tests {
                     probe_result_cid,
                     available: true,
                     observed_at_block_or_timestamp: 20,
-                    expires_at_block: 400,
+                    expires_at_block: 2_000,
                     bond_atoms: "1000000000000000000".to_string(),
                     authentication: "on-chain-submitter".to_string(),
                 })
@@ -4764,6 +5693,7 @@ mod tests {
                     candidate_car: &fixture.candidate.car_bytes,
                     patch_car: &fixture.patch.car_bytes,
                     pinset_car: &fixture.pinset_car,
+                    scope_car: &fixture.scope.car_bytes,
                     opener_address: &address(1),
                     attached_bond_atoms: 10_000_000_000_000_000_000,
                 },
@@ -4925,7 +5855,64 @@ mod tests {
                 )
                 .unwrap();
         }
-        for package in &availability_packages {
+        engine
+            .freeze_review_round(
+                &review_round_id,
+                GovernanceClock {
+                    block: 50,
+                    epoch: 2,
+                },
+            )
+            .unwrap();
+        let claim_deadline = engine
+            .review_round(&review_round_id)
+            .unwrap()
+            .claim_deadline;
+        let pre_execution_horizon = claim_deadline
+            + engine.parameters.review_period_blocks
+            + engine.parameters.voting_period_blocks
+            + engine.parameters.challenge_period_blocks * 2;
+        let required_execution_horizon = pre_execution_horizon
+            + engine.parameters.timelock_blocks
+            + engine.parameters.execution_window_blocks;
+        let mut short_lived_value = availability_packages[0].value.clone();
+        short_lived_value.expires_at_block = required_execution_horizon - 1;
+        let short_lived = package_data_availability_attestation(short_lived_value).unwrap();
+        assert_eq!(
+            engine.submit_data_availability_attestation(
+                &review_round_id,
+                DataAvailabilityAttestationInputV1 {
+                    attestation_cid: short_lived.root_cid.to_string(),
+                    attestation_car: short_lived.car_bytes,
+                    candidate_ecosystem_cid: short_lived.value.candidate_ecosystem_cid,
+                    provider_id: short_lived.value.provider_id,
+                    operator_address: short_lived.value.operator_identity,
+                    pinset_cid: short_lived.value.pinset_cid,
+                    verified_cids: short_lived.value.verified_cids,
+                    probe_result_cid: short_lived.value.probe_result_cid,
+                    available_claim: short_lived.value.available,
+                    expires_at_block: short_lived.value.expires_at_block,
+                    bond_atoms: 1_000_000_000_000_000_000,
+                    commitment_proof: availability.proofs
+                        [&availability_packages[0].root_cid.to_string()]
+                        .clone(),
+                },
+                GovernanceClock {
+                    block: 50,
+                    epoch: 2,
+                },
+            ),
+            Err(GovernanceError::InvalidAttestation)
+        );
+        let availability_minimum = if fixture.scope.value.derived_risk_class.is_critical() {
+            engine
+                .parameters
+                .critical
+                .minimum_data_availability_providers
+        } else {
+            engine.parameters.normal.minimum_data_availability_providers
+        };
+        for (package_index, package) in availability_packages.iter().enumerate() {
             let attestation_cid = package.root_cid.to_string();
             if package.root_cid == availability_packages[0].root_cid {
                 let false_claim = DataAvailabilityAttestationInputV1 {
@@ -4977,6 +5964,22 @@ mod tests {
                     },
                 )
                 .unwrap();
+            if package_index + 1 < availability_minimum as usize {
+                assert!(matches!(
+                    engine.freeze_review_round(
+                        &review_round_id,
+                        GovernanceClock {
+                            block: 50,
+                            epoch: 2,
+                        },
+                    ),
+                    Err(GovernanceError::InvalidAttestation)
+                ));
+                assert_eq!(
+                    engine.review_round(&review_round_id).unwrap().state,
+                    ReviewRoundState::AvailabilityOpen
+                );
+            }
         }
         let frozen = engine
             .freeze_review_round(
@@ -5291,6 +6294,7 @@ mod tests {
                 commitment_proof: commitment.proofs[&attestation_cid].clone(),
             },
             settled: false,
+            invalid: false,
         };
         {
             let proposal = engine.proposals.get_mut(&proposal_id).unwrap();
@@ -5347,7 +6351,7 @@ mod tests {
         assert!(engine.resolve_objective_challenge(&proposal_id).unwrap());
         assert_eq!(
             engine.proposal(&proposal_id).unwrap().state,
-            ProposalState::Rejected
+            ProposalState::Expired
         );
         assert_eq!(
             engine.stake_position(&address(1), 2).unwrap().active_atoms,
@@ -5356,7 +6360,7 @@ mod tests {
         assert!(engine.stake_position(&address(2), 2).unwrap().active_atoms < offender_stake);
         assert_eq!(
             engine.withdraw_refund(&address(1)).unwrap(),
-            9_000_000_000_000_000_000
+            10_000_000_000_000_000_000
         );
     }
 
@@ -5414,6 +6418,7 @@ mod tests {
                         commitment_proof: commitment.proofs[&attestation_cid].clone(),
                     },
                     settled: false,
+                    invalid: false,
                 },
             );
         assert_eq!(
@@ -5439,7 +6444,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_risk_is_rejected_until_objective_classification_exists() {
+    fn normal_risk_is_rejected_without_verified_objective_scope_evidence() {
         let commitment = build_attestation_commitment(
             AGENT_REVIEW_COMMITMENT_DOMAIN,
             &[AttestationCommitmentEntryV1 {
@@ -5461,6 +6466,141 @@ mod tests {
             ),
             Err(GovernanceError::InvalidProposal)
         );
+    }
+
+    #[test]
+    fn scoped_normal_proposal_round_trips_only_with_its_exact_scope_evidence() {
+        let base_bytes = b"base documentation";
+        let candidate_bytes = b"candidate documentation";
+        let source_entry = |bytes: &[u8]| SourceFileEntryV1 {
+            path: "docs/guide.md".to_string(),
+            mode: 0o644,
+            size: bytes.len() as u64,
+            cid: cid_for(RAW_CODEC, bytes).to_string(),
+            sha256: sha256_hex(bytes),
+        };
+        let base_manifest = SourceTreeManifestV1 {
+            schema_version: 1,
+            kind: "pohw-source-tree-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            files: vec![source_entry(base_bytes)],
+        };
+        let candidate_manifest = SourceTreeManifestV1 {
+            schema_version: 1,
+            kind: "pohw-source-tree-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            files: vec![source_entry(candidate_bytes)],
+        };
+        let base_dag_cbor = encode_source_manifest(&base_manifest).unwrap();
+        let candidate_dag_cbor = encode_source_manifest(&candidate_manifest).unwrap();
+        let base_source_cid = cid_for(DAG_CBOR_CODEC, &base_dag_cbor).to_string();
+        let candidate_source_cid = cid_for(DAG_CBOR_CODEC, &candidate_dag_cbor).to_string();
+        let patch = SourcePatchV1 {
+            schema_version: 1,
+            kind: "pohw-source-patch-v1".to_string(),
+            repository: "P2poolBTC".to_string(),
+            base_source_cid: base_source_cid.clone(),
+            candidate_source_cid: candidate_source_cid.clone(),
+            removed_paths: vec![],
+            upserted_files: candidate_manifest.files.clone(),
+        };
+        let patch_dag_cbor = encode_source_patch(&patch).unwrap();
+        let repository_patch_cid = cid_for(DAG_CBOR_CODEC, &patch_dag_cbor).to_string();
+        let repository_patch_sha256 =
+            hex::encode(repository_patch_cid.parse::<Cid>().unwrap().hash().digest());
+        let parent_cid = cid("scoped-parent");
+        let candidate_cid = cid("scoped-candidate");
+        let aggregate_patch_cid = cid("scoped-aggregate-patch");
+        let scope = ProposalScopeEvidenceV1 {
+            schema_version: 1,
+            classifier_version: crate::OBJECTIVE_RISK_CLASSIFIER_V2.to_string(),
+            parent_ecosystem_cid: parent_cid.clone(),
+            candidate_ecosystem_cid: candidate_cid.clone(),
+            patch_cid: aggregate_patch_cid.clone(),
+            repositories: vec![RepositoryScopeEvidenceV1 {
+                repository: "P2poolBTC".to_string(),
+                base_source_cid: base_source_cid.clone(),
+                candidate_source_cid: candidate_source_cid.clone(),
+                patch_cid: repository_patch_cid,
+                patch_sha256: repository_patch_sha256,
+                base_manifest_dag_cbor_hex: hex::encode(base_dag_cbor),
+                candidate_manifest_dag_cbor_hex: hex::encode(candidate_dag_cbor),
+                patch_dag_cbor_hex: hex::encode(patch_dag_cbor),
+                patch_content_bytes: candidate_bytes.len() as u64,
+                candidate_content_bytes: candidate_bytes.len() as u64,
+                changes: vec![ScopeChangeV1 {
+                    path: "docs/guide.md".to_string(),
+                    change_kind: "upsert".to_string(),
+                    size: candidate_bytes.len() as u64,
+                }],
+            }],
+            rationale_bytes: 12,
+            migration_notes_bytes: 0,
+            test_plan_bytes: 16,
+            changed_file_count: 1,
+            patch_bytes: candidate_bytes.len() as u64,
+            source_package_bytes: candidate_bytes.len() as u64,
+            description_bytes: 28,
+            migration_operation_count: 0,
+            derived_risk_class: RiskClass::Normal,
+        };
+        let scope_package = package_proposal_scope_evidence(scope).unwrap();
+        let commitment = build_attestation_commitment(
+            AGENT_REVIEW_COMMITMENT_DOMAIN,
+            &[AttestationCommitmentEntryV1 {
+                attestation_cid: cid("scoped-attestation"),
+                canonical_fields: "fields".to_string(),
+            }],
+        )
+        .unwrap();
+        let mut content = proposal_content(&address(1), &commitment, &commitment, &commitment);
+        content.scope_evidence_cid = scope_package.root_cid.to_string();
+        content.parent_canonical_ecosystem_cid = parent_cid;
+        content.candidate_ecosystem_cid = candidate_cid;
+        content.patch_cid = aggregate_patch_cid;
+        content.risk_class = RiskClass::Normal;
+        content.changed_file_count = 1;
+        content.patch_bytes = candidate_bytes.len() as u64;
+        content.source_package_bytes = candidate_bytes.len() as u64;
+        content.description_bytes = 28;
+        content.base_source_cids = BTreeMap::from([("P2poolBTC".to_string(), base_source_cid)]);
+        content.candidate_source_cids =
+            BTreeMap::from([("P2poolBTC".to_string(), candidate_source_cid)]);
+        let parameters = GovernanceParameterSetV1::experimental_defaults();
+        let proposal = package_change_proposal_with_scope(
+            content,
+            &parameters,
+            &scope_package.root_cid.to_string(),
+            &scope_package.value,
+        )
+        .unwrap();
+
+        let verified = verify_change_proposal_car_with_scope(
+            &proposal.car_bytes,
+            &parameters,
+            &scope_package.root_cid.to_string(),
+            &scope_package.value,
+        )
+        .unwrap();
+        assert_eq!(verified.content_cid, proposal.content_cid);
+        assert!(matches!(
+            verify_change_proposal_car(&proposal.car_bytes, &parameters),
+            Err(GovernanceError::InvalidProposal)
+        ));
+
+        let mut substituted_scope = scope_package.value;
+        substituted_scope.test_plan_bytes += 1;
+        substituted_scope.description_bytes += 1;
+        let substituted = package_proposal_scope_evidence(substituted_scope).unwrap();
+        assert!(matches!(
+            verify_change_proposal_car_with_scope(
+                &proposal.car_bytes,
+                &parameters,
+                &substituted.root_cid.to_string(),
+                &substituted.value,
+            ),
+            Err(GovernanceError::InvalidProposal)
+        ));
     }
 
     #[test]
@@ -5562,6 +6702,260 @@ mod tests {
         assert_eq!(proposal.yes_weight, u128::MAX);
         assert_eq!(proposal.no_weight, previous.effective_vote_weight);
         assert_eq!(proposal.votes.get(&voter), Some(&previous));
+    }
+
+    #[test]
+    fn execution_requires_all_independent_availability_providers_to_remain_live() {
+        let (mut engine, _) = setup_engine();
+        let commitment = build_attestation_commitment(
+            AGENT_REVIEW_COMMITMENT_DOMAIN,
+            &[AttestationCommitmentEntryV1 {
+                attestation_cid: cid("execution-availability-attestation"),
+                canonical_fields: "fields".to_string(),
+            }],
+        )
+        .unwrap();
+        let content = proposal_content(&address(1), &commitment, &commitment, &commitment);
+        let proposal_id = insert_test_proposal(
+            &mut engine,
+            content,
+            ProposalState::AcceptedPendingExecution,
+        );
+        let initial_canonical = engine.canonical_ecosystem_cid.clone();
+        engine
+            .proposals
+            .get_mut(&proposal_id)
+            .unwrap()
+            .availability
+            .values_mut()
+            .next()
+            .unwrap()
+            .input
+            .expires_at_block = 329;
+
+        assert_eq!(
+            engine.execute_proposal(
+                &proposal_id,
+                GovernanceClock {
+                    block: 330,
+                    epoch: 2,
+                },
+            ),
+            Err(GovernanceError::InvalidAttestation)
+        );
+        assert_eq!(engine.canonical_ecosystem_cid, initial_canonical);
+        assert_eq!(
+            engine.proposal(&proposal_id).unwrap().state,
+            ProposalState::AcceptedPendingExecution
+        );
+    }
+
+    #[test]
+    fn critical_findings_require_distinct_owner_corroboration() {
+        let (mut engine, _) = setup_engine();
+        let commitment = build_attestation_commitment(
+            AGENT_REVIEW_COMMITMENT_DOMAIN,
+            &[AttestationCommitmentEntryV1 {
+                attestation_cid: cid("critical-finding-attestation"),
+                canonical_fields: "fields".to_string(),
+            }],
+        )
+        .unwrap();
+        let content = proposal_content(&address(1), &commitment, &commitment, &commitment);
+        let proposal_id = insert_test_proposal(&mut engine, content, ProposalState::ReviewOpen);
+        let proof = CidCommitmentProofV1 {
+            index: 0,
+            leaf_count: 1,
+            siblings: Vec::new(),
+        };
+        let proposal = engine.proposals.get_mut(&proposal_id).unwrap();
+        for (index, owner) in [address(2), address(2), address(3), address(4)]
+            .into_iter()
+            .enumerate()
+        {
+            let attestation_cid = cid(&format!("critical-finding-{index}"));
+            proposal.agents.insert(
+                attestation_cid.clone(),
+                BondedAgentAttestation {
+                    input: AgentAttestationInputV1 {
+                        attestation_cid,
+                        attestation_car: Vec::new(),
+                        parent_ecosystem_cid: proposal
+                            .content
+                            .parent_canonical_ecosystem_cid
+                            .clone(),
+                        candidate_ecosystem_cid: proposal.content.candidate_ecosystem_cid.clone(),
+                        patch_cid: proposal.content.patch_cid.clone(),
+                        owner_address: owner,
+                        model_identifier: format!("critical-model-{index}"),
+                        model_revision: None,
+                        runtime_identifier: format!("critical-runtime-{index}"),
+                        independence_group: format!("critical-family-{index}"),
+                        verdict: AttestationVerdict::Reject,
+                        unresolved_critical_findings: 1,
+                        test_result_cid: raw_cid(&format!("critical-result-{index}")),
+                        tests_passed_claim: true,
+                        bond_atoms: 1_000_000_000_000_000_000,
+                        commitment_proof: proof.clone(),
+                    },
+                    settled: false,
+                    invalid: false,
+                },
+            );
+            let unresolved = acceptance_evidence(proposal).unresolved_critical_findings;
+            if index < 3 {
+                assert_eq!(unresolved, 0);
+            } else {
+                assert_eq!(unresolved, 3);
+            }
+        }
+        proposal.content.critical_finding_waiver_cid = Some(cid("critical-waiver"));
+        assert_eq!(
+            acceptance_evidence(proposal).unresolved_critical_findings,
+            0
+        );
+    }
+
+    #[test]
+    fn unrelated_invalid_attestation_preserves_a_proposal_with_remaining_gate_evidence() {
+        let (mut engine, _) = setup_engine();
+        engine.parameters.critical.turnout_quorum_bps = 0;
+        engine.parameters.critical.yes_threshold_bps = 0;
+        engine.parameters.critical.minimum_yes_identities = 0;
+        engine.parameters.critical.minimum_verified_or_human_yes = 0;
+        engine.parameters.critical.minimum_agent_attestations = 1;
+        engine.parameters.critical.minimum_agent_families = 1;
+        engine.parameters.critical.minimum_agent_owners = 1;
+        engine.parameters.critical.minimum_builders = 1;
+        engine.parameters.critical.minimum_builder_platforms = 1;
+
+        let commitment = build_attestation_commitment(
+            AGENT_REVIEW_COMMITMENT_DOMAIN,
+            &[AttestationCommitmentEntryV1 {
+                attestation_cid: cid("continued-proposal-attestation"),
+                canonical_fields: "fields".to_string(),
+            }],
+        )
+        .unwrap();
+        let content = proposal_content(&address(1), &commitment, &commitment, &commitment);
+        let proposal_id = insert_test_proposal(
+            &mut engine,
+            content,
+            ProposalState::AcceptedPendingChallenge,
+        );
+        let evidence_bytes = br#"{"passed":false}"#.to_vec();
+        let evidence_cid = cid_for(RAW_CODEC, &evidence_bytes).to_string();
+        let target_cid = cid("continued-proposal-false-agent");
+        let proof = CidCommitmentProofV1 {
+            index: 0,
+            leaf_count: 1,
+            siblings: Vec::new(),
+        };
+        {
+            let proposal = engine.proposals.get_mut(&proposal_id).unwrap();
+            for (index, attestation_cid, owner, result_cid) in [
+                (0u8, target_cid.clone(), address(2), evidence_cid.clone()),
+                (
+                    1u8,
+                    cid("continued-proposal-good-agent"),
+                    address(3),
+                    raw_cid("continued-proposal-good-result"),
+                ),
+            ] {
+                proposal.agents.insert(
+                    attestation_cid.clone(),
+                    BondedAgentAttestation {
+                        input: AgentAttestationInputV1 {
+                            attestation_cid,
+                            attestation_car: Vec::new(),
+                            parent_ecosystem_cid: proposal
+                                .content
+                                .parent_canonical_ecosystem_cid
+                                .clone(),
+                            candidate_ecosystem_cid: proposal
+                                .content
+                                .candidate_ecosystem_cid
+                                .clone(),
+                            patch_cid: proposal.content.patch_cid.clone(),
+                            owner_address: owner,
+                            model_identifier: format!("continued-model-{index}"),
+                            model_revision: None,
+                            runtime_identifier: format!("continued-runtime-{index}"),
+                            independence_group: format!("continued-family-{index}"),
+                            verdict: AttestationVerdict::Approve,
+                            unresolved_critical_findings: 0,
+                            test_result_cid: result_cid,
+                            tests_passed_claim: true,
+                            bond_atoms: 1_000_000_000_000_000_000,
+                            commitment_proof: proof.clone(),
+                        },
+                        settled: false,
+                        invalid: false,
+                    },
+                );
+            }
+            let build_cid = cid("continued-proposal-builder");
+            proposal.builders.insert(
+                build_cid.clone(),
+                BondedBuildAttestation {
+                    input: BuildAttestationInputV1 {
+                        attestation_cid: build_cid,
+                        attestation_car: Vec::new(),
+                        candidate_ecosystem_cid: proposal.content.candidate_ecosystem_cid.clone(),
+                        builder_address: address(4),
+                        runtime_family: "linux".to_string(),
+                        architecture: "x86_64".to_string(),
+                        core_artifact_digest: "11".repeat(32),
+                        test_result_cid: raw_cid("continued-proposal-build-result"),
+                        tests_passed_claim: true,
+                        bond_atoms: 1_000_000_000_000_000_000,
+                        commitment_proof: proof,
+                    },
+                    settled: false,
+                    invalid: false,
+                },
+            );
+        }
+        engine.stakes.insert(
+            address(2),
+            StakePosition {
+                active_atoms: 10_000_000_000_000_000_000,
+                ..StakePosition::default()
+            },
+        );
+        let initial_gates = {
+            let proposal = engine.proposals.get(&proposal_id).unwrap();
+            evaluate_gates(
+                proposal.content.risk_class,
+                &engine.parameters.normal,
+                &engine.parameters.critical,
+                &acceptance_evidence(proposal),
+            )
+        };
+        assert!(initial_gates.accepted);
+
+        engine
+            .submit_objective_challenge(
+                &proposal_id,
+                ObjectiveChallengeInputV1 {
+                    challenger_address: address(5),
+                    target: ObjectiveChallengeTarget::AgentTestResult,
+                    attestation_cid: target_cid.clone(),
+                    evidence_cid,
+                    evidence_bytes,
+                },
+                GovernanceClock {
+                    block: 269,
+                    epoch: 2,
+                },
+            )
+            .unwrap();
+        assert!(engine.resolve_objective_challenge(&proposal_id).unwrap());
+        let proposal = engine.proposals.get(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::AcceptedPendingChallenge);
+        assert!(proposal.gates.as_ref().is_some_and(|gates| gates.accepted));
+        assert!(proposal.agents[&target_cid].invalid);
+        assert!(!proposal.proposal_bond_settled);
     }
 
     #[test]

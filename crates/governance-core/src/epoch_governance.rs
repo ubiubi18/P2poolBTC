@@ -6,10 +6,11 @@
 //! canonical content-addressed reference; installing software is out of scope.
 
 use crate::{
-    cid_for, effective_vote_weight, flip_trust_bps, normalize_address, IdentityState, RiskClass,
-    VoteChoice,
+    cid_for, effective_vote_weight, flip_trust_bps, normalize_address, verify_dag_cbor_car,
+    IdentityState, RiskClass, VoteChoice,
 };
 use cid::{Cid, Version};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -326,6 +327,17 @@ pub struct DataAvailabilityEvidenceV1 {
     pub valid_until_block: u64,
 }
 
+/// Trust boundary for [`EpochGovernanceEngine`].
+///
+/// The engine is an offline deterministic simulator. Even when every accepted
+/// claim is content-addressed, it does not authenticate Idena consensus state,
+/// contract storage, signatures, or the operators behind aggregate evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EpochGovernanceTrustModelV1 {
+    NonAuthoritativeOfflineSimulation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VotingPowerSnapshotV1 {
@@ -589,6 +601,11 @@ struct EpochRecord {
     finalized: bool,
 }
 
+/// Non-authoritative deterministic model for tests, clients, and simulations.
+///
+/// Public claim-ingestion methods accept canonical DAG-CBOR CARs and verify
+/// their CIDs. That proves immutability and byte-level integrity only. It does
+/// not turn this in-memory model into authenticated on-chain governance.
 #[derive(Debug, Clone)]
 pub struct EpochGovernanceEngine {
     chain_id: String,
@@ -695,7 +712,24 @@ impl EpochGovernanceEngine {
         self.burned_atoms
     }
 
-    pub fn register_voting_power_snapshot(
+    pub fn trust_model(&self) -> EpochGovernanceTrustModelV1 {
+        EpochGovernanceTrustModelV1::NonAuthoritativeOfflineSimulation
+    }
+
+    /// Ingests an immutable voting-power claim for offline simulation.
+    ///
+    /// The CAR and CID are verified, but the claimed stake and identity source
+    /// are not authenticated against chain state by this in-memory engine.
+    pub fn register_content_addressed_voting_power_claim_for_simulation(
+        &mut self,
+        claim_cid: &str,
+        claim_car: &[u8],
+    ) -> Result<(), EpochGovernanceError> {
+        let snapshot = verify_content_addressed_claim(claim_cid, claim_car)?;
+        self.register_voting_power_snapshot(snapshot)
+    }
+
+    pub(crate) fn register_voting_power_snapshot(
         &mut self,
         snapshot: VotingPowerSnapshotV1,
     ) -> Result<(), EpochGovernanceError> {
@@ -911,7 +945,21 @@ impl EpochGovernanceEngine {
         Ok(())
     }
 
-    pub fn attach_ai_review_root(
+    /// Ingests an immutable aggregate AI-review claim for offline simulation.
+    /// The aggregate counts remain claims; this model does not authenticate the
+    /// individual reviewers represented by the root.
+    pub fn attach_content_addressed_ai_review_claim_for_simulation(
+        &mut self,
+        proposal_id: &str,
+        claim_cid: &str,
+        claim_car: &[u8],
+        clock: EpochGovernanceClock,
+    ) -> Result<(), EpochGovernanceError> {
+        let evidence = verify_content_addressed_claim(claim_cid, claim_car)?;
+        self.attach_ai_review_root(proposal_id, evidence, clock)
+    }
+
+    pub(crate) fn attach_ai_review_root(
         &mut self,
         proposal_id: &str,
         evidence: AiReviewEvidenceV1,
@@ -992,7 +1040,21 @@ impl EpochGovernanceEngine {
         Ok(())
     }
 
-    pub fn attach_build_root(
+    /// Ingests an immutable aggregate build claim for offline simulation.
+    /// Artifact provenance and builder independence must be authenticated by a
+    /// caller before treating the claim as anything beyond simulation input.
+    pub fn attach_content_addressed_build_claim_for_simulation(
+        &mut self,
+        proposal_id: &str,
+        claim_cid: &str,
+        claim_car: &[u8],
+        clock: EpochGovernanceClock,
+    ) -> Result<(), EpochGovernanceError> {
+        let evidence = verify_content_addressed_claim(claim_cid, claim_car)?;
+        self.attach_build_root(proposal_id, evidence, clock)
+    }
+
+    pub(crate) fn attach_build_root(
         &mut self,
         proposal_id: &str,
         evidence: BuildRootEvidenceV1,
@@ -1028,7 +1090,21 @@ impl EpochGovernanceEngine {
         Ok(())
     }
 
-    pub fn attach_data_availability_root(
+    /// Ingests an immutable aggregate data-availability claim for simulation.
+    /// CID integrity does not prove continued availability or provider
+    /// independence.
+    pub fn attach_content_addressed_data_availability_claim_for_simulation(
+        &mut self,
+        proposal_id: &str,
+        claim_cid: &str,
+        claim_car: &[u8],
+        clock: EpochGovernanceClock,
+    ) -> Result<(), EpochGovernanceError> {
+        let evidence = verify_content_addressed_claim(claim_cid, claim_car)?;
+        self.attach_data_availability_root(proposal_id, evidence, clock)
+    }
+
+    pub(crate) fn attach_data_availability_root(
         &mut self,
         proposal_id: &str,
         evidence: DataAvailabilityEvidenceV1,
@@ -1178,7 +1254,7 @@ impl EpochGovernanceEngine {
             schema_version: 1,
             governance_epoch: epoch,
             voter_address: voter,
-            voting_power_snapshot_reference: voting_power_reference(snapshot),
+            voting_power_snapshot_reference: voting_power_reference(snapshot)?,
             ordered_choices: choices,
             local_notes,
             ballot_nonce,
@@ -1232,7 +1308,7 @@ impl EpochGovernanceEngine {
             commitment: commitment.to_string(),
             committed_at_block: clock.block,
             revealed_at_block: None,
-            voting_power_snapshot_reference: voting_power_reference(snapshot),
+            voting_power_snapshot_reference: voting_power_reference(snapshot)?,
             effective_vote_weight: snapshot.effective_vote_weight,
             revealed_choices: None,
         };
@@ -1443,6 +1519,7 @@ impl EpochGovernanceEngine {
         if proposal.state != EpochProposalState::AcceptedPendingGrace
             || proposal.pending_challenge.is_some()
             || clock.block < proposal.execution_not_before
+            || clock.block > proposal.execution_expires
         {
             return Err(EpochGovernanceError::ExecutionBlocked);
         }
@@ -1489,28 +1566,33 @@ impl EpochGovernanceEngine {
     ) -> Result<bool, EpochGovernanceError> {
         let proposal = self
             .proposals
-            .get_mut(proposal_id)
+            .get(proposal_id)
             .ok_or(EpochGovernanceError::NotFound)?;
         if proposal.state != EpochProposalState::Challenged {
             return Err(EpochGovernanceError::InvalidState);
         }
         let challenge = proposal
             .pending_challenge
-            .take()
+            .as_ref()
             .ok_or(EpochGovernanceError::InvalidChallenge)?;
         let upheld = match challenge {
             ObjectiveChallengeV1::CandidateManifestDigestMismatch {
                 candidate_manifest_bytes,
                 ..
             } => {
-                let computed_cid = cid_for(DAG_CBOR_CODEC, &candidate_manifest_bytes).to_string();
+                let computed_cid = cid_for(DAG_CBOR_CODEC, candidate_manifest_bytes).to_string();
                 if computed_cid != proposal.content.candidate_ecosystem_cid {
                     return Err(EpochGovernanceError::InvalidChallenge);
                 }
-                hex::encode(Sha256::digest(&candidate_manifest_bytes))
+                hex::encode(Sha256::digest(candidate_manifest_bytes))
                     != proposal.content.candidate_manifest_sha256
             }
         };
+        let proposal = self
+            .proposals
+            .get_mut(proposal_id)
+            .ok_or(EpochGovernanceError::NotFound)?;
+        proposal.pending_challenge = None;
         if upheld {
             proposal.state = EpochProposalState::Rejected;
             self.settle_rejected_bond(proposal_id)?;
@@ -1539,7 +1621,10 @@ impl EpochGovernanceEngine {
             return Err(EpochGovernanceError::ExecutionBlocked);
         }
         if proposal.content.parent_canonical_ecosystem_cid != self.canonical_ecosystem_cid {
-            self.proposals.get_mut(proposal_id).unwrap().state = EpochProposalState::Stale;
+            self.proposals
+                .get_mut(proposal_id)
+                .ok_or(EpochGovernanceError::NotFound)?
+                .state = EpochProposalState::Stale;
             self.settle_no_quorum_like_bond(proposal_id)?;
             return Err(EpochGovernanceError::StaleParent);
         }
@@ -1580,7 +1665,10 @@ impl EpochGovernanceEngine {
         };
         self.canonical_ecosystem_cid = new;
         self.canonical_history.push(entry.clone());
-        let proposal = self.proposals.get_mut(proposal_id).unwrap();
+        let proposal = self
+            .proposals
+            .get_mut(proposal_id)
+            .ok_or(EpochGovernanceError::NotFound)?;
         proposal.state = if matches!(
             proposal.content.proposal_kind,
             EpochProposalKindV1::Revert(_)
@@ -2072,10 +2160,28 @@ fn validate_ballot_choices(
     Ok(())
 }
 
-fn voting_power_reference(snapshot: &VotingPowerSnapshotV1) -> String {
-    let bytes = serde_ipld_dagcbor::to_vec(snapshot)
-        .expect("serializing an in-memory voting snapshot cannot fail");
-    cid_for(DAG_CBOR_CODEC, &bytes).to_string()
+fn voting_power_reference(
+    snapshot: &VotingPowerSnapshotV1,
+) -> Result<String, EpochGovernanceError> {
+    let bytes =
+        serde_ipld_dagcbor::to_vec(snapshot).map_err(|_| EpochGovernanceError::InvalidState)?;
+    Ok(cid_for(DAG_CBOR_CODEC, &bytes).to_string())
+}
+
+fn verify_content_addressed_claim<T>(
+    claim_cid: &str,
+    claim_car: &[u8],
+) -> Result<T, EpochGovernanceError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    validate_dag_cbor_cid(claim_cid)?;
+    let package = verify_dag_cbor_car::<T>(claim_car)
+        .map_err(|_| EpochGovernanceError::InvalidContentAddress)?;
+    if package.root_cid.to_string() != claim_cid {
+        return Err(EpochGovernanceError::InvalidContentAddress);
+    }
+    Ok(package.value)
 }
 
 fn validate_gate(gate: EpochGateParametersV1) -> Result<(), EpochGovernanceError> {
@@ -2440,6 +2546,58 @@ mod tests {
             .unwrap();
     }
 
+    fn accept_proposal_into_grace(engine: &mut EpochGovernanceEngine, proposal_id: &str) {
+        attach_evidence(engine, proposal_id);
+        engine
+            .freeze_epoch_proposal_set(EpochGovernanceClock {
+                epoch: 421,
+                block: 1_040,
+            })
+            .unwrap();
+        let ballot = engine
+            .prepare_epoch_ballot(
+                421,
+                ADDRESS_A,
+                vec![EpochBallotChoiceV1 {
+                    proposal_id: proposal_id.to_string(),
+                    choice: VoteChoice::Yes,
+                }],
+                BTreeMap::new(),
+                1,
+                &"55".repeat(32),
+            )
+            .unwrap();
+        engine
+            .commit_epoch_ballot(
+                ADDRESS_A,
+                421,
+                &ballot.commitment,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_080,
+                },
+            )
+            .unwrap();
+        engine
+            .reveal_epoch_ballot(
+                ADDRESS_A,
+                &ballot,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_100,
+                },
+            )
+            .unwrap();
+        let decision = engine
+            .finalize_epoch_voting(EpochGovernanceClock {
+                epoch: 421,
+                block: 1_120,
+            })
+            .unwrap()
+            .remove(0);
+        assert_eq!(decision.state, EpochProposalState::AcceptedPendingGrace);
+    }
+
     #[test]
     fn proposal_slot_is_atomic_and_persists_after_cancellation() {
         let mut engine = engine();
@@ -2628,6 +2786,132 @@ mod tests {
         );
         snapshot.source_block_hash = "33".repeat(32);
         engine.register_voting_power_snapshot(snapshot).unwrap();
+    }
+
+    #[test]
+    fn public_simulation_inputs_require_matching_canonical_car_cids() {
+        let mut engine = engine();
+        assert_eq!(
+            engine.trust_model(),
+            EpochGovernanceTrustModelV1::NonAuthoritativeOfflineSimulation
+        );
+
+        let stake = 10_000_000_000_000_000_000;
+        let trust = flip_trust_bps(20, 0).unwrap();
+        let snapshot = VotingPowerSnapshotV1 {
+            schema_version: 1,
+            governance_epoch: 421,
+            voter_address: ADDRESS_C.to_string(),
+            identity_state: IdentityState::Human,
+            finalized_authored_flips: 20,
+            consensus_reported_authored_flips: 0,
+            flip_trust_bps: trust,
+            active_stake_atoms: stake,
+            effective_vote_weight: effective_vote_weight(stake, 10_000, trust).unwrap(),
+            source_block_height: 123,
+            source_block_hash: "33".repeat(32),
+        };
+        let package = package_dag_cbor(snapshot).unwrap();
+        assert_ne!(package.root_cid.to_string(), CID_A);
+        assert_eq!(
+            engine.register_content_addressed_voting_power_claim_for_simulation(
+                CID_A,
+                &package.car_bytes,
+            ),
+            Err(EpochGovernanceError::InvalidContentAddress)
+        );
+        assert!(!engine
+            .voting_power
+            .contains_key(&(421, ADDRESS_C.to_string())));
+        engine
+            .register_content_addressed_voting_power_claim_for_simulation(
+                &package.root_cid.to_string(),
+                &package.car_bytes,
+            )
+            .unwrap();
+
+        let proposal_id = engine
+            .create_proposal(
+                ADDRESS_A,
+                proposal("content-addressed-evidence"),
+                10_000_000_000_000_000_000,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_010,
+                },
+            )
+            .unwrap();
+        let ai = package_dag_cbor(AiReviewEvidenceV1 {
+            root: "33".repeat(32),
+            valid_attestations: 2,
+            independent_runtime_groups: 2,
+            distinct_provider_families: 1,
+            unresolved_critical_findings: 0,
+        })
+        .unwrap();
+        let mut corrupt_car = ai.car_bytes.clone();
+        *corrupt_car.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            engine.attach_content_addressed_ai_review_claim_for_simulation(
+                &proposal_id,
+                &ai.root_cid.to_string(),
+                &corrupt_car,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            ),
+            Err(EpochGovernanceError::InvalidContentAddress)
+        );
+        assert!(engine.proposal(&proposal_id).unwrap().ai_review.is_none());
+        engine
+            .attach_content_addressed_ai_review_claim_for_simulation(
+                &proposal_id,
+                &ai.root_cid.to_string(),
+                &ai.car_bytes,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            )
+            .unwrap();
+
+        let build = package_dag_cbor(BuildRootEvidenceV1 {
+            root: "44".repeat(32),
+            valid_builders: 2,
+            distinct_platforms: 1,
+            matching_core_artifact_digests: true,
+        })
+        .unwrap();
+        engine
+            .attach_content_addressed_build_claim_for_simulation(
+                &proposal_id,
+                &build.root_cid.to_string(),
+                &build.car_bytes,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            )
+            .unwrap();
+
+        let availability = package_dag_cbor(DataAvailabilityEvidenceV1 {
+            root: "55".repeat(32),
+            independent_providers: 2,
+            valid_until_block: 1_780,
+        })
+        .unwrap();
+        engine
+            .attach_content_addressed_data_availability_claim_for_simulation(
+                &proposal_id,
+                &availability.root_cid.to_string(),
+                &availability.car_bytes,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            )
+            .unwrap();
     }
 
     #[test]
@@ -3410,6 +3694,81 @@ mod tests {
             EpochProposalState::Rejected
         );
         assert_eq!(engine.canonical_history().len(), 0);
+    }
+
+    #[test]
+    fn malformed_challenge_resolution_preserves_pending_state_for_recovery() {
+        let mut engine = engine();
+        let id = engine
+            .create_proposal(
+                ADDRESS_A,
+                proposal("invalid-challenge-payload"),
+                10_000_000_000_000_000_000,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_010,
+                },
+            )
+            .unwrap();
+        accept_proposal_into_grace(&mut engine, &id);
+        engine
+            .open_objective_challenge(
+                &id,
+                ObjectiveChallengeV1::CandidateManifestDigestMismatch {
+                    proposal_id: id.clone(),
+                    candidate_manifest_bytes: b"not-the-candidate-manifest".to_vec(),
+                    evidence_cid: RAW_CID.into(),
+                },
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_121,
+                },
+            )
+            .unwrap();
+
+        for _ in 0..3 {
+            assert_eq!(
+                engine.resolve_objective_challenge(&id),
+                Err(EpochGovernanceError::InvalidChallenge)
+            );
+            let record = engine.proposals.get(&id).unwrap();
+            assert_eq!(record.state, EpochProposalState::Challenged);
+            assert!(record.pending_challenge.is_some());
+        }
+    }
+
+    #[test]
+    fn execution_readiness_never_reopens_the_original_window() {
+        let mut engine = engine();
+        let id = engine
+            .create_proposal(
+                ADDRESS_A,
+                proposal("expired-execution-window"),
+                10_000_000_000_000_000_000,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_010,
+                },
+            )
+            .unwrap();
+        accept_proposal_into_grace(&mut engine, &id);
+        let original_not_before = engine.proposals[&id].execution_not_before;
+        let original_expires = engine.proposals[&id].execution_expires;
+        assert_eq!(original_not_before, 1_180);
+        assert_eq!(original_expires, 1_780);
+
+        for late_by in [1, 2, 600, u64::MAX - original_expires] {
+            let block = original_expires.saturating_add(late_by);
+            assert_eq!(
+                engine
+                    .enter_execution_ready_state(&id, EpochGovernanceClock { epoch: 421, block },),
+                Err(EpochGovernanceError::ExecutionBlocked)
+            );
+            let record = &engine.proposals[&id];
+            assert_eq!(record.state, EpochProposalState::AcceptedPendingGrace);
+            assert_eq!(record.execution_not_before, original_not_before);
+            assert_eq!(record.execution_expires, original_expires);
+        }
     }
 
     #[test]

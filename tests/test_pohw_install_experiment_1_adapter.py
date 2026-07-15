@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,23 @@ INSTALLER = ROOT / "scripts" / "pohw-install-experiment-1-adapter.sh"
 
 class Experiment1AdapterInstallerTests(unittest.TestCase):
     SOURCE_CID = "bafyreih3yhu25jmihmtwtwimyav4f4nyxk6haqs3va4jlxqvwdaylqmfeq"
+    RUNTIME_DIR = Path("usr/local/libexec/p2pool-experiment-1")
+    SYSTEMD_DIR = Path("etc/systemd/system")
+    FIXED_ARTIFACTS = {
+        "pohw-run-mining-adapter.sh": Path("scripts/pohw-run-mining-adapter.sh"),
+        "pohw-run-gossip-mesh.sh": Path("scripts/pohw-run-gossip-mesh.sh"),
+        "pohw-health-status.py": Path("scripts/pohw-health-status.py"),
+        "pohw-mining-adapter.service": Path(
+            "deploy/systemd/pohw-mining-adapter.service"
+        ),
+        "pohw-gossip-mesh.service": Path("deploy/systemd/pohw-gossip-mesh.service"),
+        "pohw-mining-adapter-server.conf": Path(
+            "deploy/systemd/pohw-mining-adapter-server.conf"
+        ),
+        "pohw-gossip-mesh-server.conf": Path(
+            "deploy/systemd/pohw-gossip-mesh-server.conf"
+        ),
+    }
 
     def write_binary(self, path: Path, marker: str, execution_marker: Path | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +82,11 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
         )
         target = next(item for item in plan["targets"] if item["id"] == "rust-workspace")
         (source_root / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
+        for relative_path in self.FIXED_ARTIFACTS.values():
+            fixture_path = source_root / relative_path
+            fixture_path.parent.mkdir(parents=True, exist_ok=True)
+            fixture_path.write_bytes((ROOT / relative_path).read_bytes())
+            fixture_path.chmod(stat.S_IMODE((ROOT / relative_path).stat().st_mode))
         source_cid = self.SOURCE_CID
         source_verification = {
             "schemaVersion": 1,
@@ -112,30 +135,31 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             "toolchains": plan["toolchains"],
         }
         environment_raw = self.canonical_json(environment)
-        artifact_sha = hashlib.sha256(source.read_bytes()).hexdigest()
         artifacts = []
         for declaration in target["artifacts"]:
-            is_node = declaration["name"] == "p2pool-node"
+            name = declaration["name"]
+            if name == "p2pool-node":
+                artifact_raw = source.read_bytes()
+            elif name in self.FIXED_ARTIFACTS:
+                artifact_raw = (source_root / self.FIXED_ARTIFACTS[name]).read_bytes()
+            else:
+                artifact_raw = name.encode()
             artifacts.append(
                 {
-                    "architecture": "fixture",
-                    "cid": self.reference(
-                        source.read_bytes()
-                        if is_node
-                        else declaration["name"].encode()
-                    )["cid"],
+                    "architecture": "fixture"
+                    if declaration["architecture"] == "builder-platform"
+                    else declaration["architecture"],
+                    "cid": self.reference(artifact_raw)["cid"],
                     "deterministic": declaration["deterministic"],
                     "kind": declaration["kind"],
-                    "name": declaration["name"],
-                    "packagedName": declaration["name"],
-                    "platform": "fixture",
+                    "name": name,
+                    "packagedName": Path(declaration["pathHint"]).name,
+                    "platform": "fixture"
+                    if declaration["platform"] == "builder-platform"
+                    else declaration["platform"],
                     "repository": declaration["repository"],
-                    "sha256": artifact_sha
-                    if is_node
-                    else hashlib.sha256(declaration["name"].encode()).hexdigest(),
-                    "size": source.stat().st_size
-                    if is_node
-                    else len(declaration["name"].encode()),
+                    "sha256": hashlib.sha256(artifact_raw).hexdigest(),
+                    "size": len(artifact_raw),
                 }
             )
         lock_raw = (source_root / "Cargo.lock").read_bytes()
@@ -178,12 +202,18 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
         return evidence_path
 
     def write_systemctl(
-        self, path: Path, active: bool, *, exit_code: int | None = None
+        self,
+        path: Path,
+        active: bool,
+        *,
+        exit_code: int | None = None,
+        daemon_reload_exit_code: int = 0,
     ) -> None:
         status = exit_code if exit_code is not None else (0 if active else 3)
         path.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >> \"$POHW_SYSTEMCTL_LOG\"\n"
+            f"[[ ${{1:-}} == daemon-reload ]] && exit {daemon_reload_exit_code}\n"
             f"exit {status}\n",
             encoding="utf-8",
         )
@@ -192,7 +222,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
     def run_installer(
         self,
         source: Path,
-        destination: Path,
+        install_root: Path,
         systemctl: Path,
         log: Path,
         source_root: Path,
@@ -200,6 +230,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
         *,
         expected_evidence_sha256: str | None = None,
         expected_source_cid: str | None = None,
+        destination_override: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env.update(
@@ -219,6 +250,11 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                 "--expected-source-cid",
                 expected_source_cid or self.SOURCE_CID,
             ]
+        destination_arguments = (
+            ["--destination", str(destination_override)]
+            if destination_override is not None
+            else []
+        )
         return subprocess.run(
             [
                 "bash",
@@ -230,8 +266,9 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                 "--build-plan",
                 str(ROOT / "compatibility" / "governance-build-plan-v1.json"),
                 *evidence_arguments,
-                "--destination",
-                str(destination),
+                *destination_arguments,
+                "--install-root",
+                str(install_root),
             ],
             cwd=ROOT,
             env=env,
@@ -240,13 +277,14 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             text=True,
         )
 
-    def test_installs_atomically_and_keeps_one_rollback_binary(self) -> None:
+    def test_installs_fixed_layout_modes_and_keeps_one_rollback_binary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-adapter-install-") as temp:
             root = Path(temp)
             source = root / "source" / "target" / "release" / "p2pool-node"
             source_root = root / "source"
-            destination = root / "libexec" / "p2pool-node"
-            destination.parent.mkdir()
+            install_root = root / "install-root"
+            destination = install_root / self.RUNTIME_DIR / "p2pool-node"
+            destination.parent.mkdir(parents=True)
             execution_marker = root / "candidate-was-executed"
             self.write_binary(source, "new", execution_marker)
             self.write_binary(destination, "old")
@@ -256,23 +294,122 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             self.write_systemctl(systemctl, active=False)
 
             result = self.run_installer(
-                source, destination, systemctl, log, source_root, evidence
+                source, install_root, systemctl, log, source_root, evidence
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            expected_files = {
+                destination: (source, 0o755),
+                install_root / self.RUNTIME_DIR / "pohw-run-mining-adapter.sh": (
+                    source_root / self.FIXED_ARTIFACTS["pohw-run-mining-adapter.sh"],
+                    0o755,
+                ),
+                install_root / self.RUNTIME_DIR / "pohw-run-gossip-mesh.sh": (
+                    source_root / self.FIXED_ARTIFACTS["pohw-run-gossip-mesh.sh"],
+                    0o755,
+                ),
+                install_root / self.RUNTIME_DIR / "pohw-health-status.py": (
+                    source_root / self.FIXED_ARTIFACTS["pohw-health-status.py"],
+                    0o755,
+                ),
+                install_root / self.SYSTEMD_DIR / "pohw-mining-adapter.service": (
+                    source_root / self.FIXED_ARTIFACTS["pohw-mining-adapter.service"],
+                    0o644,
+                ),
+                install_root / self.SYSTEMD_DIR / "pohw-gossip-mesh.service": (
+                    source_root / self.FIXED_ARTIFACTS["pohw-gossip-mesh.service"],
+                    0o644,
+                ),
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-mining-adapter.service.d"
+                / "server.conf": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["pohw-mining-adapter-server.conf"],
+                    0o644,
+                ),
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-gossip-mesh.service.d"
+                / "server.conf": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["pohw-gossip-mesh-server.conf"],
+                    0o644,
+                ),
+            }
+            for installed, (fixture, expected_mode) in expected_files.items():
+                with self.subTest(installed=installed):
+                    self.assertEqual(installed.read_bytes(), fixture.read_bytes())
+                    self.assertEqual(
+                        stat.S_IMODE(installed.stat().st_mode), expected_mode
+                    )
             self.assertIn("# old", Path(f"{destination}.previous").read_text())
             service_checks = log.read_text(encoding="utf-8")
             self.assertIn("pohw-mining-adapter.service", service_checks)
             self.assertIn("pohw-gossip-mesh.service", service_checks)
+            self.assertIn("daemon-reload", service_checks)
             self.assertFalse(execution_marker.exists())
+
+    def test_daemon_reload_failure_restores_the_entire_runtime_set(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-adapter-rollback-") as temp:
+            root = Path(temp)
+            source_root = root / "source"
+            source = source_root / "target" / "release" / "p2pool-node"
+            install_root = root / "install-root"
+            self.write_binary(source, "new")
+            evidence = self.write_build_evidence(source_root, source)
+            installed = {
+                install_root / self.RUNTIME_DIR / "p2pool-node": 0o700,
+                install_root
+                / self.RUNTIME_DIR
+                / "pohw-run-mining-adapter.sh": 0o700,
+                install_root / self.RUNTIME_DIR / "pohw-run-gossip-mesh.sh": 0o700,
+                install_root / self.RUNTIME_DIR / "pohw-health-status.py": 0o700,
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-mining-adapter.service": 0o600,
+                install_root / self.SYSTEMD_DIR / "pohw-gossip-mesh.service": 0o600,
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-mining-adapter.service.d"
+                / "server.conf": 0o600,
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-gossip-mesh.service.d"
+                / "server.conf": 0o600,
+            }
+            before = {}
+            for index, (path, mode) in enumerate(installed.items()):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"old runtime artifact {index}\n", encoding="utf-8")
+                path.chmod(mode)
+                before[path] = (path.read_bytes(), mode)
+            systemctl = root / "systemctl"
+            log = root / "systemctl.log"
+            self.write_systemctl(
+                systemctl, active=False, daemon_reload_exit_code=1
+            )
+
+            result = self.run_installer(
+                source, install_root, systemctl, log, source_root, evidence
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("daemon-reload failed", result.stderr)
+            for path, (expected_bytes, expected_mode) in before.items():
+                with self.subTest(path=path):
+                    self.assertEqual(path.read_bytes(), expected_bytes)
+                    self.assertEqual(
+                        stat.S_IMODE(path.stat().st_mode), expected_mode
+                    )
 
     def test_refuses_active_service_without_touching_destination(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-adapter-active-") as temp:
             root = Path(temp)
             source = root / "source" / "target" / "release" / "p2pool-node"
             source_root = root / "source"
-            destination = root / "p2pool-node"
+            install_root = root / "install-root"
+            destination = install_root / self.RUNTIME_DIR / "p2pool-node"
             self.write_binary(source, "new")
             self.write_binary(destination, "old")
             evidence = self.write_build_evidence(source_root, source)
@@ -282,7 +419,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             self.write_systemctl(systemctl, active=True)
 
             result = self.run_installer(
-                source, destination, systemctl, log, source_root, evidence
+                source, install_root, systemctl, log, source_root, evidence
             )
 
             self.assertNotEqual(result.returncode, 0)
@@ -294,7 +431,8 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             root = Path(temp)
             source_root = root / "source"
             source = source_root / "target" / "release" / "p2pool-node"
-            destination = root / "p2pool-node"
+            install_root = root / "install-root"
+            destination = install_root / self.RUNTIME_DIR / "p2pool-node"
             self.write_binary(source, "new")
             evidence = self.write_build_evidence(source_root, source)
             systemctl = root / "systemctl"
@@ -302,7 +440,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             self.write_systemctl(systemctl, active=False, exit_code=4)
 
             result = self.run_installer(
-                source, destination, systemctl, log, source_root, evidence
+                source, install_root, systemctl, log, source_root, evidence
             )
 
             self.assertNotEqual(result.returncode, 0)
@@ -318,13 +456,14 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             evidence = self.write_build_evidence(source_root, real_source)
             source_link = real_source.with_name("node-link")
             source_link.symlink_to(real_source)
-            destination = root / "p2pool-node"
+            install_root = root / "install-root"
+            destination = install_root / self.RUNTIME_DIR / "p2pool-node"
             systemctl = root / "systemctl"
             log = root / "systemctl.log"
             self.write_systemctl(systemctl, active=False)
 
             linked = self.run_installer(
-                source_link, destination, systemctl, log, source_root, evidence
+                source_link, install_root, systemctl, log, source_root, evidence
             )
             self.assertNotEqual(linked.returncode, 0)
             self.assertIn("non-symlink", linked.stderr)
@@ -332,11 +471,64 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             real_source.write_text("tampered after evidence\n", encoding="utf-8")
             real_source.chmod(0o755)
             invalid = self.run_installer(
-                real_source, destination, systemctl, log, source_root, evidence
+                real_source, install_root, systemctl, log, source_root, evidence
             )
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("does not match build evidence", invalid.stderr)
             self.assertFalse(destination.exists())
+
+    def test_refuses_altered_evidence_bound_runtime_artifacts(self) -> None:
+        for name, relative_path in self.FIXED_ARTIFACTS.items():
+            with self.subTest(artifact=name), tempfile.TemporaryDirectory(
+                prefix="pohw-adapter-runtime-tamper-"
+            ) as temp:
+                root = Path(temp)
+                source_root = root / "source"
+                source = source_root / "target" / "release" / "p2pool-node"
+                install_root = root / "install-root"
+                self.write_binary(source, "new")
+                evidence = self.write_build_evidence(source_root, source)
+                altered = source_root / relative_path
+                altered.write_bytes(altered.read_bytes() + b"# altered after evidence\n")
+                systemctl = root / "systemctl"
+                log = root / "systemctl.log"
+                self.write_systemctl(systemctl, active=False)
+
+                result = self.run_installer(
+                    source, install_root, systemctl, log, source_root, evidence
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not match build evidence", result.stderr)
+                self.assertFalse(
+                    (install_root / self.RUNTIME_DIR / "p2pool-node").exists()
+                )
+
+    def test_refuses_non_fixed_binary_destination(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-adapter-destination-") as temp:
+            root = Path(temp)
+            source_root = root / "source"
+            source = source_root / "target" / "release" / "p2pool-node"
+            install_root = root / "install-root"
+            self.write_binary(source, "new")
+            evidence = self.write_build_evidence(source_root, source)
+            systemctl = root / "systemctl"
+            log = root / "systemctl.log"
+            self.write_systemctl(systemctl, active=False)
+
+            result = self.run_installer(
+                source,
+                install_root,
+                systemctl,
+                log,
+                source_root,
+                evidence,
+                destination_override=root / "redirected-p2pool-node",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixed binary destination", result.stderr)
+            self.assertFalse(install_root.exists())
 
     def test_requires_build_evidence(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-adapter-no-evidence-") as temp:
@@ -348,7 +540,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             log = root / "systemctl.log"
             self.write_systemctl(systemctl, active=False)
             result = self.run_installer(
-                source, root / "destination", systemctl, log, source_root, None
+                source, root / "install-root", systemctl, log, source_root, None
             )
             self.assertEqual(result.returncode, 2)
             self.assertIn("--build-evidence is required", result.stderr)
@@ -358,7 +550,8 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             root = Path(temp)
             source_root = root / "source"
             source = source_root / "target" / "release" / "p2pool-node"
-            destination = root / "destination"
+            install_root = root / "install-root"
+            destination = install_root / self.RUNTIME_DIR / "p2pool-node"
             self.write_binary(source, "new")
             evidence = self.write_build_evidence(source_root, source)
             systemctl = root / "systemctl"
@@ -367,7 +560,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
 
             wrong_evidence = self.run_installer(
                 source,
-                destination,
+                install_root,
                 systemctl,
                 log,
                 source_root,
@@ -379,7 +572,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
 
             wrong_source = self.run_installer(
                 source,
-                destination,
+                install_root,
                 systemctl,
                 log,
                 source_root,

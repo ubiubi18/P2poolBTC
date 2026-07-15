@@ -84,7 +84,7 @@ class SystemdLayoutTests(unittest.TestCase):
     def test_mining_adapter_variants_start_after_fork_chain(self) -> None:
         variants = {
             "pohw-mining-adapter.service": (
-                "/mnt/ssd/p2pool/scripts/pohw-run-mining-adapter.sh",
+                "/usr/local/libexec/p2pool-experiment-1/pohw-run-mining-adapter.sh",
                 "/mnt/ssd/pohw-p2pool",
             ),
             "pohw-mining-adapter-sdcard.service": (
@@ -97,6 +97,29 @@ class SystemdLayoutTests(unittest.TestCase):
             self.assertIn("After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service", unit)
             self.assertIn(f"ExecStart={exec_start}", unit)
             self.assertIn(f"ReadWritePaths={write_path}", unit)
+
+    def test_experiment_1_units_use_the_installed_evidence_bound_runtime(self) -> None:
+        wrappers = {
+            "pohw-mining-adapter.service": "pohw-run-mining-adapter.sh",
+            "pohw-gossip-mesh.service": "pohw-run-gossip-mesh.sh",
+        }
+        runtime_dir = "/usr/local/libexec/p2pool-experiment-1"
+        for name, wrapper in wrappers.items():
+            unit = (SYSTEMD / name).read_text(encoding="utf-8")
+            self.assertIn(
+                f"Environment=POHW_P2POOL_NODE_BIN={runtime_dir}/p2pool-node",
+                unit,
+            )
+            self.assertIn(f"ExecStart={runtime_dir}/{wrapper}", unit)
+            self.assertIn(runtime_dir, unit)
+            self.assertNotIn(f"/p2pool/scripts/{wrapper}", unit)
+        mining = (SYSTEMD / "pohw-mining-adapter.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            f"Environment=POHW_HEALTH_SCRIPT={runtime_dir}/pohw-health-status.py",
+            mining,
+        )
 
     def test_server_dropins_use_dedicated_sharechain_volume(self) -> None:
         for name in (
@@ -122,12 +145,29 @@ class SystemdLayoutTests(unittest.TestCase):
         self.assertIn("RequiresMountsFor=\n", mining)
         self.assertIn("RequiresMountsFor=/srv/sharechain", mining)
         self.assertIn("WorkingDirectory=/opt/p2pool", mining)
-        self.assertIn("ExecStart=\n", mining)
+
+        runtime_dir = "/usr/local/libexec/p2pool-experiment-1"
+        server_profiles = {
+            "pohw-mining-adapter-server.conf": "pohw-run-mining-adapter.sh",
+            "pohw-gossip-mesh-server.conf": "pohw-run-gossip-mesh.sh",
+        }
+        for name, wrapper in server_profiles.items():
+            profile = (SYSTEMD / name).read_text(encoding="utf-8")
+            self.assertIn(
+                f"Environment=POHW_P2POOL_NODE_BIN={runtime_dir}/p2pool-node",
+                profile,
+            )
+            self.assertIn("ExecStart=\n", profile)
+            self.assertIn(f"ExecStart={runtime_dir}/{wrapper}", profile)
+            self.assertIn("ReadOnlyPaths=\n", profile)
+            self.assertIn(
+                f"ReadOnlyPaths=/opt/p2pool /etc/pohw {runtime_dir}", profile
+            )
+            self.assertNotIn(f"/opt/p2pool/scripts/{wrapper}", profile)
         self.assertIn(
-            "ExecStart=/opt/p2pool/scripts/pohw-run-mining-adapter.sh", mining
+            f"Environment=POHW_HEALTH_SCRIPT={runtime_dir}/pohw-health-status.py",
+            mining,
         )
-        self.assertIn("ReadOnlyPaths=\n", mining)
-        self.assertIn("ReadOnlyPaths=/opt/p2pool /etc/pohw", mining)
 
     def test_mainnet_handoff_is_root_only_timed_and_overlays_mining_mode(self) -> None:
         service = (SYSTEMD / "pohw-mainnet-handoff.service").read_text(encoding="utf-8")
@@ -182,10 +222,22 @@ class SystemdLayoutTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/opt/p2pool", mining)
         self.assertIn("ExecStart=\n", mining)
         self.assertIn(
-            "ExecStart=/opt/p2pool/scripts/pohw-run-mining-adapter.sh", mining
+            "ExecStart=/usr/local/libexec/p2pool-experiment-1/pohw-run-mining-adapter.sh",
+            mining,
+        )
+        self.assertIn(
+            "Environment=POHW_P2POOL_NODE_BIN=/usr/local/libexec/p2pool-experiment-1/p2pool-node",
+            mining,
+        )
+        self.assertIn(
+            "Environment=POHW_HEALTH_SCRIPT=/usr/local/libexec/p2pool-experiment-1/pohw-health-status.py",
+            mining,
         )
         self.assertIn("ReadOnlyPaths=\n", mining)
-        self.assertIn("ReadOnlyPaths=/opt/p2pool /etc/pohw", mining)
+        self.assertIn(
+            "ReadOnlyPaths=/opt/p2pool /etc/pohw /usr/local/libexec/p2pool-experiment-1",
+            mining,
+        )
 
     def test_mainnet_handoff_is_root_only_timed_and_overlays_mining_mode(self) -> None:
         service = (SYSTEMD / "pohw-mainnet-handoff.service").read_text(encoding="utf-8")

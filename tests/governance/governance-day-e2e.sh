@@ -45,11 +45,21 @@ integration_patch="$ROOT/$(read_integration_field integrationPatch.path)"
 expected_patch_sha256="$(read_integration_field integrationPatch.sha256)"
 expected_lock_sha256="$(read_integration_field dependencyLocks.0.sha256)"
 expected_idena_ai_source_cid="$(read_integration_field sourcePackage.canonicalSourceCid)"
+removed_forbidden_path="$(read_integration_field sourcePackage.removedForbiddenPath)"
+redaction_mechanism="$(read_integration_field sourcePackage.redactionMechanism)"
 actual_patch_sha256="$(node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$integration_patch")"
 [[ "$actual_patch_sha256" == "$expected_patch_sha256" ]] || {
   printf 'IdenaAI integration patch digest does not match its local integration record.\n' >&2
   exit 2
 }
+[[ "$removed_forbidden_path" == ".env.e2e" && "$redaction_mechanism" == "harness-policy-removal-before-packaging" ]] || {
+  printf 'IdenaAI forbidden-path policy is not the reviewed fail-closed profile.\n' >&2
+  exit 2
+}
+if grep -Fq -- "$removed_forbidden_path" "$integration_patch"; then
+  printf 'IdenaAI integration patch must not transport environment-file paths or contents.\n' >&2
+  exit 2
+fi
 git -C "$IDENA_AI_ROOT" cat-file -e "$idena_ai_base_commit^{commit}" || {
   printf 'The supplied IdenaAI checkout does not contain the exact integration base commit.\n' >&2
   exit 2
@@ -61,6 +71,12 @@ git -C "$IDENA_AI_ROOT" archive "$idena_ai_base_commit" | tar -x -C "$idena_ai_t
 git -C "$idena_ai_test_root" init -q
 git -C "$idena_ai_test_root" apply --check "$integration_patch"
 git -C "$idena_ai_test_root" apply "$integration_patch"
+forbidden_target="$idena_ai_test_root/$removed_forbidden_path"
+[[ -f "$forbidden_target" && ! -L "$forbidden_target" ]] || {
+  printf 'Expected tracked IdenaAI environment file is missing or not a regular file.\n' >&2
+  exit 2
+}
+rm -- "$forbidden_target"
 actual_lock_sha256="$(node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$idena_ai_test_root/package-lock.json")"
 [[ "$actual_lock_sha256" == "$expected_lock_sha256" ]] || {
   printf 'IdenaAI dependency lock digest does not match its integration record.\n' >&2

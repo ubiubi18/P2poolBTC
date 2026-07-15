@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+SYSTEMCTL_BIN=/usr/bin/systemctl
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 if [[ "$(id -u)" != "0" ]]; then
@@ -47,21 +51,25 @@ observer_only_units=(
   pohw-gossip-mesh.service
   pohw-mining-adapter.service
 )
-systemctl disable --now "${observer_only_units[@]}" >/dev/null 2>&1 || true
+observer_only_timers=(
+  pohw-auto-bootstrap.timer
+  pohw-bitcoin-pressure-guard.timer
+  pohw-idena-priority-guard.timer
+)
 for unit in "${observer_only_units[@]}"; do
   install -D -m 0644 \
     "$ROOT_DIR/deploy/systemd/pohw-pi-observer-only.conf" \
     "/etc/systemd/system/${unit}.d/90-pi-observer-only.conf"
 done
-systemctl disable --now \
-  pohw-auto-bootstrap.timer \
-  pohw-bitcoin-pressure-guard.timer \
-  pohw-idena-priority-guard.timer >/dev/null 2>&1 || true
-systemctl daemon-reload
-systemctl enable --now pohw-zram.service
+"$SYSTEMCTL_BIN" daemon-reload
+"$SYSTEMCTL_BIN" disable --now "${observer_only_units[@]}" >/dev/null 2>&1 || true
+"$SYSTEMCTL_BIN" disable --now "${observer_only_timers[@]}" >/dev/null 2>&1 || true
+"$SYSTEMCTL_BIN" reset-failed "${observer_only_units[@]}" \
+  "${observer_only_timers[@]}" >/dev/null 2>&1 || true
+"$SYSTEMCTL_BIN" enable --now pohw-zram.service
 
-if systemctl is-active --quiet idena.service; then
-  systemctl set-property --runtime idena.service \
+if "$SYSTEMCTL_BIN" is-active --quiet idena.service; then
+  "$SYSTEMCTL_BIN" set-property --runtime idena.service \
     CPUQuota=250% \
     CPUWeight=80 \
     IOWeight=50 \
@@ -69,11 +77,41 @@ if systemctl is-active --quiet idena.service; then
     MemoryMax=3000M \
     MemorySwapMax=768M \
     TasksMax=512
-  idena_pid="$(systemctl show --property=MainPID --value idena.service)"
+  idena_pid="$("$SYSTEMCTL_BIN" show --property=MainPID --value idena.service)"
   if [[ "$idena_pid" =~ ^[1-9][0-9]*$ ]]; then
     renice 5 --pid "$idena_pid" >/dev/null
   fi
 fi
+
+verify_inactive_units() {
+  local unit load_state active_state
+  local -a still_running=()
+  for unit in "$@"; do
+    if ! load_state=$("$SYSTEMCTL_BIN" show --property=LoadState --value "$unit" 2>/dev/null); then
+      still_running+=("$unit=query-failed")
+      continue
+    fi
+    [[ "$load_state" == not-found ]] && continue
+    if [[ -z "$load_state" ]]; then
+      still_running+=("$unit=unknown-load-state")
+      continue
+    fi
+    if ! active_state=$("$SYSTEMCTL_BIN" show --property=ActiveState --value "$unit" 2>/dev/null); then
+      still_running+=("$unit=query-failed")
+      continue
+    fi
+    if [[ "$active_state" != inactive ]]; then
+      still_running+=("$unit=$active_state")
+    fi
+  done
+  if (( ${#still_running[@]} > 0 )); then
+    printf 'Pi observer-only verification failed; unit is not inactive: %s\n' \
+      "${still_running[*]}" >&2
+    return 1
+  fi
+}
+
+verify_inactive_units "${observer_only_units[@]}" "${observer_only_timers[@]}"
 
 echo "Pi load guard installed."
 echo "Pi observer-only mode is active; local Bitcoin, fork, gossip, and mining units are gated."

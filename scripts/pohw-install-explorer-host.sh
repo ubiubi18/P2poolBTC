@@ -90,6 +90,11 @@ allowed = {
     "POHW_FORK_ACTIVATION_MANIFEST",
     "POHW_EXPLORER_FORK_CHAIN_RPC_ADDR",
     "POHW_EXPLORER_POHW_CORE_MANIFEST",
+    "POHW_EXPLORER_FORK_ADDRESS_INDEX",
+    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS",
+    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS",
+    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS",
+    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES",
     "POHW_ENABLE_BITCOIN_RPC",
     "BITCOIN_RPC_URL",
     "BITCOIN_RPC_COOKIE_FILE",
@@ -251,6 +256,11 @@ api_bind="$(env_value POHW_DASHBOARD_BIND_ADDR)"
 fork_rpc="$(env_value POHW_EXPLORER_FORK_CHAIN_RPC_ADDR)"
 fork_manifest="$(env_value POHW_FORK_ACTIVATION_MANIFEST)"
 core_manifest="$(env_value POHW_EXPLORER_POHW_CORE_MANIFEST)"
+fork_address_index="$(env_value POHW_EXPLORER_FORK_ADDRESS_INDEX)"
+fork_address_index_max_blocks="$(env_value POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS)"
+fork_address_index_max_transactions="$(env_value POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS)"
+fork_address_index_max_outputs="$(env_value POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS)"
+fork_address_index_max_addresses="$(env_value POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES)"
 enable_bitcoin_rpc="$(env_value POHW_ENABLE_BITCOIN_RPC)"
 bitcoin_rpc_url="$(env_value BITCOIN_RPC_URL)"
 bitcoin_rpc_cookie="$(env_value BITCOIN_RPC_COOKIE_FILE)"
@@ -266,6 +276,16 @@ snapshot_dir="$(env_value POHW_SNAPSHOT_DIR)"
   || fail "Dedicated-host installation no longer accepts the retired Experiment 0 fork RPC"
 [[ "$core_manifest" == "$RUNTIME_DIR/compatibility/experiment-1-full-consensus.json" ]] \
   || fail "POHW_EXPLORER_POHW_CORE_MANIFEST must select the protected Experiment 1 manifest"
+[[ "$fork_address_index" == "true" ]] \
+  || fail "POHW_EXPLORER_FORK_ADDRESS_INDEX must be true on the dedicated explorer host"
+for value in \
+  "$fork_address_index_max_blocks" \
+  "$fork_address_index_max_transactions" \
+  "$fork_address_index_max_outputs" \
+  "$fork_address_index_max_addresses"; do
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] \
+    || fail "Fork address-index limits must be positive decimal integers"
+done
 [[ "$enable_bitcoin_rpc" == "true" ]] \
   || fail "POHW_ENABLE_BITCOIN_RPC must be true for the Experiment 1 explorer"
 [[ "$bitcoin_rpc_url" == "http://127.0.0.1:40414" ]] \

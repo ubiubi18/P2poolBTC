@@ -25,6 +25,10 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn("runtimeDashboardConfig.apiToken", source)
 
     def base_env(self, root: Path) -> dict[str, str]:
+        policy = root / "idena-anchor-policy.json"
+        api_key = root / "idena-api.key"
+        policy.write_text("{}\n", encoding="utf-8")
+        api_key.write_text("local-test-key\n", encoding="utf-8")
         env = dict(os.environ)
         env.update(
             {
@@ -35,6 +39,9 @@ class RunWrapperValidationTest(unittest.TestCase):
                 "POHW_STRATUM_JOB_FILE": str(root / "job.json"),
                 "POHW_BITCOIN_EXPECTED_CHAIN": "pohw",
                 "POHW_GOSSIP_NETWORK_ID": "ab" * 32,
+                "POHW_REQUIRE_IDENA_ANCHOR_POLICY": "true",
+                "POHW_IDENA_ANCHOR_POLICY": str(policy),
+                "IDENA_API_KEY_FILE": str(api_key),
             }
         )
         return env
@@ -178,6 +185,46 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("required by this launch profile", result.stderr)
+
+    def test_pohw_mining_cannot_disable_mandatory_anchor_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-disabled-anchor-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            env["POHW_REQUIRE_IDENA_ANCHOR_POLICY"] = "false"
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mandatory for Experiment 1 mining", result.stderr)
+
+    def test_experiment_one_mining_network_requires_anchor_without_chain_hint(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-network-anchor-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            env.pop("POHW_BITCOIN_EXPECTED_CHAIN", None)
+            env["POHW_GOSSIP_NETWORK_ID"] = (
+                "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8"
+            )
+            env["POHW_REQUIRE_IDENA_ANCHOR_POLICY"] = "false"
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mandatory for Experiment 1 mining", result.stderr)
 
     def test_pohw_rpc_mining_requires_a_gossip_network_id(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-network-id-") as temp:
@@ -934,6 +981,55 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mandatory Idena anchor policy", result.stderr)
 
+    def test_pohw_gossip_cannot_disable_mandatory_anchor_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-disabled-anchor-") as temp:
+            root = Path(temp)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_BITCOIN_EXPECTED_CHAIN": "pohw",
+                    "POHW_REQUIRE_IDENA_ANCHOR_POLICY": "false",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mandatory for Experiment 1 gossip", result.stderr)
+
+    def test_experiment_one_gossip_network_requires_anchor_without_chain_hint(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-network-anchor-") as temp:
+            root = Path(temp)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_GOSSIP_NETWORK_ID": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+                    "POHW_REQUIRE_IDENA_ANCHOR_POLICY": "false",
+                }
+            )
+            env.pop("POHW_BITCOIN_EXPECTED_CHAIN", None)
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mandatory for Experiment 1 gossip", result.stderr)
+
     def test_gossip_mesh_initializes_the_configured_network_before_serving(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-gossip-network-init-") as temp:
             root = Path(temp)
@@ -1086,6 +1182,11 @@ class RunWrapperValidationTest(unittest.TestCase):
                     "POHW_DATADIR": str(root / "datadir"),
                     "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
                     "POHW_EXPLORER_POHW_CORE_MANIFEST": str(manifest),
+                    "POHW_EXPLORER_FORK_ADDRESS_INDEX": "true",
+                    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS": "60000",
+                    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS": "500000",
+                    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS": "2000000",
+                    "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES": "500000",
                     "POHW_ENABLE_BITCOIN_RPC": "true",
                     "BITCOIN_RPC_URL": "http://127.0.0.1:40414",
                     "BITCOIN_RPC_COOKIE_FILE": str(cookie),
@@ -1107,6 +1208,15 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--explorer-pohw-core-manifest", args)
         self.assertIn(str(manifest), args)
+        self.assertIn("--explorer-fork-address-index", args)
+        self.assertIn("--explorer-fork-address-index-max-blocks", args)
+        self.assertIn("60000", args)
+        self.assertIn("--explorer-fork-address-index-max-transactions", args)
+        self.assertIn("500000", args)
+        self.assertIn("--explorer-fork-address-index-max-outputs", args)
+        self.assertIn("2000000", args)
+        self.assertIn("--explorer-fork-address-index-max-addresses", args)
+        self.assertIn("500000", args)
         self.assertIn("--enable-bitcoin-rpc", args)
         self.assertIn("--bitcoin-rpc-url", args)
         self.assertIn("http://127.0.0.1:40414", args)

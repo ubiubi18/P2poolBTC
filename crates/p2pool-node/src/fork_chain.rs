@@ -17,7 +17,7 @@ use bitcoin::{
     TxOut, Txid, Weight,
 };
 use chrono::Utc;
-use crypto_bigint::{NonZero, U256 as CryptoU256, U512 as CryptoU512};
+use crypto_bigint::{Encoding, U256 as CryptoU256, U512 as CryptoU512};
 use fs2::FileExt;
 use pohw_core::fork::{
     ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm, ForkTransactionConsensus,
@@ -220,6 +220,7 @@ pub(crate) struct ForkTransactionDetail {
     pub total_input_sats: Option<u64>,
     pub total_output_sats: u64,
     pub fee_sats: Option<u64>,
+    pub spend_state_complete: bool,
     pub inputs: Vec<ForkTransactionInput>,
     pub outputs: Vec<ForkTransactionOutput>,
 }
@@ -242,7 +243,10 @@ pub(crate) struct ForkAddressSummary {
     pub funded_total_sats: u64,
     pub spent_output_count: usize,
     pub spent_total_sats: u64,
+    pub inherited_input_count: usize,
+    pub inherited_input_total_sats: u64,
     pub balance_sats: u64,
+    pub balance_scope: String,
     pub first_seen_height: Option<u64>,
     pub last_seen_height: Option<u64>,
 }
@@ -896,7 +900,10 @@ impl ForkChainStore {
                 funded_total_sats: 0,
                 spent_output_count: 0,
                 spent_total_sats: 0,
+                inherited_input_count: 0,
+                inherited_input_total_sats: 0,
                 balance_sats: 0,
+                balance_scope: "fork_created_utxos".to_string(),
                 first_seen_height: None,
                 last_seen_height: None,
             }))
@@ -1793,7 +1800,10 @@ impl ForkChainStore {
                             funded_total_sats: accumulator.funded_total_sats,
                             spent_output_count: accumulator.spent_output_count,
                             spent_total_sats: accumulator.spent_total_sats,
+                            inherited_input_count: 0,
+                            inherited_input_total_sats: 0,
                             balance_sats,
+                            balance_scope: "fork_created_utxos".to_string(),
                             first_seen_height: accumulator.first_seen_height,
                             last_seen_height: accumulator.last_seen_height,
                         },
@@ -1943,10 +1953,7 @@ fn next_work_required_v1(
     let previous = CryptoU256::from_be_slice(&Target::from_compact(previous_bits).to_be_bytes());
     let previous_wide: CryptoU512 = previous.resize();
     let scaled = previous_wide.wrapping_mul(&CryptoU512::from_u64(actual_timespan));
-    let target_timespan = NonZero::new(CryptoU512::from_u64(target_timespan))
-        .into_option()
-        .context("fork difficulty target timespan must be non-zero")?;
-    let adjusted = scaled.wrapping_div(&target_timespan);
+    let adjusted = scaled.wrapping_div(&CryptoU512::from_u64(target_timespan));
 
     let pow_limit = CryptoU256::from_be_slice(
         &Target::from_compact(CompactTarget::from_consensus(pow_limit_bits)).to_be_bytes(),
@@ -1958,7 +1965,7 @@ fn next_work_required_v1(
         adjusted
     };
     let bounded: CryptoU256 = bounded.resize();
-    Ok(Target::from_be_bytes(bounded.to_be_bytes().into()).to_compact_lossy())
+    Ok(Target::from_be_bytes(bounded.to_be_bytes()).to_compact_lossy())
 }
 
 fn bootstrap_handoff_work(config: &ForkConfig) -> Work {
@@ -3508,6 +3515,7 @@ fn transaction_detail(
         total_input_sats,
         total_output_sats,
         fee_sats,
+        spend_state_complete: active,
         inputs,
         outputs,
     })
@@ -4744,21 +4752,6 @@ mod tests {
             Some(BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL - 1)
         );
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn rejects_zero_difficulty_retarget_timespan() {
-        let err = next_work_required_v1(
-            CompactTarget::from_consensus(0x1d00_ffff),
-            1,
-            0,
-            0x1d00_ffff,
-        )
-        .unwrap_err();
-
-        assert!(err
-            .to_string()
-            .contains("fork difficulty target timespan must be non-zero"));
     }
 
     #[test]

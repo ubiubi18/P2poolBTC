@@ -31,6 +31,8 @@ class ExplorerHostProfileTest(unittest.TestCase):
         self.assertIn("must not be group/world writable", installer)
         self.assertIn("require_root_runtime_directory", installer)
         self.assertIn("POHW_EXPLORER_POHW_CORE_MANIFEST", installer)
+        self.assertIn("POHW_EXPLORER_FORK_ADDRESS_INDEX must be true", installer)
+        self.assertIn("Fork address-index limits must be positive", installer)
         self.assertIn("POHW_ENABLE_BITCOIN_RPC must be true", installer)
         self.assertIn("http://127.0.0.1:40414", installer)
         self.assertIn("/run/bitcoin-pohw-rpc/.cookie", installer)
@@ -91,6 +93,13 @@ class ExplorerHostProfileTest(unittest.TestCase):
         )
         self.assertIn("BITCOIN_RPC_URL=http://127.0.0.1:40414", config)
         self.assertIn("BITCOIN_RPC_COOKIE_FILE=/run/bitcoin-pohw-rpc/.cookie", config)
+        self.assertIn("POHW_EXPLORER_FORK_ADDRESS_INDEX=true", config)
+        self.assertIn("POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_BLOCKS=60000", config)
+        self.assertIn(
+            "POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_TRANSACTIONS=500000", config
+        )
+        self.assertIn("POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_OUTPUTS=2000000", config)
+        self.assertIn("POHW_EXPLORER_FORK_ADDRESS_INDEX_MAX_ADDRESSES=500000", config)
         self.assertNotIn("POHW_EXPLORER_FORK_CHAIN_RPC_ADDR", config)
         self.assertIn("POHW_EXPLORER_BITCOIN_INDEX_URL=http://127.0.0.1:3002", config)
         self.assertIn("POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX=false", config)

@@ -107,6 +107,30 @@ pub(crate) struct ExplorerBitcoinOutspendPage {
 pub(crate) struct ExplorerForkOverview {
     pub state: String,
     pub status: Option<ExplorerForkStatus>,
+    pub address_index: ExplorerForkAddressIndexOverview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExplorerForkAddressIndexOverview {
+    pub state: String,
+    pub coverage: String,
+    pub first_indexed_height: Option<u64>,
+    pub indexed_tip_height: Option<u64>,
+    pub indexed_block_count: Option<u64>,
+    pub transaction_count: Option<usize>,
+    pub output_count: Option<usize>,
+    pub address_count: Option<usize>,
+    pub max_blocks: Option<u64>,
+    pub max_transactions: Option<usize>,
+    pub max_outputs: Option<usize>,
+    pub max_addresses: Option<usize>,
+    pub accounted_retained_bytes: Option<usize>,
+    pub max_retained_bytes: Option<usize>,
+    pub work_units: Option<u64>,
+    pub max_work_units: Option<u64>,
+    pub max_block_bytes: Option<usize>,
+    pub max_script_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,18 +325,69 @@ pub(crate) async fn build_overview(
         .await?;
     let fork = match fork_client {
         Some(client) => match client.status().await {
-            Ok(status) => ExplorerForkOverview {
-                state: "connected".to_string(),
-                status: Some(status.into()),
-            },
+            Ok(status) => {
+                let address_index = match client.address_index_stats().await {
+                    Ok(Some(index)) => ExplorerForkAddressIndexOverview {
+                        state: "ready".to_string(),
+                        coverage: index.coverage,
+                        first_indexed_height: Some(index.first_indexed_height),
+                        indexed_tip_height: Some(index.indexed_tip_height),
+                        indexed_block_count: Some(index.indexed_block_count),
+                        transaction_count: Some(index.transaction_count),
+                        output_count: Some(index.output_count),
+                        address_count: Some(index.address_count),
+                        max_blocks: Some(index.limits.max_blocks),
+                        max_transactions: Some(index.limits.max_transactions),
+                        max_outputs: Some(index.limits.max_outputs),
+                        max_addresses: Some(index.limits.max_addresses),
+                        accounted_retained_bytes: Some(index.accounted_retained_bytes),
+                        max_retained_bytes: Some(index.limits.max_retained_bytes),
+                        work_units: Some(index.work_units),
+                        max_work_units: Some(index.limits.max_work_units),
+                        max_block_bytes: Some(index.limits.max_block_bytes),
+                        max_script_bytes: Some(index.limits.max_script_bytes),
+                    },
+                    Ok(None) if client.supports_address_index() => {
+                        ExplorerForkAddressIndexOverview {
+                            state: "ready".to_string(),
+                            coverage: "active_fork_complete".to_string(),
+                            first_indexed_height: Some(status.inherited_tip_height + 1),
+                            indexed_tip_height: Some(status.tip_height),
+                            indexed_block_count: Some(status.active_fork_block_count as u64),
+                            transaction_count: None,
+                            output_count: None,
+                            address_count: None,
+                            max_blocks: None,
+                            max_transactions: None,
+                            max_outputs: None,
+                            max_addresses: None,
+                            accounted_retained_bytes: None,
+                            max_retained_bytes: None,
+                            work_units: None,
+                            max_work_units: None,
+                            max_block_bytes: None,
+                            max_script_bytes: None,
+                        }
+                    }
+                    Ok(None) => unavailable_fork_address_index("not_configured"),
+                    Err(_) => unavailable_fork_address_index("unavailable"),
+                };
+                ExplorerForkOverview {
+                    state: "connected".to_string(),
+                    status: Some(status.into()),
+                    address_index,
+                }
+            }
             Err(_) => ExplorerForkOverview {
                 state: "unavailable".to_string(),
                 status: None,
+                address_index: unavailable_fork_address_index("unavailable"),
             },
         },
         None => ExplorerForkOverview {
             state: "not_configured".to_string(),
             status: None,
+            address_index: unavailable_fork_address_index("not_configured"),
         },
     };
     let inherited_tip_height = fork
@@ -327,9 +402,14 @@ pub(crate) async fn build_overview(
     let experiment_1 = fork.status.as_ref().is_some_and(|status| {
         status.chain_name == "pohw" && status.transaction_consensus == "bitcoin-core-v31.1-full"
     });
-    if experiment_1 {
+    if experiment_1 && fork.address_index.state != "ready" {
         limitations.push(
             "Experiment 1 block and transaction detail comes from the host Core txindex; fork address history is unavailable until a separate bounded address index is configured"
+                .to_string(),
+        );
+    } else if experiment_1 {
+        limitations.push(
+            "Fork address totals cover active-fork transactions and fork-created UTXOs; consumed inherited inputs are identified, but untouched inherited UTXOs are not enumerated by the bounded index"
                 .to_string(),
         );
     }
@@ -361,6 +441,29 @@ pub(crate) async fn build_overview(
         limitations,
         safety_boundaries,
     })
+}
+
+fn unavailable_fork_address_index(state: &str) -> ExplorerForkAddressIndexOverview {
+    ExplorerForkAddressIndexOverview {
+        state: state.to_string(),
+        coverage: "not_available".to_string(),
+        first_indexed_height: None,
+        indexed_tip_height: None,
+        indexed_block_count: None,
+        transaction_count: None,
+        output_count: None,
+        address_count: None,
+        max_blocks: None,
+        max_transactions: None,
+        max_outputs: None,
+        max_addresses: None,
+        accounted_retained_bytes: None,
+        max_retained_bytes: None,
+        work_units: None,
+        max_work_units: None,
+        max_block_bytes: None,
+        max_script_bytes: None,
+    }
 }
 
 pub(crate) async fn fork_block_page(

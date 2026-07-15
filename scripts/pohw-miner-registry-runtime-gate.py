@@ -213,7 +213,9 @@ def verify_candidate(
 
     binding = candidate.get("runtime_binding")
     require(isinstance(binding, dict), "registry candidate has no runtime binding")
+    locked_idena_go = locked_component(lock, "idena-go").get("commit")
     locked_binding = locked_component(lock, "idena-wasm-binding").get("commit")
+    require(binding.get("idena_go_commit") == locked_idena_go, "registry idena-go commit mismatch")
     require(binding.get("idena_wasm_binding_commit") == locked_binding, "registry runtime binding commit mismatch")
     require(binding.get("go") == lock.get("toolchains", {}).get("go"), "registry Go toolchain mismatch")
     require(binding.get("node") == "24.18.0", "registry Node.js toolchain mismatch")
@@ -256,6 +258,19 @@ def verify_runtime_binding(idena_go: Path, expected_commit: str) -> str:
         "resolved idena-wasm-binding does not match compatibility/stack-lock.json",
     )
     return version
+
+
+def verify_exact_clean_checkout(worktree: Path, expected_commit: str) -> str:
+    require(COMMIT_RE.fullmatch(expected_commit) is not None, "invalid expected idena-go commit")
+    inside = run_output(["git", "rev-parse", "--is-inside-work-tree"], worktree)
+    require(inside == "true", "--idena-go is not a Git worktree")
+    actual_commit = run_output(["git", "rev-parse", "HEAD"], worktree)
+    require(actual_commit == expected_commit, "idena-go checkout does not match the compatibility lock")
+    status = run_output(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"], worktree
+    )
+    require(not status, "idena-go checkout is dirty")
+    return actual_commit
 
 
 def clean_environment(temporary: Path, module_cache: str, go_toolchain: str) -> dict[str, str]:
@@ -322,6 +337,8 @@ def main() -> int:
         contract,
         lock,
     )
+    idena_go_commit = candidate["runtime_binding"]["idena_go_commit"]
+    verify_exact_clean_checkout(idena_go, idena_go_commit)
     test_source = resolve_repo_path(root, candidate["runtime_test"]["path"], "runtime test")
     test_payload = read_regular(test_source, MAX_TEST_BYTES, "runtime integration test")
     contract_payload = read_regular(contract, MAX_ARTIFACT_BYTES, "miner-registry WASM")
@@ -378,6 +395,7 @@ def main() -> int:
                 "candidateSha256": candidate_sha256,
                 "contractSha256": contract_sha256,
                 "goVersion": actual_go,
+                "idenaGoCommit": idena_go_commit,
                 "runtimeTestSha256": test_sha256,
                 "status": "passed",
             },

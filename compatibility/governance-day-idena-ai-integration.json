@@ -16,8 +16,8 @@
   "integrationPatch": {
     "path": "integrations/idena-ai-governance-day.patch",
     "format": "git-binary-patch-v1",
-    "size": 114247,
-    "sha256": "dbd28607c03b2a65001b0885407b1eb68ce98ac1a9a79586031b1a2258146850"
+    "size": 116463,
+    "sha256": "d2e8790a19937319ada4652ecfc0de09a0fcbb24a76fd07fe18704f4905a696f"
   },
   "dependencyLocks": [
     {
@@ -27,13 +27,14 @@
     }
   ],
   "sourcePackage": {
-    "canonicalSourceCid": "bafyreiedew34otx523a3axnbzccu23p62bctlrfptc4bk2y2ghjg27w54y",
-    "sourceTreeSha256": "8325b7c74efdd6c1b05da1c8854d6dfed04535c4af98b8156b1a31d26d7edde6",
-    "carSha256": "5444bf1f48c6dc78fb78cef48dab7f7fb6b9e39be814755e94ca5e4057b6c51d",
+    "canonicalSourceCid": "bafyreidis7m3osfsfprkhw4upsx7xgcsq3k3blnupq7utfqhlfvdrxv5ju",
+    "sourceTreeSha256": "6897d9b748b22be2a3db947caffb985286d5b0adb47c3f499607596a38debd4d",
+    "carSha256": "ffb42c52a77d8d9d8ab7a0b7165a63c29fb5c645b5998846c7bb6ce6f2e15d10",
     "fileCount": 713,
-    "totalBytes": 19429469,
+    "totalBytes": 19431917,
     "status": "packaged-local-candidate",
     "removedForbiddenPath": ".env.e2e",
+    "redactionMechanism": "harness-policy-removal-before-packaging",
     "policy": "environment files are rejected from canonical source trees",
     "policyRelaxed": false
   },
@@ -50,6 +51,6 @@
   "limitations": [
     "This patch is transport for a local test and is not a canonical source CID.",
     "No Git branch, publisher identity, or repository location authorizes installation.",
-    "Governance Day deployment remains blocked by unauthenticated epoch anchoring and the missing objective normal-risk classifier."
+    "Authenticated epoch anchoring and objective normal-risk classification pass only in the inactive governance-fork candidate; deployment still requires DAO authorization, independent clean-room builders, public IPFS availability attestations, external audits, and exact committed component revisions."
   ]
 }

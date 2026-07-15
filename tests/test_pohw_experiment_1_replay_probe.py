@@ -24,6 +24,21 @@ class Experiment1ReplayProbeTests(unittest.TestCase):
         )
         self.assertEqual(outcome, "passed-replay-gate-then-rejected-by-later-rule")
 
+        witness_outcome = MODULE.validate_probe_results(
+            {"allowed": False, "reject-reason": MODULE.REPLAY_REJECT_REASON},
+            {
+                "allowed": False,
+                "reject-reason": (
+                    "mempool-script-verify-flag-failed "
+                    "(Witness program was passed an empty witness)"
+                ),
+            },
+        )
+        self.assertEqual(
+            witness_outcome,
+            "passed-replay-gate-then-rejected-by-later-rule",
+        )
+
         with self.assertRaisesRegex(MODULE.ProbeError, "did not reach"):
             MODULE.validate_probe_results(
                 {"allowed": False, "reject-reason": "tx-size-small"},

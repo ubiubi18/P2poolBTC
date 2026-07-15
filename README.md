@@ -28,6 +28,18 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > replay rule. Experiment 0 remains immutable and coinbase-only. Read
 > [Experiment 1](EXPERIMENT-1.md) before building or connecting a miner.
 
+> **Public-join status: blocked technical preview.** The idea, source, tests,
+> and sanitized screenshots may be shared for review. Do not advertise an open
+> mining network yet. The checked-in launch policy remains
+> `blocked-release-readiness`: it machine-records the missing exact source
+> release, CID/CAR/build evidence, second independent build operator, external
+> review, finalized ownerless-registry policy, and independent second-node
+> acceptance. Two matching registry builds by one operator are reproducibility
+> evidence, but do not satisfy builder independence. Runtime wrappers fail
+> closed for `chain=pohw` unless the reviewed Idena anchor policy is mandatory.
+> A ready policy must also bind the canonical deployment-readiness report CID
+> and CAR digest; editable status flags alone cannot open public joining.
+
 > **Bitcoin and Idena risk remain real.** Fork coins have no promised value,
 > but inherited Bitcoin scripts use mainnet keys; exposing one can lose real
 > BTC. A participant saying that an address is empty does not make key reuse
@@ -89,12 +101,13 @@ For new full transaction, inherited UTXO, wallet, and FROST testing, use the
 [Experiment 1 runbook](EXPERIMENT-1.md). It builds the fork from exact Bitcoin
 Core source and keeps the heavy chainstate on the dedicated host, not the Pi.
 
-If you want to join the current network, use the
-[Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md). It builds both Core
-and P2poolBTC from exact source, supports a pruned miner node without an
-explorer index, registers an Idena identity by message signature, and verifies
-Core, sharechain, and block progress locally. No coordinator-signed installer
-or lead-developer release key is trusted.
+The [Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) is the staged
+source-first join procedure. Its public-join interlock intentionally stops at
+the current blocked launch policy. Once the required release, registry, review,
+and second-node evidence exists, the same guide builds both Core and P2poolBTC
+from exact source, supports a pruned miner node without an explorer index, and
+verifies Core, sharechain, and block progress locally. No coordinator-signed
+installer or lead-developer release key is trusted.
 
 Experiment 1 runs in its own source-built Bitcoin Core profile. Always pass
 `-chain=pohw` and use the dedicated fork datadir; never point the experiment at
@@ -128,7 +141,7 @@ boundaries in more detail.
 
 [Experiment 0](EXPERIMENT-0.md) documents the frozen predecessor for historical
 reproduction only. Do not use its activation, launcher, or handoff instructions
-to join the current Experiment 1 network.
+for an Experiment 1 review or future join.
 
 ## Governance Day (Local-Only Candidate)
 
@@ -151,7 +164,13 @@ The current candidate implements:
   append-only canonical history, decentralized revert proposals, and a local
   last-known-good recovery flow that never installs software automatically,
 - deterministic source-tree, patch, parameter, attestation, and CAR packaging
-  with CID and SHA-256 verification, and
+  with CID and SHA-256 verification,
+- a content-addressed, MIT-licensed human/AI development policy adapted from
+  the exact `ai-driven-dev/framework` source revision. It preserves the useful
+  specify, plan, implement, and review sequence, then adds independent builds,
+  public availability, Idena voting, and permissionless execution. Neither an
+  AI agent, GitHub account, maintainer, nor deployer can make a candidate
+  canonical, and
 - an exact-base IdenaAI integration in which `idena.AI` is the primary
   governance interface. Agents can prepare reviews, discussions, and ballot
   drafts, but every file disclosure, mutation, signature, vote, reveal,
@@ -161,22 +180,36 @@ The current candidate implements:
 
 The locked local parameter-set CID is
 `bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`. The locally
-built WASM candidate is 257,979 bytes with CID
-`bafkreif2se5hppplvl2bhv3eszawodfkbnmfl7eq2luotc2rf5x45qxufi` and SHA-256
-`ba913a77bdebaaf413d7649641670caa0b5855fc90d2e8e98b512f6fcec2f42a`.
+built WASM candidate is 289,547 bytes with CID
+`bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq` and SHA-256
+`eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc`.
 These values identify test artifacts; they are not deployment authorization.
-The current contract accepts only critical-class proposals, requires the
-locked 25 IDNA test bond at proposal creation, and rechecks that independent
-data-availability attestations remain valid through finalization, the extended
-grace period, and the full execution window.
+The contract derives normal/critical risk and scope counters from exact,
+bounded base-to-candidate source transitions; proposer labels cannot downgrade
+the derived class. The separate disabled Governance Day fork candidate adds an
+authenticated read-only `epoch_block` host import. Its deterministic patched-
+source CIDs and CAR digests are locked and reconstructed in CI, but candidate
+commits remain unset until the patches are reviewed and committed, so deployment
+still fails closed. Independent builders,
+public pin operators, external auditors, replay/migration evidence, and DAO
+authorization are also absent. Do not replace any of those gates with a
+maintainer flag or trusted key.
 
-Deployment deliberately fails closed for two unresolved issues: the pinned
-WASM host cannot authenticate the Governance Day epoch anchor to a finalized
-Idena validation boundary, and no objective contract-verifiable classifier yet
-distinguishes normal-risk proposals from critical changes. Proposal scope
-counters are also CID-bound but proposer-declared until a bounded on-chain
-proof format exists. Do not deploy this candidate by substituting a maintainer
-flag or trusted key.
+Package and inspect the active development policy with:
+
+```sh
+cargo run -p governance-cli -- development-policy-package \
+  --input integrations/decentralized-aidd/policy.json \
+  --output-dir /tmp/pohw-development-policy
+
+cargo run -p governance-cli -- development-policy-inspect \
+  --car /tmp/pohw-development-policy/development-policy.car
+```
+
+The expected policy CID is
+`bafyreid56pzxhbjuhonxsl5b2a2jjrgrzydgyyvvyfboucqh53y7hzyare`. An AI review
+must bind that exact CID in `agentPolicyCid`; changing the policy creates a new
+content-addressed proposal rather than a silent workflow update.
 
 Run the local protocol demo and the exact-base 33-step IdenaAI flow with:
 
@@ -193,6 +226,7 @@ The second command applies the checked IdenaAI patch only to a disposable
 archive, verifies its deterministic source CID, and performs no deployment,
 Git push, release publication, installation, or automatic rollback. See
 [Governance Day](docs/governance/GOVERNANCE-DAY.md),
+[human/AI development](docs/governance/HUMAN-AI-DEVELOPMENT.md),
 [Governance operations](docs/governance/OPERATIONS.md),
 [known limitations](docs/governance/KNOWN-LIMITATIONS.md), and
 [chain-liveness recovery](docs/governance/chain-liveness-recovery.md).
@@ -224,6 +258,8 @@ Working prototype pieces:
 - read-only local dashboard API,
 - versioned public explorer API for decoded fork transactions, scripts, addresses,
   UTXOs, inherited Bitcoin history, sharechain shares, and aggregate Idena snapshots,
+- bounded host-only Experiment 1 address index with active-chain/reorg checks,
+  inherited-input attribution, and fork-created UTXO history,
 - optional host-only Esplora index integration; pool participants do not run a
   Bitcoin address index or enable Bitcoin Core `txindex`,
 - Vite/React combined explorer and participant dashboard,
@@ -236,18 +272,25 @@ Working prototype pieces:
   read-only governance API/dashboard, and a 33-step cross-repository test, and
 - provider-neutral IdenaAI governance operations, AI-first Builder/DAO/Social
   navigation, optional manual review, disclosure confirmation, and local ballot
-  preparation without automatic signing or submission.
+  preparation without automatic signing or submission, and
+- a deterministic MIT human/AI policy CAR, policy-bound review attestations,
+  and a dashboard lifecycle from specification through permissionless
+  execution without maintainer, GitHub, or autonomous-agent authority.
 
 Not done yet:
 
 - independent external review and multi-node soak testing of Experiment 1,
+- an exact public source release descriptor and a complete evidence-bound
+  fresh-host service installation path,
+- two independent matching miner-registry builds, a verified ownerless Idena
+  deployment receipt, and an activated immutable anchor policy,
 - a public hash-verified fast-sync snapshot for later Experiment 1 participants,
 - production P2Pool fork-choice and anti-eclipse logic,
 - long-running networked ChillDKG/FROST signer daemon,
 - complete idena-go reward extraction for every reward source,
-- authenticated finalized-validation anchoring for Governance Day,
-- an objective on-chain normal-risk classifier and bounded proof of proposal
-  scope,
+- committed component revisions, public replication of the locked source CIDs,
+  replay/migration evidence, and activation parameters for the disabled
+  authenticated-epoch fork candidate,
 - independent clean-room governance builders, public IPFS replication and
   availability attestations, external audit, and WASM deployment, and
 - Idena SDK/bindgen packaging decision for the eventual governed client path.
@@ -282,6 +325,7 @@ docs/governance/          architecture, operations, security, and recovery bound
 | Mining adapter | `127.0.0.1:3333` | Local Stratum v1 frontend |
 | Dashboard UI | `127.0.0.1:5176` | Browser UI, tunnel from a workstation |
 | Dashboard API | `127.0.0.1:40407` | Read-only local status |
+| Fork address index | dashboard API process | Optional bounded host read model; disabled on participant nodes |
 | Bitcoin history index | `127.0.0.1:3002` | Optional host-only Esplora HTTP source |
 | Dashboard dev server | Vite | Local frontend development |
 | Idena RPC | `http://127.0.0.1:9009` | Local `idena-go` source |
@@ -297,14 +341,18 @@ systemd/Caddy host profile, smoke tests, and rollback procedure.
 
 Only the dedicated explorer operator needs the Bitcoin history index. A miner,
 Pi, or observer can use the hosted versioned API and never downloads the full
-Bitcoin chain or address index. Fork consensus validation remains independent
-from the history index.
+Bitcoin chain or either address index. The bounded Experiment 1 index scans only
+the active fork from its pinned first block and is independent of the optional
+multi-terabyte Bitcoin-history index. Fork consensus validation remains
+independent from both read models.
 
 ## Community Experiment
 
 Start with the [Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) when
-joining the current network. It gives the reproducible source-first join path,
-pruned-node option, local success ladder, and safe issue-reporting workflow.
+reviewing the candidate or preparing a future join. Its checked launch-policy
+interlock currently blocks public participation. It gives the reproducible
+source-first path, pruned-node option, local success ladder, and safe
+issue-reporting workflow for use after the release gates pass.
 [Beta Testing P2poolBTC](BETA-TESTING.md) describes the available tester roles.
 
 [Experiment 0](EXPERIMENT-0.md) retains the frozen predecessor's scope,
@@ -918,9 +966,9 @@ The first writable open of an existing large reward ledger after this upgrade bu
 Build the snapshot registry ABI:
 
 ```sh
-corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry install --frozen-lockfile
-corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry build
-corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry install --frozen-lockfile
+corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry build
+corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry test
 ```
 
 Propose a payout schedule:
@@ -1465,7 +1513,7 @@ cargo build --workspace
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m unittest discover -s pohw_idena_rpc/tests -p 'test_*.py' -v
 corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
-corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+corepack pnpm@11.11.0 --dir contracts/idena-snapshot-registry test
 corepack pnpm --dir contracts/idena-code-governance install --frozen-lockfile
 corepack pnpm --dir contracts/idena-code-governance build
 corepack pnpm --dir contracts/idena-code-governance test

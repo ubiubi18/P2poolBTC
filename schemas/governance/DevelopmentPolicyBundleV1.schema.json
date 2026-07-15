@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/DevelopmentPolicyBundleV1.schema.json",
+  "title": "DevelopmentPolicyBundleV1 deterministic human envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "policyId", "ecosystemId", "licenseSpdx", "upstream", "authority", "sandbox", "phases"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"const": "pohw-decentralized-human-ai-development-policy-v1"},
+    "policyId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"},
+    "ecosystemId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"},
+    "licenseSpdx": {"const": "MIT"},
+    "upstream": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repositoryUrl", "commit", "sourceTreeCid", "licenseSpdx"],
+        "properties": {
+          "repositoryUrl": {"type": "string", "format": "uri", "maxLength": 512},
+          "commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "sourceTreeCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+          "licenseSpdx": {"const": "MIT"}
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalAuthority", "githubIsCanonical", "maintainerMergeKeyExists", "agentMayAcceptProposal", "agentMayExecuteProposal", "contractOwnerMayReplaceCanonicalCid", "acceptedExecutionIsPermissionless"],
+      "properties": {
+        "canonicalAuthority": {"const": "idena-wasm-governance-contract"},
+        "githubIsCanonical": {"const": false},
+        "maintainerMergeKeyExists": {"const": false},
+        "agentMayAcceptProposal": {"const": false},
+        "agentMayExecuteProposal": {"const": false},
+        "contractOwnerMayReplaceCanonicalCid": {"const": false},
+        "acceptedExecutionIsPermissionless": {"const": true}
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["networkDisabledByDefault", "walletKeysExposed", "providerSecretsExposedToRepositoryScripts", "readOnlySourceMount", "isolatedTemporaryBuildDirectory", "explicitDependencyFetchPhase", "commandAllowlisting", "resourceLimitsRequired", "completeRedactedCommandLog"],
+      "properties": {
+        "networkDisabledByDefault": {"const": true},
+        "walletKeysExposed": {"const": false},
+        "providerSecretsExposedToRepositoryScripts": {"const": false},
+        "readOnlySourceMount": {"const": true},
+        "isolatedTemporaryBuildDirectory": {"const": true},
+        "explicitDependencyFetchPhase": {"const": true},
+        "commandAllowlisting": {"const": true},
+        "resourceLimitsRequired": {"const": true},
+        "completeRedactedCommandLog": {"const": true}
+      }
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "actor", "humanApprovalRequired", "mutatesCandidateSource", "outputSchema"],
+        "properties": {
+          "id": {"enum": ["specify", "plan", "implement", "review", "build", "publish", "propose", "vote", "execute"]},
+          "actor": {"enum": ["human-ai", "isolated-agent", "independent-reviewer", "independent-builder", "availability-provider", "eligible-identities", "any-caller"]},
+          "humanApprovalRequired": {"type": "boolean"},
+          "mutatesCandidateSource": {"type": "boolean"},
+          "outputSchema": {"enum": ["ChangeProposalV1", "EcosystemManifestV1", "AgentReviewAttestationV1", "BuildAttestationV1", "DataAvailabilityAttestationV1", "VoteReceiptV1"]}
+        }
+      }
+    }
+  }
+}

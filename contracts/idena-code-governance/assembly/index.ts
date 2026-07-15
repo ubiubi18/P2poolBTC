@@ -23,6 +23,7 @@ import {
 } from "./host";
 import {
   epochAttestationGatesPass,
+  ensureCurrentGovernanceEpochAnchored,
   initializeEpochGovernanceProfile,
   isEpochGovernanceEnabled,
   isBoundRevertProposal,
@@ -41,8 +42,6 @@ import {
 } from "./math";
 import { sha256 } from "./sha256";
 import {
-  SCHEDULED_WEIGHT_DELTA_KEY,
-  SCHEDULED_WEIGHT_EPOCH_KEY,
   TOTAL_WEIGHT_KEY,
   WEIGHT_EPOCH_KEY,
   WEIGHT_LAST_CHANGED_BLOCK_KEY,
@@ -50,12 +49,19 @@ import {
   replaceScheduledWeightDelta,
   syncGlobalWeightEpoch,
 } from "./stake_weight";
-import { CanonicalDagCborMap, verifiedCanonicalDagCborMap, verifiedFalseResult } from "./dag_cbor";
+import {
+  CanonicalDagCborMap,
+  verifiedCanonicalDagCborMap,
+  verifiedCanonicalScopeDagCborMap,
+  verifiedCanonicalSourceProofDagCborMap,
+  verifiedFalseResult,
+} from "./dag_cbor";
 import {
   BondRecord,
   MetricsRecord,
   Proposal,
   ReviewRound,
+  REVIEW_ROUND_AVAILABILITY_OPEN,
   REVIEW_ROUND_CLAIMED,
   REVIEW_ROUND_EXPIRED,
   REVIEW_ROUND_FROZEN,
@@ -118,6 +124,7 @@ export {
   previewVotingPower,
   revealEpochBallot,
   finalizeEpochVoting,
+  finalizeEpochVotingForEpoch,
 } from "./epoch_governance";
 
 export { allocate };
@@ -254,7 +261,12 @@ export function beginUnbonding(amountPtr: usize): usize {
 export function finalizeUnbonding(): usize {
   ensureInitialized();
   requireNoPayment();
+  ensureCurrentGovernanceEpochAnchored();
   const address = callerHex();
+  assert(
+    stakeSlashReservationCount(address) == 0,
+    "unbonding cannot finalize while slashable governance bonds remain unsettled",
+  );
   // A matured pending lot is already reflected in the settled global weight.
   // Materialize it before replacing this voter's nonlinear aggregate weight.
   activateStakeFor(address);
@@ -265,11 +277,13 @@ export function finalizeUnbonding(): usize {
   assert(currentEpoch() >= parseU16(fields[2]), "unbonding delay has not elapsed");
   const oldStake = activeStake(address);
   assert(oldStake >= amount, "slash or state change reduced the withdrawable stake");
-  const oldWeight = registeredWeight(address, oldStake);
+  const oldWeight = recordedWeight(address, oldStake);
   appendWithdrawalCheckpoint(address, amount, false);
   const newStake = oldStake - amount;
   setString(activeStakeKey(address), newStake.toString());
-  replaceGlobalWeight(oldWeight, registeredWeight(address, newStake));
+  const newWeight = recordedWeight(address, newStake);
+  replaceGlobalWeight(oldWeight, newWeight);
+  refreshPendingStakeWeight(address, loadMetrics(address), newStake, newWeight);
   removeKey(key);
   emitVersionedEvent("GovernanceWithdrawalFinalizedV1", [address, amount.toString()]);
   transfer(hexToBytes(address), amount);
@@ -290,6 +304,7 @@ export function registerIdentityMetricsProof(
 ): usize {
   ensureInitialized();
   requireNoPayment();
+  ensureCurrentGovernanceEpochAnchored();
   const state = argumentString(statePtr, 16);
   const finalized = parseU64(argumentString(finalizedPtr, 20));
   const reported = parseU64(argumentString(reportedPtr, 20));
@@ -313,12 +328,14 @@ export function registerIdentityMetricsProof(
   const address = bytesToHex(addressBytes);
   activateStakeFor(address);
   const oldStake = activeStake(address);
-  const oldWeight = registeredWeight(address, oldStake);
+  const oldWeight = recordedWeight(address, oldStake);
   const record = new MetricsRecord(
     state, finalized, reported, trust, sourceEpoch, sourceHeight, sourceHash, root, currentBlock(),
   );
   setString(metricsKey(address), record.encode());
-  replaceGlobalWeight(oldWeight, effectiveVoteWeight(oldStake, statusBps(state), trust));
+  const newWeight = weightForMetrics(oldStake, state, trust);
+  replaceGlobalWeight(oldWeight, newWeight);
+  refreshPendingStakeWeight(address, record, oldStake, newWeight);
   emitVersionedEvent("IdentityMetricsRegisteredV1", [address, root, sourceEpoch.toString()]);
   return okJson("root", root);
 }
@@ -360,6 +377,12 @@ export function submitIdentityMetricsAttestation(
     + "|" + sourceHash + "|" + replayStartHeight.toString() + "|" + replayCommitment
     + "|" + implementationCid;
   const descriptorHash = hashString("IDENA_GOV_METRICS_CERTIFICATION_V1\x00" + descriptor);
+  const certifiedKey = metricsCertificationFinalizedDescriptorKey(root, sourceEpoch);
+  const certifiedDescriptor = getString(certifiedKey);
+  assert(
+    certifiedDescriptor.length == 0 || certifiedDescriptor == descriptorHash,
+    "identity metrics descriptor differs from the immutable certified descriptor",
+  );
   const marker = metricsCertificationOwnerKey(root, sourceEpoch, owner);
   assert(!hasKey(marker), "identity may certify a metrics root only once");
   setString(marker, cid + "|" + descriptorHash);
@@ -369,13 +392,8 @@ export function submitIdentityMetricsAttestation(
   const oldCount = getString(countKey);
   const count = checkedU32Add(oldCount.length == 0 ? 0 : parseU32(oldCount), 1);
   setString(countKey, count.toString());
-  if (count >= MIN_IDENTITY_METRICS_ATTESTATIONS) {
-    const certifiedKey = metricsCertificationFinalizedDescriptorKey(root, sourceEpoch);
-    if (!hasKey(certifiedKey)) {
-      setString(certifiedKey, descriptorHash);
-    } else if (getString(certifiedKey) != descriptorHash) {
-      setString(metricsCertificationConflictKey(root, sourceEpoch), "1");
-    }
+  if (count >= MIN_IDENTITY_METRICS_ATTESTATIONS && !hasKey(certifiedKey)) {
+    setString(certifiedKey, descriptorHash);
   }
   emitVersionedEvent("MetricsAttestationSubmittedV1", [root, sourceEpoch.toString(), descriptorHash, cid, owner, count.toString()]);
   return metricsCertificationJson(root, sourceEpoch);
@@ -399,6 +417,8 @@ export function openReviewRound(
   patchDagCborHexPtr: usize,
   pinsetCidPtr: usize,
   pinsetDagCborHexPtr: usize,
+  scopeCidPtr: usize,
+  scopeDagCborHexPtr: usize,
 ): usize {
   ensureInitialized();
   const opener = callerHex();
@@ -407,10 +427,12 @@ export function openReviewRound(
   const candidate = argumentString(candidateCidPtr, 128);
   const patch = argumentString(patchCidPtr, 128);
   const pinsetCid = argumentString(pinsetCidPtr, 128);
+  const scopeCid = argumentString(scopeCidPtr, 128);
   assert(parent == getString(CANONICAL_CID_KEY), "review round parent is stale");
   assert(isCanonicalManifestCid(candidate), "candidate ecosystem CID must be canonical DAG-CBOR CIDv1");
   assert(isCanonicalManifestCid(patch), "patch CID must be canonical DAG-CBOR CIDv1");
   assert(isCanonicalManifestCid(pinsetCid), "pinset CID must be canonical DAG-CBOR CIDv1");
+  assert(isCanonicalManifestCid(scopeCid), "scope evidence CID must be canonical DAG-CBOR CIDv1");
   const parentBinding = validateEcosystemManifest(
     verifiedCanonicalDagCborMap(parent, argumentString(parentDagCborHexPtr, 131072)),
     "",
@@ -426,9 +448,17 @@ export function openReviewRound(
     parentBinding.sources,
     candidateBinding.sources,
   );
+  const scopeBinding = validateProposalScopeEvidence(
+    verifiedCanonicalScopeDagCborMap(scopeCid, argumentString(scopeDagCborHexPtr, 2800000)),
+    parent,
+    candidate,
+    patch,
+    patchBinding,
+  );
   for (let i = 0; i < patchBinding.requiredCids.length; i++) {
     candidateBinding.requiredCids.push(patchBinding.requiredCids[i]);
   }
+  candidateBinding.requiredCids.push(scopeCid);
   const pinset = validatePinsetManifest(
     verifiedCanonicalDagCborMap(pinsetCid, argumentString(pinsetDagCborHexPtr, 131072)),
     candidate,
@@ -444,7 +474,7 @@ export function openReviewRound(
   const end = checkedBlockAdd(opened, REVIEW_BLOCKS);
   const claimDeadline = checkedBlockAdd(end, REVIEW_BLOCKS);
   const id = hashString(
-    "IDENA_GOV_REVIEW_ROUND_V1\x00" + parent + "|" + candidate + "|" + patch + "|" + opener + "|" + opened.toString(),
+    "IDENA_GOV_REVIEW_ROUND_V2\x00" + parent + "|" + candidate + "|" + patch + "|" + scopeCid + "|" + opener + "|" + opened.toString(),
   );
   const round = new ReviewRound(
     id, parent, candidate, patch, candidateBinding.sourceBinding, patchBinding.affectedSourceBinding,
@@ -454,18 +484,22 @@ export function openReviewRound(
     bond.toString(), "0", false,
   );
   saveReviewRound(round);
+  setString(reviewCandidateArtifactCountKey(id), candidateBinding.artifactKeys.length.toString());
   for (let i = 0; i < candidateBinding.artifactKeys.length; i++) {
     setString(candidateArtifactKey(id, candidateBinding.artifactKeys[i]), "1");
   }
   setString(reviewSourceTransitionKey(id), patchBinding.sourceTransitionBinding);
+  setString(reviewScopeEvidenceKey(id), scopeCid);
+  setString(reviewScopeRiskKey(id), scopeBinding.risk);
+  setString(reviewScopeCountersKey(id), scopeBinding.counters());
   for (let i = 0; i < pinset.length; i++) {
     setString(reviewPinsetMemberKey(id, pinset[i]), "1");
     addAvailabilityRequirement(id, pinset[i]);
   }
   setString(candidateKey, id);
   emitVersionedEvent(
-    "ReviewRoundOpenedV1",
-    [id, parent, candidate, patch, pinsetCid, opener, end.toString(), claimDeadline.toString()],
+    "ReviewRoundOpenedV2",
+    [id, parent, candidate, patch, scopeCid, pinsetCid, opener, end.toString(), claimDeadline.toString()],
   );
   return reviewRoundStateJson(round);
 }
@@ -474,28 +508,38 @@ export function freezeReviewRound(reviewRoundIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
   const round = loadReviewRound(validReviewRoundId(argumentString(reviewRoundIdPtr, 64)));
-  assert(round.state == REVIEW_ROUND_OPEN, "review round is not open");
-  assert(currentBlock() >= round.endBlock, "review round submission deadline has not elapsed");
   assert(currentBlock() <= round.claimDeadline, "review round claim deadline has elapsed");
   assert(round.parentCid == getString(CANONICAL_CID_KEY), "review round parent is stale");
-  assert(round.agentLeafCount > 0 && round.buildLeafCount > 0 && round.availabilityLeafCount > 0, "review round evidence set is incomplete");
-  round.agentRoot = buildAttestationCommitmentRoot(
-    "agent_review_v1", loadReviewEntries("agent", round.id, round.agentLeafCount),
-  );
-  round.buildRoot = buildAttestationCommitmentRoot(
-    "build_attestation_v1", loadReviewEntries("build", round.id, round.buildLeafCount),
-  );
+  if (round.state == REVIEW_ROUND_OPEN) {
+    assert(currentBlock() >= round.endBlock, "review evidence submission deadline has not elapsed");
+    assert(round.agentLeafCount > 0 && round.buildLeafCount > 0, "review evidence set is incomplete");
+    round.agentRoot = buildAttestationCommitmentRoot(
+      "agent_review_v1", loadReviewEntries("agent", round.id, round.agentLeafCount),
+    );
+    round.buildRoot = buildAttestationCommitmentRoot(
+      "build_attestation_v1", loadReviewEntries("build", round.id, round.buildLeafCount),
+    );
+    recomputeAgentAggregates(round);
+    selectBuildDigest(round);
+    round.state = REVIEW_ROUND_AVAILABILITY_OPEN;
+    saveReviewRound(round);
+    emitVersionedEvent("ReviewEvidenceFrozenV1", [round.id, round.agentRoot, round.buildRoot]);
+    return reviewRoundStateJson(round);
+  }
+  assert(round.state == REVIEW_ROUND_AVAILABILITY_OPEN, "review round is not awaiting availability evidence");
+  assert(round.availabilityLeafCount > 0, "review round availability set is incomplete");
   round.availabilityRoot = buildAttestationCommitmentRoot(
     "data_availability_v1", loadReviewEntries("availability", round.id, round.availabilityLeafCount),
   );
   finalizeAvailabilityCoverage(round);
-  selectBuildDigest(round);
+  const availabilityMinimum: u32 = getString(reviewScopeRiskKey(round.id)) == "normal" ? 2 : 3;
+  assert(
+    round.availabilityOwnerCount >= availabilityMinimum,
+    "review round lacks complete independent data-availability coverage",
+  );
   round.state = REVIEW_ROUND_FROZEN;
   saveReviewRound(round);
-  emitVersionedEvent(
-    "ReviewRoundFrozenV1",
-    [round.id, round.agentRoot, round.buildRoot, round.availabilityRoot],
-  );
+  emitVersionedEvent("ReviewRoundFrozenV2", [round.id, round.agentRoot, round.buildRoot, round.availabilityRoot]);
   return reviewRoundStateJson(round);
 }
 
@@ -503,7 +547,12 @@ export function expireReviewRound(reviewRoundIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
   const round = loadReviewRound(validReviewRoundId(argumentString(reviewRoundIdPtr, 64)));
-  assert(round.state == REVIEW_ROUND_OPEN || round.state == REVIEW_ROUND_FROZEN, "review round cannot expire");
+  assert(
+    round.state == REVIEW_ROUND_OPEN
+      || round.state == REVIEW_ROUND_AVAILABILITY_OPEN
+      || round.state == REVIEW_ROUND_FROZEN,
+    "review round cannot expire",
+  );
   const stale = round.parentCid != getString(CANONICAL_CID_KEY);
   assert(stale || currentBlock() > round.claimDeadline, "review round claim deadline has not elapsed");
   let refund = percentage(round.bondAmount(), 75);
@@ -588,7 +637,8 @@ export function createProposal(
     argumentString(proposalDagCborHexPtr, 131072),
   );
   payload.requireExactKeys(proposalPayloadKeys());
-  assert(parseU16(payload.unsigned("schemaVersion")) == 1, "proposal schema version is unsupported");
+  assert(parseU16(payload.unsigned("schemaVersion")) == 2, "proposal schema version is unsupported");
+  const scopeCid = payload.string("scopeEvidenceCid");
   const proposalParameterCid = payload.string("governanceParameterSetCid");
   const parent = payload.string("parentCanonicalEcosystemCid");
   const candidateCid = payload.string("candidateEcosystemCid");
@@ -622,8 +672,10 @@ export function createProposal(
   assert(isCanonicalManifestCid(candidateCid), "candidate ecosystem CID must be canonical DAG-CBOR CIDv1");
   assert(isCanonicalManifestCid(patchCid), "patch CID must be canonical DAG-CBOR CIDv1");
   assert(isRiskClass(risk), "unknown proposal risk class");
+  assert(scopeCid == getString(reviewScopeEvidenceKey(round.id)), "proposal scope evidence does not match its review round");
+  assert(risk == getString(reviewScopeRiskKey(round.id)), "proposal risk differs from the objective scope classifier");
+  assert(proposalDeclaredCounters(payload) == getString(reviewScopeCountersKey(round.id)), "proposal counters differ from verified scope evidence");
   validateProposalDeclaredLimits(payload, risk);
-  assert(risk != "normal", "normal proposal gates are disabled until an objective risk classifier is deployed");
   assert(isCanonicalHash(agentRoot) && isCanonicalHash(buildRoot) && isCanonicalHash(availabilityRoot), "attestation roots must be lowercase SHA-256");
   assert(waiverCid.length == 0 || (risk != "normal" && isCanonicalManifestCid(waiverCid)), "critical waiver must be an immutable CID on a critical proposal");
   assert(releaseManifestCid.length == 0 || isCanonicalManifestCid(releaseManifestCid), "release manifest must use canonical DAG-CBOR CIDv1");
@@ -753,6 +805,7 @@ export function submitAgentAttestation(
   const round = loadOpenReviewRound(argumentString(reviewRoundIdPtr, 64));
   const owner = callerHex();
   requireCurrentEligibleMetrics(owner);
+  assert(activeStake(owner) >= parseAmount(MIN_ACTIVE_STAKE_ATOMS), "reviewer must maintain minimum active governance stake");
   const cid = argumentString(attestationCidPtr, 128);
   const payload = verifiedCanonicalDagCborMap(cid, argumentString(attestationDagCborHexPtr, 131072));
   payload.requireExactKeys(agentAttestationPayloadKeys());
@@ -788,6 +841,7 @@ export function submitAgentAttestation(
   setString(marker, fields);
   setString(attestationBondKey("agent", round.id, cid), new BondRecord(owner, bond.toString(), false, false).encode());
   if (verdict == "approve" && testsPassed) {
+    setString(agentQualifyingKey(round.id, cid), "1");
     if (markUnique("agent-instance", round.id, hashString(owner + "~" + modelFamily))) {
       round.agentCount = checkedU32Add(round.agentCount, 1);
     }
@@ -800,7 +854,9 @@ export function submitAgentAttestation(
   } else {
     assert(verdict == "approve" || verdict == "reject" || verdict == "abstain", "invalid agent verdict");
   }
-  round.unresolvedCriticalCount = checkedU32Add(round.unresolvedCriticalCount, unresolved);
+  if (unresolved > 0 && markUnique("agent-critical-owner", round.id, owner)) {
+    round.unresolvedCriticalCount = checkedU32Add(round.unresolvedCriticalCount, 1);
+  }
   saveReviewRound(round);
   emitVersionedEvent("AgentAttestationSubmittedV1", [round.id, cid, owner, modelFamily]);
   return reviewRoundStateJson(round);
@@ -816,6 +872,7 @@ export function submitBuildAttestation(
   const round = loadOpenReviewRound(argumentString(reviewRoundIdPtr, 64));
   const owner = callerHex();
   requireCurrentEligibleMetrics(owner);
+  assert(activeStake(owner) >= parseAmount(MIN_ACTIVE_STAKE_ATOMS), "builder must maintain minimum active governance stake");
   const cid = argumentString(attestationCidPtr, 128);
   const payload = verifiedCanonicalDagCborMap(cid, argumentString(attestationDagCborHexPtr, 131072));
   payload.requireExactKeys(buildAttestationPayloadKeys());
@@ -839,6 +896,7 @@ export function submitBuildAttestation(
   assert(isSafeLabel(runtime, 31) && isSafeLabel(architecture, 31) && isSafeLabel(platform, 64), "invalid platform-family label");
   assert(payloadOwner == owner, "build attestation owner does not match the caller");
   assert(payload.string("candidateEcosystemCid") == round.candidateCid, "build attestation candidate mismatch");
+  assert(payload.string("scopeEvidenceCid") == getString(reviewScopeEvidenceKey(round.id)), "build attestation scope evidence mismatch");
   assert(sourceBinding == round.sourceBinding, "build attestation source set does not match the candidate ecosystem");
   assert(toolchainBinding == round.toolchainBinding, "build attestation toolchain does not match the candidate ecosystem");
   assert(payload.string("authentication") == "on-chain-submitter", "unsupported build attestation authentication");
@@ -858,6 +916,7 @@ export function submitBuildAttestation(
   setString(marker, fields);
   setString(attestationBondKey("build", round.id, cid), new BondRecord(owner, bond.toString(), false, false).encode());
   if (testsPassed) {
+    setString(buildPassingKey(round.id, cid), "1");
     if (markUnique("build-digest", round.id, digest)) {
       const count = storedU32(buildDigestCountKey(round.id));
       assert(count < MAX_COMMITTED_ATTESTATIONS, "build digest group limit reached");
@@ -882,9 +941,10 @@ export function submitDataAvailabilityAttestation(
   attestationDagCborHexPtr: usize,
 ): usize {
   ensureInitialized();
-  const round = loadOpenReviewRound(argumentString(reviewRoundIdPtr, 64));
+  const round = loadAvailabilityReviewRound(argumentString(reviewRoundIdPtr, 64));
   const owner = callerHex();
   requireCurrentEligibleMetrics(owner);
+  assert(activeStake(owner) >= parseAmount(MIN_ACTIVE_STAKE_ATOMS), "availability operator must maintain minimum active governance stake");
   const cid = argumentString(attestationCidPtr, 128);
   const payload = verifiedCanonicalDagCborMap(cid, argumentString(attestationDagCborHexPtr, 131072));
   payload.requireExactKeys(dataAvailabilityPayloadKeys());
@@ -900,10 +960,7 @@ export function submitDataAvailabilityAttestation(
   assert(payload.string("authentication") == "on-chain-submitter", "unsupported availability attestation authentication");
   assert(parseU64(payload.unsigned("observedAtBlockOrTimestamp")) <= currentBlock(), "availability attestation is from the future");
   assert(
-    expiresAtBlock >= checkedBlockAdd(
-      checkedBlockAdd(maxReviewChallengeEnd(round), TIMELOCK_BLOCKS),
-      EXECUTION_WINDOW_BLOCKS,
-    ),
+    expiresAtBlock >= maxReviewExecutionExpiry(round),
     "availability expires before the latest possible execution deadline",
   );
   const pinsetCid = payload.string("pinsetCid");
@@ -922,10 +979,7 @@ export function submitDataAvailabilityAttestation(
     setString(availabilityVerifiedCidKey(round.id, cid, verifiedCids[i]), "1");
   }
   setString(availabilityAvailableKey(round.id, cid), available ? "1" : "0");
-  const expiryKey = reviewAvailabilityMinimumExpiryKey(round.id);
-  if (!hasKey(expiryKey) || expiresAtBlock < parseU64(getString(expiryKey))) {
-    setString(expiryKey, expiresAtBlock.toString());
-  }
+  setString(availabilityExpiryKey(round.id, cid), expiresAtBlock.toString());
   reserveStakeSlashSlot(owner);
   appendReviewEntry(round, "availability", fields);
   setString(marker, fields);
@@ -1055,6 +1109,7 @@ export function submitObjectiveChallenge(
     assert(payload.string("testResultsCid") == evidenceCid, "builder result CID does not match challenge evidence");
     assert(isCanonicalHash(digest) && isSafeLabel(runtime, 31) && isSafeLabel(architecture, 31), "invalid builder challenge evidence");
     assert(payload.string("candidateEcosystemCid") == proposal.candidateCid, "challenged build candidate mismatch");
+    assert(payload.string("scopeEvidenceCid") == getString(reviewScopeEvidenceKey(proposal.reviewRoundId)), "challenged build scope evidence mismatch");
     const fields = cid + "|" + digest + "|" + platform + "|" + owner;
     assertAttestationProof(proposal.buildRoot, "build_attestation_v1", fields, indexPtr, leafCountPtr, siblingsPtr);
     verifiedFalseResult(evidenceCid, evidenceHex, "passed");
@@ -1076,6 +1131,13 @@ export function submitObjectiveChallenge(
     assert(false, "unsupported objective challenge type");
   }
   assert(valid, "challenge payload does not prove an objective violation");
+  const bondKind = kind == "agent_test_result" ? "agent"
+    : kind == "availability_probe" ? "availability" : "build";
+  assert(
+    !hasKey(attestationInvalidKey(bondKind, proposal.reviewRoundId, cid)),
+    "challenged attestation is already invalidated",
+  );
+  setString(challengePreviousStateKey(proposal.id), proposal.state.toString());
   proposal.state = STATE_CHALLENGED;
   proposal.challengeKind = kind;
   proposal.challengeTarget = cid;
@@ -1098,10 +1160,6 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
   const record = BondRecord.decode(getString(targetKey));
   assert(!record.slashed && !record.claimed, "challenged attestation bond is already settled");
   const proposerIsOffender = record.owner == proposal.proposer;
-  const proposerRefund = percentage(proposal.bondAmount(), proposerIsOffender ? 50 : 90);
-  const proposerSlash = proposal.bondAmount() - proposerRefund;
-  proposal.refundableBond = proposerRefund.toString();
-  proposal.state = STATE_REJECTED;
   const targetBond = record.amountValue();
   let targetSlash = targetBond;
   let targetRefund = u128.Zero;
@@ -1113,29 +1171,74 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
     record.slashed = true;
   }
   setString(targetKey, record.encode());
+  setString(attestationInvalidKey(bondKind, proposal.reviewRoundId, proposal.challengeTarget), "1");
 
+  const round = loadReviewRound(proposal.reviewRoundId);
+  recomputeAgentAggregates(round);
+  selectBuildDigest(round);
+  finalizeAvailabilityCoverage(round);
+  saveReviewRound(round);
+  proposal.agentCount = round.agentCount;
+  proposal.agentModelCount = round.agentModelCount;
+  proposal.agentOwnerCount = round.agentOwnerCount;
+  proposal.unresolvedCriticalCount = round.unresolvedCriticalCount;
+  proposal.builderOwnerCount = round.builderOwnerCount;
+  proposal.builderPlatformCount = round.builderPlatformCount;
+  proposal.builderConflictCount = round.builderConflictCount;
+  proposal.availabilityOwnerCount = round.availabilityOwnerCount;
+  proposal.artifactDigest = round.artifactDigest;
+
+  const previousStateValue = getString(challengePreviousStateKey(proposal.id));
+  assert(previousStateValue.length > 0, "challenged proposal is missing its previous state");
+  const previousState = <u8>parseU16(previousStateValue);
+  assert(
+    previousState == STATE_ACCEPTED_PENDING_CHALLENGE || previousState == STATE_ACCEPTED_PENDING_GRACE,
+    "challenged proposal previous state is invalid",
+  );
+  proposal.state = previousState;
+  const remainingGatesPass = isEpochGovernanceEnabled()
+    ? epochAttestationGatesPass(proposal)
+    : attestationGatesPass(proposal);
+
+  let proposerRefund = u128.Zero;
+  let proposerSlash = u128.Zero;
   let proposerStakeSlash = u128.Zero;
   let offenderStakeSlash = u128.Zero;
   if (proposerIsOffender) {
+    proposerRefund = percentage(proposal.bondAmount(), 50);
+    proposerSlash = proposal.bondAmount() - proposerRefund;
+    proposal.refundableBond = proposerRefund.toString();
+    proposal.state = STATE_REJECTED;
     proposerStakeSlash = slashGovernanceStake(proposal.proposer);
     setString(proposalSlashReservationConsumedKey(proposal.id), "1");
     releaseStakeSlashSlot(record.owner);
+    releaseReviewCandidateForProposal(proposal);
   } else {
-    releaseStakeSlashSlot(proposal.proposer);
     offenderStakeSlash = slashGovernanceStake(record.owner);
+    if (remainingGatesPass) {
+      proposal.state = previousState;
+    } else {
+      proposerRefund = proposal.bondAmount();
+      proposal.refundableBond = proposerRefund.toString();
+      proposal.state = STATE_EXPIRED;
+      releaseStakeSlashSlot(proposal.proposer);
+      setString(proposalSlashReservationConsumedKey(proposal.id), "1");
+      releaseReviewCandidateForProposal(proposal);
+    }
   }
   setString(attestationSlashReservationConsumedKey(bondKind, proposal.reviewRoundId, proposal.challengeTarget), "1");
-  releaseReviewCandidateForProposal(proposal);
+  removeKey(challengePreviousStateKey(proposal.id));
   saveProposal(proposal);
   if (!proposerSlash.isZero()) burn(proposerSlash);
   if (!targetSlash.isZero()) burn(targetSlash);
   if (!proposerStakeSlash.isZero()) burn(proposerStakeSlash);
   if (!offenderStakeSlash.isZero()) burn(offenderStakeSlash);
   emitVersionedEvent(
-    "ObjectiveChallengeResolvedV1",
+    "ObjectiveChallengeResolvedV2",
     [
       proposal.id, proposal.challengeKind, proposerSlash.toString(), targetSlash.toString(),
       targetRefund.toString(), proposerStakeSlash.toString(), offenderStakeSlash.toString(),
+      remainingGatesPass ? "continued" : "terminal",
     ],
   );
   return proposalStateJson(proposal);
@@ -1157,12 +1260,24 @@ export function advanceChallengePeriod(proposalIdPtr: usize): usize {
 export function executeProposal(proposalIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
+  ensureCurrentGovernanceEpochAnchored();
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_ACCEPTED_PENDING_EXECUTION, "proposal is not executable");
   assert(currentBlock() >= proposal.executeAfter, "execution timelock has not elapsed");
   assert(
     currentBlock() <= checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS),
     "proposal execution window has elapsed",
+  );
+  const availabilityExpiry = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
+  assert(availabilityExpiry.length > 0, "proposal has no live data-availability coverage");
+  assert(
+    parseU64(availabilityExpiry) >= currentBlock(),
+    "proposal data-availability coverage has elapsed",
+  );
+  const requiredAvailabilityProviders: u32 = proposal.isCritical() ? 3 : 2;
+  assert(
+    proposal.availabilityOwnerCount >= requiredAvailabilityProviders,
+    "proposal lacks independent data-availability providers",
   );
   if (proposal.parentCid != getString(CANONICAL_CID_KEY)) {
     settleStale(proposal);
@@ -1173,11 +1288,10 @@ export function executeProposal(proposalIdPtr: usize): usize {
   if (proposal.candidateMetricsRoot.length > 0) {
     setString(METRICS_ROOT_KEY, proposal.candidateMetricsRoot);
     setString(METRICS_EPOCH_KEY, proposal.candidateMetricsEpoch.toString());
-    setString(TOTAL_WEIGHT_KEY, "0");
-    setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
-    setString(WEIGHT_EPOCH_KEY, currentEpoch().toString());
-    removeKey(SCHEDULED_WEIGHT_EPOCH_KEY);
-    removeKey(SCHEDULED_WEIGHT_DELTA_KEY);
+    // Preserve both active and scheduled registered weight. Until an identity
+    // refreshes its proof, its prior contribution remains in the denominator
+    // but cannot vote against the new metrics root. Refreshing replaces the
+    // active contribution and rebases any pending activation delta atomically.
   }
   proposal.state = STATE_EXECUTED;
   proposal.refundableBond = proposal.bond;
@@ -1207,7 +1321,9 @@ export function expireProposal(proposalIdPtr: usize): usize {
   const expiredReview = proposal.state == STATE_REVIEW_OPEN && currentBlock() >= proposal.votingEnd;
   const expiredExecution = proposal.state == STATE_ACCEPTED_PENDING_EXECUTION
     && currentBlock() > checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
-  assert(expiredDraft || expiredReview || expiredExecution, "proposal is not expired");
+  const expiredGrace = proposal.state == STATE_ACCEPTED_PENDING_GRACE
+    && currentBlock() > checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
+  assert(expiredDraft || expiredReview || expiredExecution || expiredGrace, "proposal is not expired");
   const refund = percentage(proposal.bondAmount(), 75);
   const slash = proposal.bondAmount() - refund;
   proposal.state = STATE_EXPIRED;
@@ -1349,6 +1465,7 @@ function ensureInitialized(): void {
 }
 
 function activateStakeFor(address: string): bool {
+  ensureCurrentGovernanceEpochAnchored();
   syncGlobalWeightEpoch();
   const key = pendingStakeKey(address);
   if (!hasKey(key)) return false;
@@ -1405,6 +1522,7 @@ function releaseStakeSlashSlot(address: string): void {
 }
 
 function slashGovernanceStake(address: string): u128 {
+  ensureCurrentGovernanceEpochAnchored();
   activateStakeFor(address);
   const oldStake = activeStake(address);
   const slash = percentage(oldStake, FRAUDULENT_ACTOR_STAKE_SLASH_PERCENT);
@@ -1412,11 +1530,13 @@ function slashGovernanceStake(address: string): u128 {
     releaseStakeSlashSlot(address);
     return u128.Zero;
   }
-  const oldWeight = registeredWeight(address, oldStake);
+  const oldWeight = recordedWeight(address, oldStake);
   appendWithdrawalCheckpoint(address, slash, true);
   const newStake = oldStake - slash;
   setString(activeStakeKey(address), newStake.toString());
-  replaceGlobalWeight(oldWeight, registeredWeight(address, newStake));
+  const newWeight = recordedWeight(address, newStake);
+  replaceGlobalWeight(oldWeight, newWeight);
+  refreshPendingStakeWeight(address, loadMetrics(address), newStake, newWeight);
   const withdrawal = withdrawalKey(address);
   if (hasKey(withdrawal)) {
     const fields = getString(withdrawal).split("~");
@@ -1453,12 +1573,49 @@ function stakeAt(address: string, snapshotEpoch: u16, snapshotBlock: u64): u128 
 }
 
 function registeredWeight(address: string, stake: u128): u128 {
-  if (stake < parseAmount(MIN_ACTIVE_STAKE_ATOMS)) return u128.Zero;
   const key = metricsKey(address);
   if (!hasKey(key)) return u128.Zero;
   const metrics = MetricsRecord.decode(getString(key));
   if (metrics.root != getString(METRICS_ROOT_KEY) || metrics.sourceEpoch != parseStoredU16(METRICS_EPOCH_KEY)) return u128.Zero;
-  return effectiveVoteWeight(stake, statusBps(metrics.state), metrics.trustBps);
+  return weightForMetrics(stake, metrics.state, metrics.trustBps);
+}
+
+function recordedWeight(address: string, stake: u128): u128 {
+  const key = metricsKey(address);
+  if (!hasKey(key)) return u128.Zero;
+  const metrics = MetricsRecord.decode(getString(key));
+  return weightForMetrics(stake, metrics.state, metrics.trustBps);
+}
+
+function weightForMetrics(stake: u128, state: string, trust: u16): u128 {
+  if (stake < parseAmount(MIN_ACTIVE_STAKE_ATOMS)) return u128.Zero;
+  return effectiveVoteWeight(stake, statusBps(state), trust);
+}
+
+function refreshPendingStakeWeight(
+  address: string,
+  metrics: MetricsRecord,
+  active: u128,
+  activeWeight: u128,
+): void {
+  const key = pendingStakeKey(address);
+  if (!hasKey(key)) return;
+  const pending = getString(key).split("~");
+  assert(pending.length == 4, "corrupt pending stake record");
+  const amount = parseAmount(pending[0]);
+  const activationEpoch = parseU16(pending[1]);
+  assert(activationEpoch > currentEpoch(), "matured pending stake was not activated before metrics refresh");
+  const oldDelta = parseAmount(pending[3]);
+  const projectedStake = active + amount;
+  assert(projectedStake >= active, "pending stake projection overflow");
+  const projectedWeight = weightForMetrics(projectedStake, metrics.state, metrics.trustBps);
+  assert(projectedWeight >= activeWeight, "metrics refresh would create a negative pending weight delta");
+  const newDelta = projectedWeight - activeWeight;
+  replaceScheduledWeightDelta(activationEpoch, oldDelta, newDelta);
+  setString(
+    key,
+    amount.toString() + "~" + activationEpoch.toString() + "~" + metrics.root + "~" + newDelta.toString(),
+  );
 }
 
 function requireCurrentEligibleMetrics(address: string): MetricsRecord {
@@ -1479,6 +1636,14 @@ function loadOpenReviewRound(idValue: string): ReviewRound {
   const round = loadReviewRound(validReviewRoundId(idValue));
   assert(round.state == REVIEW_ROUND_OPEN, "review round is not open");
   assert(currentBlock() < round.endBlock, "review round submission deadline has elapsed");
+  assert(round.parentCid == getString(CANONICAL_CID_KEY), "review round parent is stale");
+  return round;
+}
+
+function loadAvailabilityReviewRound(idValue: string): ReviewRound {
+  const round = loadReviewRound(validReviewRoundId(idValue));
+  assert(round.state == REVIEW_ROUND_AVAILABILITY_OPEN, "review evidence must be frozen before availability attestation");
+  assert(currentBlock() <= round.claimDeadline, "review round claim deadline has elapsed");
   assert(round.parentCid == getString(CANONICAL_CID_KEY), "review round parent is stale");
   return round;
 }
@@ -1577,10 +1742,12 @@ function finalizeAvailabilityCoverage(round: ReviewRound): void {
     "availability requirement set is invalid",
   );
   let owners: u32 = 0;
+  let minimumExpiry: u64 = u64.MAX_VALUE;
   for (let i: u32 = 0; i < round.availabilityLeafCount; i++) {
     const fields = getString(reviewEntryKey("availability", round.id, i)).split("|");
     assert(fields.length == 5, "corrupt availability attestation fields");
     const attestationCid = fields[0];
+    if (hasKey(attestationInvalidKey("availability", round.id, attestationCid))) continue;
     if (getString(availabilityAvailableKey(round.id, attestationCid)) != "1") continue;
     let complete = true;
     for (let requiredIndex: u32 = 0; requiredIndex < requiredCount; requiredIndex++) {
@@ -1591,9 +1758,16 @@ function finalizeAvailabilityCoverage(round: ReviewRound): void {
         break;
       }
     }
-    if (complete) owners = checkedU32Add(owners, 1);
+    if (complete) {
+      owners = checkedU32Add(owners, 1);
+      const expiry = parseU64(getString(availabilityExpiryKey(round.id, attestationCid)));
+      if (expiry < minimumExpiry) minimumExpiry = expiry;
+    }
   }
   round.availabilityOwnerCount = owners;
+  const expiryKey = reviewAvailabilityMinimumExpiryKey(round.id);
+  if (minimumExpiry == u64.MAX_VALUE) removeKey(expiryKey);
+  else setString(expiryKey, minimumExpiry.toString());
 }
 
 function loadReviewEntries(kind: string, reviewRoundId: string, count: u32): string[] {
@@ -1607,17 +1781,55 @@ function loadReviewEntries(kind: string, reviewRoundId: string, count: u32): str
   return entries;
 }
 
+function recomputeAgentAggregates(round: ReviewRound): void {
+  const instances = new Array<string>();
+  const models = new Array<string>();
+  const owners = new Array<string>();
+  const criticalOwners = new Array<string>();
+  for (let i: u32 = 0; i < round.agentLeafCount; i++) {
+    const fields = getString(reviewEntryKey("agent", round.id, i)).split("|");
+    assert(fields.length == 4, "corrupt agent attestation fields");
+    const cid = fields[0];
+    if (hasKey(attestationInvalidKey("agent", round.id, cid))) continue;
+    const model = fields[1];
+    const owner = fields[2];
+    const unresolved = parseU32(fields[3]);
+    if (hasKey(agentQualifyingKey(round.id, cid))) {
+      pushUnique(instances, owner + "~" + model);
+      pushUnique(models, model);
+      pushUnique(owners, owner);
+    }
+    if (unresolved > 0) pushUnique(criticalOwners, owner);
+  }
+  round.agentCount = <u32>instances.length;
+  round.agentModelCount = <u32>models.length;
+  round.agentOwnerCount = <u32>owners.length;
+  round.unresolvedCriticalCount = <u32>criticalOwners.length;
+}
+
 function selectBuildDigest(round: ReviewRound): void {
-  const digestCount = storedU32(buildDigestCountKey(round.id));
-  assert(digestCount > 0, "review round has no passing build digest group");
+  const digests = new Array<string>();
+  const ownerPairs = new Array<string>();
+  const platformPairs = new Array<string>();
+  for (let i: u32 = 0; i < round.buildLeafCount; i++) {
+    const fields = getString(reviewEntryKey("build", round.id, i)).split("|");
+    assert(fields.length == 4, "corrupt build attestation fields");
+    const cid = fields[0];
+    if (hasKey(attestationInvalidKey("build", round.id, cid)) || !hasKey(buildPassingKey(round.id, cid))) continue;
+    const digest = fields[1];
+    pushUnique(digests, digest);
+    pushUnique(ownerPairs, digest + "~" + fields[3]);
+    pushUnique(platformPairs, digest + "~" + fields[2]);
+  }
+  assert(digests.length > 0, "review round has no passing build digest group");
   let bestDigest = "";
   let bestOwners: u32 = 0;
   let bestPlatforms: u32 = 0;
-  for (let i: u32 = 0; i < digestCount; i++) {
-    const digest = getString(buildDigestKey(round.id, i));
+  for (let i = 0; i < digests.length; i++) {
+    const digest = digests[i];
     assert(isCanonicalHash(digest), "corrupt build digest group");
-    const owners = storedU32(buildDigestOwnerCountKey(round.id, digest));
-    const platforms = storedU32(buildDigestPlatformCountKey(round.id, digest));
+    const owners = countPrefixed(ownerPairs, digest + "~");
+    const platforms = countPrefixed(platformPairs, digest + "~");
     if (
       bestDigest.length == 0
       || owners > bestOwners
@@ -1632,7 +1844,22 @@ function selectBuildDigest(round: ReviewRound): void {
   round.artifactDigest = bestDigest;
   round.builderOwnerCount = bestOwners;
   round.builderPlatformCount = bestPlatforms;
-  round.builderConflictCount = digestCount - 1;
+  round.builderConflictCount = <u32>(digests.length - 1);
+}
+
+function pushUnique(values: string[], value: string): void {
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] == value) return;
+  }
+  values.push(value);
+}
+
+function countPrefixed(values: string[], prefix: string): u32 {
+  let count: u32 = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i].startsWith(prefix)) count = checkedU32Add(count, 1);
+  }
+  return count;
 }
 
 function attestationGatesPass(proposal: Proposal): bool {
@@ -1642,7 +1869,11 @@ function attestationGatesPass(proposal: Proposal): bool {
   const builderMin: u32 = proposal.isCritical() ? 3 : 2;
   const platformMin: u32 = proposal.isCritical() ? 2 : 1;
   const availabilityMin: u32 = proposal.isCritical() ? 3 : 2;
-  const criticalResolved = proposal.unresolvedCriticalCount == 0 || proposal.waiverCid.length > 0;
+  const criticalFindingOwnerThreshold: u32 = proposal.isCritical() ? 3 : 2;
+  const criticalResolved = proposal.unresolvedCriticalCount < criticalFindingOwnerThreshold
+    || proposal.waiverCid.length > 0;
+  const minimumExpiryValue = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
+  const requiredAvailabilityUntil = checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
   return proposal.agentLeafCount > 0
     && proposal.agentSubmittedCount == proposal.agentLeafCount
     && proposal.buildLeafCount > 0
@@ -1656,7 +1887,9 @@ function attestationGatesPass(proposal: Proposal): bool {
     && proposal.builderOwnerCount >= builderMin
     && proposal.builderPlatformCount >= platformMin
     && proposal.artifactDigest.length == 64
-    && proposal.availabilityOwnerCount >= availabilityMin;
+    && proposal.availabilityOwnerCount >= availabilityMin
+    && minimumExpiryValue.length > 0
+    && parseU64(minimumExpiryValue) >= requiredAvailabilityUntil;
 }
 
 function allGatesPass(proposal: Proposal): bool {
@@ -1746,14 +1979,13 @@ function metricsCertificationJson(root: string, epoch: u16): usize {
   const descriptorKey = descriptorHash.length == 0
     ? ""
     : metricsCertificationDescriptorKey(root, epoch, descriptorHash);
-  const conflict = hasKey(metricsCertificationConflictKey(root, epoch));
   const count = metricsCertificationCount(root, epoch);
   return returnString(
     "{\"metricsRoot\":\"" + root + "\",\"sourceEpoch\":" + epoch.toString()
       + ",\"attestations\":" + count.toString()
       + ",\"minimumRequired\":" + MIN_IDENTITY_METRICS_ATTESTATIONS.toString()
       + ",\"certified\":" + (count >= MIN_IDENTITY_METRICS_ATTESTATIONS ? "true" : "false")
-      + ",\"conflict\":" + (conflict ? "true" : "false")
+      + ",\"conflict\":false"
       + ",\"descriptorHash\":" + (descriptorHash.length > 0 ? "\"" + descriptorHash + "\"" : "null")
       + ",\"descriptor\":" + (descriptorKey.length > 0 ? "\"" + getString(descriptorKey) + "\"" : "null") + "}",
   );
@@ -1764,6 +1996,7 @@ function reviewRoundStateJson(round: ReviewRound): usize {
     "{\"schemaVersion\":1,\"reviewRoundId\":\"" + round.id + "\",\"state\":\"" + reviewRoundStateName(round.state)
       + "\",\"parentCid\":\"" + round.parentCid + "\",\"candidateCid\":\"" + round.candidateCid
       + "\",\"patchCid\":\"" + round.patchCid + "\",\"opener\":\"0x" + round.opener
+      + "\",\"scopeEvidenceCid\":\"" + getString(reviewScopeEvidenceKey(round.id))
       + "\",\"pinsetCid\":\"" + round.pinsetCid + "\",\"pinsetCount\":" + round.pinsetCount.toString()
       + ",\"openedBlock\":" + round.openedBlock.toString() + ",\"endBlock\":" + round.endBlock.toString()
       + ",\"claimDeadline\":" + round.claimDeadline.toString() + ",\"proposalId\":"
@@ -1789,6 +2022,7 @@ function reviewRoundStateJson(round: ReviewRound): usize {
 
 function reviewRoundStateName(state: u8): string {
   if (state == REVIEW_ROUND_OPEN) return "Open";
+  if (state == REVIEW_ROUND_AVAILABILITY_OPEN) return "AvailabilityOpen";
   if (state == REVIEW_ROUND_FROZEN) return "Frozen";
   if (state == REVIEW_ROUND_CLAIMED) return "Claimed";
   if (state == REVIEW_ROUND_EXPIRED) return "Expired";
@@ -1800,6 +2034,7 @@ function proposalStateJson(proposal: Proposal): usize {
     "{\"proposalId\":\"" + proposal.id + "\",\"state\":\"" + stateName(proposal.state)
       + "\",\"proposalCid\":\"" + proposal.proposalCid + "\",\"reviewRoundId\":\"" + proposal.reviewRoundId
       + "\",\"parentCid\":\"" + proposal.parentCid
+      + "\",\"scopeEvidenceCid\":\"" + getString(reviewScopeEvidenceKey(proposal.reviewRoundId))
       + "\",\"candidateCid\":\"" + proposal.candidateCid + "\",\"agentReviewRoot\":\"" + proposal.agentRoot
       + "\",\"buildAttestationRoot\":\"" + proposal.buildRoot + "\",\"dataAvailabilityRoot\":\"" + proposal.availabilityRoot
       + "\",\"identityMetricsRoot\":\"" + proposal.metricsRoot + "\",\"identityMetricsEpoch\":" + proposal.metricsEpoch.toString()
@@ -1880,6 +2115,66 @@ class EcosystemPatchBinding {
     public affectedSourceBinding: string,
     public sourceTransitionBinding: string,
     public requiredCids: string[],
+    public repositories: string[],
+    public baseSourceCids: string[],
+    public candidateSourceCids: string[],
+    public patchCids: string[],
+    public patchDigests: string[],
+  ) {}
+}
+
+class ProposalScopeBinding {
+  constructor(
+    public risk: string,
+    public changedFiles: u32,
+    public patchBytes: u64,
+    public sourcePackageBytes: u64,
+    public descriptionBytes: u32,
+    public migrationOperations: u32,
+  ) {}
+
+  counters(): string {
+    return this.changedFiles.toString() + "~" + this.patchBytes.toString() + "~"
+      + this.sourcePackageBytes.toString() + "~" + this.descriptionBytes.toString() + "~"
+      + this.migrationOperations.toString();
+  }
+}
+
+const MAX_SCOPE_PROOF_BYTES: u64 = 600000;
+const MAX_SCOPE_FILES_PER_REPOSITORY = 2048;
+const MAX_SCOPE_SOURCE_FILE_BYTES: u64 = 268435456;
+const MAX_SCOPE_SOURCE_TREE_BYTES: u64 = 2147483648;
+
+class SourceFileBinding {
+  constructor(
+    public path: string,
+    public mode: u32,
+    public size: u64,
+    public cid: string,
+    public sha256: string,
+  ) {}
+}
+
+class SourceManifestBinding {
+  constructor(
+    public files: SourceFileBinding[],
+    public contentBytes: u64,
+  ) {}
+}
+
+class ScopeChangeBinding {
+  constructor(
+    public path: string,
+    public changeKind: string,
+    public size: u64,
+  ) {}
+}
+
+class RepositoryScopeProofBinding {
+  constructor(
+    public changes: ScopeChangeBinding[],
+    public patchContentBytes: u64,
+    public candidateContentBytes: u64,
   ) {}
 }
 
@@ -2008,6 +2303,8 @@ function validateEcosystemPatch(
   const baseCids = new Array<string>();
   const candidateCids = new Array<string>();
   const requiredCids = new Array<string>();
+  const patchCids = new Array<string>();
+  const patchDigests = new Array<string>();
   let previous = "";
   for (let i = 0; i < patches.length; i++) {
     const patch = patches[i];
@@ -2029,6 +2326,8 @@ function validateEcosystemPatch(
     baseCids.push(baseSourceCid);
     candidateCids.push(candidateSourceCid);
     requiredCids.push(repositoryPatchCid);
+    patchCids.push(repositoryPatchCid);
+    patchDigests.push(repositoryPatchSha);
     previous = name;
   }
   const parentNames = parentSources.keys();
@@ -2053,7 +2352,320 @@ function validateEcosystemPatch(
     sourceSetBinding(names, candidateCids),
     sourceTransitionBinding(names, baseCids, candidateCids),
     requiredCids,
+    names,
+    baseCids,
+    candidateCids,
+    patchCids,
+    patchDigests,
   );
+}
+
+function validateProposalScopeEvidence(
+  payload: CanonicalDagCborMap,
+  parentCid: string,
+  candidateCid: string,
+  aggregatePatchCid: string,
+  patchBinding: EcosystemPatchBinding,
+): ProposalScopeBinding {
+  payload.requireExactKeys([
+    "schemaVersion", "classifierVersion", "parentEcosystemCid", "candidateEcosystemCid",
+    "patchCid", "repositories", "rationaleBytes", "migrationNotesBytes", "testPlanBytes",
+    "changedFileCount", "patchBytes", "sourcePackageBytes", "descriptionBytes",
+    "migrationOperationCount", "derivedRiskClass",
+  ]);
+  assert(parseU16(payload.unsigned("schemaVersion")) == 1, "scope evidence schema version is unsupported");
+  assert(payload.string("classifierVersion") == "pohw-objective-risk-classifier-v2", "scope classifier version is unsupported");
+  assert(payload.string("parentEcosystemCid") == parentCid, "scope parent ecosystem mismatch");
+  assert(payload.string("candidateEcosystemCid") == candidateCid, "scope candidate ecosystem mismatch");
+  assert(payload.string("patchCid") == aggregatePatchCid, "scope aggregate patch mismatch");
+  const repositories = payload.objectArray("repositories");
+  assert(repositories.length == patchBinding.repositories.length, "scope repository set does not match the ecosystem patch");
+  let changedFiles: u32 = 0;
+  let patchBytes: u64 = 0;
+  let sourcePackageBytes: u64 = 0;
+  let migrationOperations: u32 = 0;
+  let risk = "normal";
+  let previousRepository = "";
+  let proofBytes: u64 = 0;
+  for (let i = 0; i < repositories.length; i++) {
+    const repository = repositories[i];
+    repository.requireExactKeys([
+      "repository", "baseSourceCid", "candidateSourceCid", "patchCid", "patchSha256",
+      "baseManifestDagCborHex", "candidateManifestDagCborHex", "patchDagCborHex",
+      "patchContentBytes", "candidateContentBytes", "changes",
+    ]);
+    const name = repository.string("repository");
+    assert(isSafeAsciiLabel(name, 80), "scope repository name is invalid");
+    assert(i == 0 || previousRepository < name, "scope repositories must be uniquely sorted");
+    assert(name == patchBinding.repositories[i], "scope repository order differs from the ecosystem patch");
+    assert(repository.string("baseSourceCid") == patchBinding.baseSourceCids[i], "scope base source mismatch");
+    assert(repository.string("candidateSourceCid") == patchBinding.candidateSourceCids[i], "scope candidate source mismatch");
+    assert(repository.string("patchCid") == patchBinding.patchCids[i], "scope repository patch mismatch");
+    assert(repository.string("patchSha256") == patchBinding.patchDigests[i], "scope repository patch digest mismatch");
+
+    const baseHex = repository.string("baseManifestDagCborHex");
+    const candidateHex = repository.string("candidateManifestDagCborHex");
+    const patchHex = repository.string("patchDagCborHex");
+    proofBytes = checkedU64Add(proofBytes, sourceProofHexBytes(baseHex));
+    proofBytes = checkedU64Add(proofBytes, sourceProofHexBytes(candidateHex));
+    proofBytes = checkedU64Add(proofBytes, sourceProofHexBytes(patchHex));
+    assert(proofBytes <= MAX_SCOPE_PROOF_BYTES, "source-manifest proof bytes exceed the contract limit");
+    const verified = validateRepositoryScopeProof(
+      name,
+      patchBinding.baseSourceCids[i],
+      patchBinding.candidateSourceCids[i],
+      patchBinding.patchCids[i],
+      baseHex,
+      candidateHex,
+      patchHex,
+    );
+    assert(
+      parseU64(repository.unsigned("patchContentBytes")) == verified.patchContentBytes,
+      "scope patch-content counter is not derived",
+    );
+    assert(
+      parseU64(repository.unsigned("candidateContentBytes")) == verified.candidateContentBytes,
+      "scope candidate-content counter is not derived",
+    );
+    patchBytes = checkedU64Add(patchBytes, verified.patchContentBytes);
+    sourcePackageBytes = checkedU64Add(sourcePackageBytes, verified.candidateContentBytes);
+    const changes = repository.objectArray("changes");
+    assert(changes.length == verified.changes.length, "scope changed paths differ from the verified source transition");
+    for (let j = 0; j < changes.length; j++) {
+      const change = changes[j];
+      change.requireExactKeys(["path", "changeKind", "size"]);
+      const path = change.string("path");
+      const kind = change.string("changeKind");
+      const size = parseU64(change.unsigned("size"));
+      const expected = verified.changes[j];
+      assert(
+        path == expected.path && kind == expected.changeKind && size == expected.size,
+        "scope changed paths differ from the verified source transition",
+      );
+      changedFiles = checkedU32Add(changedFiles, 1);
+      if (isMigrationScopePath(path)) migrationOperations = checkedU32Add(migrationOperations, 1);
+      risk = maxScopeRisk(risk, classifyScopePath(name, path));
+    }
+    previousRepository = name;
+  }
+  const rationaleBytes = parseU32(payload.unsigned("rationaleBytes"));
+  const migrationNotesBytes = parseU32(payload.unsigned("migrationNotesBytes"));
+  const testPlanBytes = parseU32(payload.unsigned("testPlanBytes"));
+  assert(rationaleBytes > 0 && testPlanBytes > 0, "scope rationale and test plan must be nonempty");
+  const descriptionBytes = checkedU32Add(checkedU32Add(rationaleBytes, migrationNotesBytes), testPlanBytes);
+  assert(parseU32(payload.unsigned("changedFileCount")) == changedFiles, "scope changed-file counter is not derived");
+  assert(parseU64(payload.unsigned("patchBytes")) == patchBytes, "scope patch-byte counter is not derived");
+  assert(parseU64(payload.unsigned("sourcePackageBytes")) == sourcePackageBytes, "scope source-byte counter is not derived");
+  assert(parseU32(payload.unsigned("descriptionBytes")) == descriptionBytes, "scope description-byte counter is not derived");
+  assert(parseU32(payload.unsigned("migrationOperationCount")) == migrationOperations, "scope migration counter is not derived");
+  assert(payload.string("derivedRiskClass") == risk, "scope risk class is not derived");
+  return new ProposalScopeBinding(
+    risk,
+    changedFiles,
+    patchBytes,
+    sourcePackageBytes,
+    descriptionBytes,
+    migrationOperations,
+  );
+}
+
+function sourceProofHexBytes(value: string): u64 {
+  assert(value.length > 0 && value.length % 2 == 0, "source-manifest proof hex is empty or malformed");
+  return <u64>(value.length / 2);
+}
+
+function validateRepositoryScopeProof(
+  repository: string,
+  baseSourceCid: string,
+  candidateSourceCid: string,
+  patchCid: string,
+  baseHex: string,
+  candidateHex: string,
+  patchHex: string,
+): RepositoryScopeProofBinding {
+  const base = validateSourceManifest(
+    verifiedCanonicalSourceProofDagCborMap(baseSourceCid, baseHex),
+    repository,
+  );
+  const candidate = validateSourceManifest(
+    verifiedCanonicalSourceProofDagCborMap(candidateSourceCid, candidateHex),
+    repository,
+  );
+  const patch = verifiedCanonicalSourceProofDagCborMap(patchCid, patchHex);
+  patch.requireExactKeys([
+    "schemaVersion", "kind", "repository", "baseSourceCid", "candidateSourceCid",
+    "removedPaths", "upsertedFiles",
+  ]);
+  assert(parseU16(patch.unsigned("schemaVersion")) == 1, "source patch schema version is unsupported");
+  assert(patch.string("kind") == "pohw-source-patch-v1", "source patch kind is unsupported");
+  assert(patch.string("repository") == repository, "source patch repository mismatch");
+  assert(patch.link("baseSourceCid") == baseSourceCid, "source patch base CID mismatch");
+  assert(patch.link("candidateSourceCid") == candidateSourceCid, "source patch candidate CID mismatch");
+
+  const removedPaths = patch.stringArray("removedPaths");
+  const upsertedMaps = patch.objectArray("upsertedFiles");
+  const patchUpserted = new Array<SourceFileBinding>();
+  for (let i = 0; i < upsertedMaps.length; i++) {
+    patchUpserted.push(validateSourceFileEntry(upsertedMaps[i]));
+  }
+
+  const derivedRemoved = new Array<string>();
+  const derivedUpserted = new Array<SourceFileBinding>();
+  let baseIndex = 0;
+  let candidateIndex = 0;
+  while (baseIndex < base.files.length || candidateIndex < candidate.files.length) {
+    if (
+      candidateIndex >= candidate.files.length
+        || (baseIndex < base.files.length && base.files[baseIndex].path < candidate.files[candidateIndex].path)
+    ) {
+      derivedRemoved.push(base.files[baseIndex].path);
+      baseIndex++;
+    } else if (
+      baseIndex >= base.files.length
+        || candidate.files[candidateIndex].path < base.files[baseIndex].path
+    ) {
+      derivedUpserted.push(candidate.files[candidateIndex]);
+      candidateIndex++;
+    } else {
+      if (!sourceFileEquals(base.files[baseIndex], candidate.files[candidateIndex])) {
+        derivedUpserted.push(candidate.files[candidateIndex]);
+      }
+      baseIndex++;
+      candidateIndex++;
+    }
+  }
+  assert(
+    derivedRemoved.length + derivedUpserted.length > 0,
+    "source patch must contain at least one verified change",
+  );
+  assert(derivedRemoved.length == removedPaths.length, "source patch removals do not reconstruct the candidate");
+  for (let i = 0; i < derivedRemoved.length; i++) {
+    assert(derivedRemoved[i] == removedPaths[i], "source patch removals do not reconstruct the candidate");
+  }
+  assert(derivedUpserted.length == patchUpserted.length, "source patch upserts do not reconstruct the candidate");
+  for (let i = 0; i < derivedUpserted.length; i++) {
+    assert(sourceFileEquals(derivedUpserted[i], patchUpserted[i]), "source patch upserts do not reconstruct the candidate");
+  }
+
+  let patchContentBytes: u64 = 0;
+  for (let i = 0; i < derivedUpserted.length; i++) {
+    patchContentBytes = checkedU64Add(patchContentBytes, derivedUpserted[i].size);
+  }
+  const changes = new Array<ScopeChangeBinding>();
+  let removedIndex = 0;
+  let upsertedIndex = 0;
+  while (removedIndex < derivedRemoved.length || upsertedIndex < derivedUpserted.length) {
+    if (
+      upsertedIndex >= derivedUpserted.length
+        || (removedIndex < derivedRemoved.length && derivedRemoved[removedIndex] < derivedUpserted[upsertedIndex].path)
+    ) {
+      changes.push(new ScopeChangeBinding(derivedRemoved[removedIndex], "remove", 0));
+      removedIndex++;
+    } else {
+      const entry = derivedUpserted[upsertedIndex];
+      changes.push(new ScopeChangeBinding(entry.path, "upsert", entry.size));
+      upsertedIndex++;
+    }
+  }
+  assert(changes.length <= 1024, "scope changed path set exceeds the contract limit");
+  return new RepositoryScopeProofBinding(changes, patchContentBytes, candidate.contentBytes);
+}
+
+function validateSourceManifest(
+  payload: CanonicalDagCborMap,
+  repository: string,
+): SourceManifestBinding {
+  payload.requireExactKeys(["schemaVersion", "kind", "repository", "files"]);
+  assert(parseU16(payload.unsigned("schemaVersion")) == 1, "source manifest schema version is unsupported");
+  assert(payload.string("kind") == "pohw-source-tree-v1", "source manifest kind is unsupported");
+  assert(payload.string("repository") == repository, "source manifest repository mismatch");
+  const fileMaps = payload.objectArray("files");
+  assert(fileMaps.length <= MAX_SCOPE_FILES_PER_REPOSITORY, "source manifest exceeds the scope-proof file limit");
+  const files = new Array<SourceFileBinding>();
+  const portablePaths = new Map<string, bool>();
+  let previousPath = "";
+  let contentBytes: u64 = 0;
+  for (let i = 0; i < fileMaps.length; i++) {
+    const entry = validateSourceFileEntry(fileMaps[i]);
+    assert(i == 0 || previousPath < entry.path, "source manifest paths must be strictly sorted");
+    const portablePath = entry.path.toLowerCase();
+    assert(!portablePaths.has(portablePath), "source manifest paths collide on a case-insensitive filesystem");
+    portablePaths.set(portablePath, true);
+    contentBytes = checkedU64Add(contentBytes, entry.size);
+    assert(contentBytes <= MAX_SCOPE_SOURCE_TREE_BYTES, "source manifest content exceeds the deterministic limit");
+    files.push(entry);
+    previousPath = entry.path;
+  }
+  return new SourceManifestBinding(files, contentBytes);
+}
+
+function validateSourceFileEntry(payload: CanonicalDagCborMap): SourceFileBinding {
+  payload.requireExactKeys(["path", "mode", "size", "cid", "sha256"]);
+  const path = payload.string("path");
+  const mode = parseU32(payload.unsigned("mode"));
+  const size = parseU64(payload.unsigned("size"));
+  const cid = payload.link("cid");
+  const sha = payload.string("sha256");
+  assert(isSafeRelativePath(path), "source manifest path is invalid");
+  assert(mode == 420 || mode == 493, "source manifest mode is not normalized");
+  assert(size <= MAX_SCOPE_SOURCE_FILE_BYTES, "source manifest file exceeds the deterministic limit");
+  assert(isCanonicalRawCid(cid), "source manifest file CID must be canonical raw CIDv1");
+  assert(isCanonicalHash(sha), "source manifest file digest must be lowercase SHA-256");
+  assert(canonicalContentCidSha256(cid) == sha, "source manifest file CID and digest disagree");
+  return new SourceFileBinding(path, mode, size, cid, sha);
+}
+
+function sourceFileEquals(left: SourceFileBinding, right: SourceFileBinding): bool {
+  return left.path == right.path && left.mode == right.mode && left.size == right.size
+    && left.cid == right.cid && left.sha256 == right.sha256;
+}
+
+function classifyScopePath(repository: string, path: string): string {
+  if (repository == "idena-wasm" || repository == "idena-wasm-binding" || repository == "wasmer") {
+    return "consensus";
+  }
+  if (repository == "idena-go" && (
+    path.startsWith("blockchain/") || path.startsWith("core/") || path.startsWith("vm/")
+      || path.startsWith("consensus/") || path.startsWith("config/")
+  )) return "consensus";
+  if (repository == "P2poolBTC" && (
+    path.startsWith("contracts/idena-code-governance/")
+      || path.startsWith("compatibility/governance-fork")
+      || path == "compatibility/governance-day-fork-candidate-lock.json"
+      || path.startsWith("integrations/governance-epoch-anchor/")
+      || path.indexOf("fork_chain") >= 0 || path.indexOf("sharechain") >= 0
+      || path.indexOf("consensus") >= 0
+  )) return "consensus";
+  if (isMigrationScopePath(path)) return "migration";
+  if (isDocumentationScopePath(path)) return "normal";
+  return "critical";
+}
+
+function isDocumentationScopePath(path: string): bool {
+  const extensionAllowed = path.endsWith(".md") || path.endsWith(".txt");
+  if (!extensionAllowed) return false;
+  if (path.startsWith("docs/")) return true;
+  if (path.indexOf("/") >= 0) return false;
+  return path == "README.md" || path == "CONTRIBUTING.md" || path == "SECURITY.md"
+    || path == "CODE_OF_CONDUCT.md";
+}
+
+function isMigrationScopePath(path: string): bool {
+  return path.startsWith("migrations/") || path.indexOf("/migrations/") >= 0
+    || path.startsWith("migration/") || path.indexOf("/migration/") >= 0;
+}
+
+function maxScopeRisk(left: string, right: string): string {
+  return scopeRiskRank(right) > scopeRiskRank(left) ? right : left;
+}
+
+function scopeRiskRank(risk: string): i32 {
+  if (risk == "normal") return 0;
+  if (risk == "critical") return 1;
+  if (risk == "migration") return 2;
+  if (risk == "consensus") return 3;
+  assert(false, "unknown objective scope risk class");
+  return -1;
 }
 
 function validatePinsetManifest(
@@ -2148,10 +2760,18 @@ function validateProposalDeclaredLimits(payload: CanonicalDagCborMap, risk: stri
   const migrationOperations = parseU32(payload.unsigned("migrationOperationCount"));
   assert(<u32>payload.stringArray("affectedRepositories").length <= maxRepositories, "affected repository limit exceeded");
   assert(changedFiles > 0 && changedFiles <= maxChangedFiles, "changed-file limit exceeded");
-  assert(patchBytes > 0 && patchBytes <= maxPatchBytes, "patch-size limit exceeded");
-  assert(sourcePackageBytes > 0 && sourcePackageBytes <= maxSourcePackageBytes, "source-package limit exceeded");
+  assert(patchBytes <= maxPatchBytes, "patch-size limit exceeded");
+  assert(sourcePackageBytes <= maxSourcePackageBytes, "source-package limit exceeded");
   assert(descriptionBytes > 0 && descriptionBytes <= maxDescriptionBytes, "description-size limit exceeded");
   assert(migrationOperations <= maxMigrationOperations, "migration-operation limit exceeded");
+}
+
+function proposalDeclaredCounters(payload: CanonicalDagCborMap): string {
+  return parseU32(payload.unsigned("changedFileCount")).toString() + "~"
+    + parseU64(payload.unsigned("patchBytes")).toString() + "~"
+    + parseU64(payload.unsigned("sourcePackageBytes")).toString() + "~"
+    + parseU32(payload.unsigned("descriptionBytes")).toString() + "~"
+    + parseU32(payload.unsigned("migrationOperationCount")).toString();
 }
 
 function validateAgentNestedPayload(
@@ -2205,6 +2825,10 @@ function validateBuildNestedPayload(
   validateCommandExecutions(payload.objectArray("commands"), testsPassed);
   const artifacts = payload.objectArray("artifacts");
   assert(artifacts.length > 0 && artifacts.length <= 4096, "artifact list is empty or too large");
+  assert(
+    <u32>artifacts.length == storedU32(reviewCandidateArtifactCountKey(reviewRoundId)),
+    "build attestation must cover the complete candidate artifact set",
+  );
   let previous = "";
   let coreCount: u32 = 0;
   const coreParts = new Array<Uint8Array>();
@@ -2537,7 +3161,7 @@ function isCanonicalI32(value: string): bool {
 
 function proposalPayloadKeys(): string[] {
   return [
-    "schemaVersion", "governanceParameterSetCid", "parentCanonicalEcosystemCid", "candidateEcosystemCid",
+    "schemaVersion", "scopeEvidenceCid", "governanceParameterSetCid", "parentCanonicalEcosystemCid", "candidateEcosystemCid",
     "affectedRepositories", "changedFileCount", "patchBytes", "sourcePackageBytes", "descriptionBytes",
     "migrationOperationCount", "baseSourceCids", "candidateSourceCids", "patchCid", "reviewRoundId",
     "proposerAddress", "proposalBondAtoms", "riskClass", "rationaleCid",
@@ -2573,7 +3197,7 @@ function identityMetricsAttestationPayloadKeys(): string[] {
 
 function buildAttestationPayloadKeys(): string[] {
   return [
-    "schemaVersion", "candidateEcosystemCid", "sourceCids", "toolchainCid",
+    "schemaVersion", "candidateEcosystemCid", "sourceCids", "toolchainCid", "scopeEvidenceCid",
     "builderIdentity", "runtimeFamily", "architecture", "commands", "testResultsCid",
     "testsPassed", "sbomCid", "artifacts", "coreArtifactDigest", "builderBondAtoms",
     "creationBlockOrTimestamp", "authentication",
@@ -2597,6 +3221,11 @@ function canonicalPayloadAddress(value: string): string {
 
 function checkedU32Add(left: u32, right: u32): u32 {
   assert(left <= u32.MAX_VALUE - right, "counter arithmetic overflow");
+  return left + right;
+}
+
+function checkedU64Add(left: u64, right: u64): u64 {
+  assert(left <= u64.MAX_VALUE - right, "counter arithmetic overflow");
   return left + right;
 }
 
@@ -2639,6 +3268,18 @@ function maxReviewChallengeEnd(round: ReviewRound): u64 {
   return checkedBlockAdd(
     checkedBlockAdd(checkedBlockAdd(round.claimDeadline, REVIEW_BLOCKS), VOTING_BLOCKS),
     CHALLENGE_BLOCKS,
+  );
+}
+
+function maxReviewExecutionExpiry(round: ReviewRound): u64 {
+  // Voting may be finalized at its original challenge deadline. Finalization
+  // then opens a fresh challenge period before the timelock starts.
+  return checkedBlockAdd(
+    checkedBlockAdd(
+      checkedBlockAdd(maxReviewChallengeEnd(round), CHALLENGE_BLOCKS),
+      TIMELOCK_BLOCKS,
+    ),
+    EXECUTION_WINDOW_BLOCKS,
   );
 }
 
@@ -2688,7 +3329,6 @@ function metricsCertificationConflictKey(root: string, epoch: u16): string {
   return "metrics-certification:conflict:" + root + ":" + epoch.toString();
 }
 function metricsCertificationCount(root: string, epoch: u16): u32 {
-  if (hasKey(metricsCertificationConflictKey(root, epoch))) return 0;
   const descriptorHash = getString(metricsCertificationFinalizedDescriptorKey(root, epoch));
   if (descriptorHash.length == 0) return 0;
   const value = getString(metricsCertificationCandidateCountKey(root, epoch, descriptorHash));
@@ -2725,9 +3365,15 @@ function reviewOwnerEntryCountKey(kind: string, reviewRoundId: string, owner: st
 function candidateArtifactKey(reviewRoundId: string, artifactKey: string): string {
   return "candidate-artifact:" + reviewRoundId + ":" + artifactKey;
 }
+function reviewCandidateArtifactCountKey(reviewRoundId: string): string {
+  return "candidate-artifact-count:" + reviewRoundId;
+}
 function reviewSourceTransitionKey(reviewRoundId: string): string {
   return "review-source-transition:" + reviewRoundId;
 }
+function reviewScopeEvidenceKey(reviewRoundId: string): string { return "review-scope-cid:" + reviewRoundId; }
+function reviewScopeRiskKey(reviewRoundId: string): string { return "review-scope-risk:" + reviewRoundId; }
+function reviewScopeCountersKey(reviewRoundId: string): string { return "review-scope-counters:" + reviewRoundId; }
 function reviewPinsetMemberKey(reviewRoundId: string, cid: string): string {
   return "review-pinset:" + reviewRoundId + ":" + cid;
 }
@@ -2745,6 +3391,21 @@ function availabilityVerifiedCidKey(reviewRoundId: string, attestationCid: strin
 }
 function availabilityAvailableKey(reviewRoundId: string, attestationCid: string): string {
   return "availability-available:" + reviewRoundId + ":" + attestationCid;
+}
+function availabilityExpiryKey(reviewRoundId: string, attestationCid: string): string {
+  return "availability-expiry:" + reviewRoundId + ":" + attestationCid;
+}
+function agentQualifyingKey(reviewRoundId: string, attestationCid: string): string {
+  return "agent-qualifying:" + reviewRoundId + ":" + attestationCid;
+}
+function buildPassingKey(reviewRoundId: string, attestationCid: string): string {
+  return "build-passing:" + reviewRoundId + ":" + attestationCid;
+}
+function attestationInvalidKey(kind: string, reviewRoundId: string, attestationCid: string): string {
+  return "attestation-invalid:" + kind + ":" + reviewRoundId + ":" + attestationCid;
+}
+function challengePreviousStateKey(proposalId: string): string {
+  return "challenge-previous-state:" + proposalId;
 }
 function reviewAvailabilityMinimumExpiryKey(reviewRoundId: string): string {
   return "review-availability-min-expiry:" + reviewRoundId;

@@ -1,0 +1,134 @@
+import hashlib
+import importlib.util
+import json
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "governance_runtime_gate",
+    ROOT / "scripts" / "pohw-governance-runtime-gate.py",
+)
+RUNTIME_GATE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(RUNTIME_GATE)
+
+
+def sha256(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class GovernanceDayForkCandidateLockTests(unittest.TestCase):
+    def setUp(self):
+        self.lock = RUNTIME_GATE.load_json(
+            ROOT / "compatibility" / "governance-day-fork-candidate-lock.json"
+        )
+
+    def test_candidate_is_explicitly_non_authorizing_and_network_is_distinct(self):
+        historical = RUNTIME_GATE.load_json(
+            ROOT / "compatibility" / "governance-fork-lock.json"
+        )
+        self.assertFalse(self.lock["authorizedForDeployment"])
+        self.assertFalse(self.lock["authorizedForRelease"])
+        self.assertFalse(self.lock["canonicalReferenceChangePermitted"])
+        self.assertTrue(self.lock["forkProfile"]["consensusChangesAllowed"])
+        self.assertFalse(self.lock["activation"]["enabled"])
+        self.assertNotEqual(
+            self.lock["forkProfile"]["networkId"],
+            historical["forkProfile"]["networkId"],
+        )
+        self.assertFalse(all(self.lock["requiredFinalizationGates"].values()))
+
+    def test_legacy_locks_are_bound_by_exact_digest(self):
+        profile = self.lock["forkProfile"]
+        self.assertEqual(
+            sha256(ROOT / "compatibility" / "stack-lock.json"),
+            profile["legacyCompatibilityLockSha256"],
+        )
+        self.assertEqual(
+            sha256(ROOT / "compatibility" / "governance-fork-lock.json"),
+            profile["historicalGovernanceForkLockSha256"],
+        )
+
+    def test_patch_and_runtime_descriptors_match_exact_bytes(self):
+        patched = {
+            component["name"]: component
+            for component in self.lock["components"]
+            if "patch" in component
+        }
+        self.assertEqual(set(patched), {"idena-go", "idena-wasm", "idena-wasm-binding"})
+        for component in patched.values():
+            self.assertIsNone(component["candidateCommit"])
+            RUNTIME_GATE.validate_candidate_source_descriptor(component)
+            self.assertEqual(
+                RUNTIME_GATE.dag_cbor_cid(component["candidateSourceSha256"]),
+                component["candidateSourceCid"],
+            )
+            exclusions = ROOT / component["artifactExclusionsPath"]
+            self.assertEqual(
+                sha256(exclusions),
+                component["artifactExclusionsSha256"],
+            )
+            descriptor = component["patch"]
+            path = ROOT / descriptor["path"]
+            digest, size = RUNTIME_GATE.hash_regular_file(path)
+            self.assertEqual(digest, descriptor["sha256"])
+            self.assertEqual(size, descriptor["size"])
+            self.assertEqual(RUNTIME_GATE.raw_cid(digest), descriptor["cid"])
+
+        overlay = self.lock["runtimeIntegrationTestOverlay"]
+        base = ROOT / overlay["basePath"]
+        digest, size = RUNTIME_GATE.hash_regular_file(base)
+        self.assertEqual((digest, size), (overlay["baseSha256"], overlay["baseSize"]))
+        self.assertEqual(RUNTIME_GATE.raw_cid(digest), overlay["baseCid"])
+        patch = ROOT / overlay["patchPath"]
+        patch_digest, patch_size = RUNTIME_GATE.hash_regular_file(patch)
+        self.assertEqual(
+            (patch_digest, patch_size),
+            (overlay["patchSha256"], overlay["patchSize"]),
+        )
+        self.assertEqual(RUNTIME_GATE.raw_cid(patch_digest), overlay["patchCid"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = pathlib.Path(temporary)
+            staged = temporary_root / overlay["basePath"]
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(base.read_bytes())
+            subprocess.run(
+                ["git", "apply", str(patch)],
+                cwd=temporary_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            result_digest, result_size = RUNTIME_GATE.hash_regular_file(staged)
+        self.assertEqual(
+            (result_digest, result_size),
+            (overlay["resultSha256"], overlay["resultSize"]),
+        )
+        self.assertEqual(RUNTIME_GATE.raw_cid(result_digest), overlay["resultCid"])
+
+    def test_local_contract_matches_candidate_inventory(self):
+        artifact = self.lock["contractArtifact"]
+        path = ROOT / artifact["path"]
+        if not path.exists():
+            self.skipTest("the governance WASM artifact is generated by the contract build")
+        digest, size, cid = RUNTIME_GATE.verify_artifact_descriptor(
+            path,
+            artifact,
+            "Governance Day fork candidate lock",
+        )
+        self.assertEqual((digest, size, cid), (artifact["sha256"], artifact["size"], artifact["cid"]))
+
+    def test_toolchain_files_match_candidate_inventory(self):
+        toolchains = self.lock["toolchains"]
+        self.assertEqual(sha256(ROOT / "rust-toolchain.toml"), toolchains["rustToolchainFileSha256"])
+        self.assertEqual(sha256(ROOT / ".go-version"), toolchains["goVersionFileSha256"])
+
+
+if __name__ == "__main__":
+    unittest.main()

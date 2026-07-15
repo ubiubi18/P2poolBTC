@@ -1291,8 +1291,12 @@ fn replay_state_for_repair(
     repair: TruncatedTailRepair,
 ) -> Result<SharechainReplayState> {
     ensure_datadir(datadir)?;
+    let bound_policy = read_bound_idena_anchor_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in read_messages_with_repair(datadir, repair)? {
+        if let Some(policy) = bound_policy.as_ref() {
+            state.validate_idena_anchor_policy(&message, policy)?;
+        }
         state.apply_message(&message)?;
     }
     Ok(state)
@@ -1314,8 +1318,12 @@ fn replay_state_for_confirmed_payout_commitment_with_repair(
     let expected_state_root =
         normalize_hash_hex("commitment sharechain_state_root", expected_state_root)?;
 
+    let bound_policy = read_bound_idena_anchor_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in read_messages_with_repair(datadir, repair)? {
+        if let Some(policy) = bound_policy.as_ref() {
+            state.validate_idena_anchor_policy(&message, policy)?;
+        }
         state.apply_message(&message)?;
         if state.best_share_tip() != Some(sharechain_tip.as_str()) {
             continue;
@@ -3287,6 +3295,31 @@ mod tests {
             "unexpected error: {err:#}"
         );
         assert!(read_bound_idena_anchor_policy(&datadir).unwrap().is_none());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn confirmed_payout_replay_enforces_bound_idena_anchor_policy() {
+        let datadir = temp_dir("confirmed-payout-bound-policy");
+        bind_idena_anchor_policy(&datadir, &idena_anchor_policy()).unwrap();
+        let unanchored = SharechainMessage::MinerRegistration(signed_registration(
+            "externally-appended",
+            7,
+            8,
+            9,
+        ));
+        fs::write(
+            log_path(&datadir),
+            format!("{}\n", serde_json::to_string(&unanchored).unwrap()),
+        )
+        .unwrap();
+
+        let err = replay_state_with_confirmed_payouts(&datadir, None).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("has no contract-anchored registration"),
+            "unexpected error: {err:#}"
+        );
         fs::remove_dir_all(datadir).unwrap();
     }
 

@@ -22,9 +22,10 @@ export const STATE_REVERT_PROPOSED: u8 = 16;
 export const STATE_REVERTED: u8 = 17;
 
 export const REVIEW_ROUND_OPEN: u8 = 0;
-export const REVIEW_ROUND_FROZEN: u8 = 1;
-export const REVIEW_ROUND_CLAIMED: u8 = 2;
-export const REVIEW_ROUND_EXPIRED: u8 = 3;
+export const REVIEW_ROUND_AVAILABILITY_OPEN: u8 = 1;
+export const REVIEW_ROUND_FROZEN: u8 = 2;
+export const REVIEW_ROUND_CLAIMED: u8 = 3;
+export const REVIEW_ROUND_EXPIRED: u8 = 4;
 
 export class MetricsRecord {
   constructor(

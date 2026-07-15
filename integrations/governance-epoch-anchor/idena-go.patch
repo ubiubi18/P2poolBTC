@@ -1,0 +1,131 @@
+diff --git a/vm/wasm/governance_features_test.go b/vm/wasm/governance_features_test.go
+new file mode 100644
+index 0000000..54d947c
+--- /dev/null
++++ b/vm/wasm/governance_features_test.go
+@@ -0,0 +1,44 @@
++package wasm
++
++import (
++	"math"
++	"testing"
++
++	"github.com/idena-network/idena-go/common/eventbus"
++	"github.com/idena-network/idena-go/config"
++	"github.com/idena-network/idena-go/core/appstate"
++	"github.com/idena-network/idena-go/vm/costs"
++	"github.com/idena-network/idena-wasm-binding/lib"
++	"github.com/stretchr/testify/require"
++	dbm "github.com/tendermint/tm-db"
++)
++
++func TestGovernanceEpochAnchorActivationSourceIsFailClosed(t *testing.T) {
++	activation := governanceEpochAnchorActivationSource()
++	require.Equal(t, uint32(10002), activation.networkID)
++	require.Nil(t, activation.activationHeight)
++
++	for _, height := range []uint64{0, 1, math.MaxUint64} {
++		candidate := &config.Config{Network: governanceEpochAnchorNetworkID}
++		require.Zero(t, governanceWasmFeatures(candidate, createHeader(height, 1)))
++
++		mainnet := &config.Config{Network: 1}
++		require.Zero(t, governanceWasmFeatures(mainnet, createHeader(height, 1)))
++	}
++	require.Zero(t, governanceWasmFeatures(nil, createHeader(1, 1)))
++	require.Zero(t, governanceWasmFeatures(&config.Config{Network: governanceEpochAnchorNetworkID}, nil))
++}
++
++func TestEpochBlockUsesReadGlobalStateGas(t *testing.T) {
++	state, err := appstate.NewAppState(dbm.NewMemDB(), eventbus.New())
++	require.NoError(t, err)
++	state.Initialize(0)
++	state.State.SetEpochBlock(43)
++
++	env := NewWasmEnv(state, nil, nil, createHeader(43, 1), "test", false, false, false, nil)
++	meter := &lib.GasMeter{}
++	meter.SetRemainingGas(math.MaxUint64)
++
++	require.Equal(t, uint64(43), env.EpochBlock(meter))
++	require.Equal(t, costs.GasToWasmGas(costs.ReadGlobalStateGas), meter.GasConsumed())
++}
+diff --git a/vm/wasm/vm.go b/vm/wasm/vm.go
+index 597ae2f..42e467e 100644
+--- a/vm/wasm/vm.go
++++ b/vm/wasm/vm.go
+@@ -20,6 +20,35 @@ type WasmVM struct {
+ 	cfg                 *config.Config
+ 	commitToState       bool
+ 	statsCollector      collector.StatsCollector
++	features            lib.FeatureMask
++}
++
++const governanceEpochAnchorNetworkID uint32 = 10002
++
++type governanceEpochAnchorActivation struct {
++	networkID        uint32
++	activationHeight *uint64
++}
++
++func governanceEpochAnchorActivationSource() governanceEpochAnchorActivation {
++	return governanceEpochAnchorActivation{
++		networkID:        governanceEpochAnchorNetworkID,
++		activationHeight: nil,
++	}
++}
++
++func governanceWasmFeatures(cfg *config.Config, head *types.Header) lib.FeatureMask {
++	if cfg == nil || head == nil {
++		return 0
++	}
++	activation := governanceEpochAnchorActivationSource()
++	if cfg.Network != activation.networkID || activation.activationHeight == nil {
++		return 0
++	}
++	if head.Height() < *activation.activationHeight {
++		return 0
++	}
++	return lib.FeatureEpochBlock
+ }
+ 
+ func (vm *WasmVM) deploy(tx *types.Transaction, limit uint64) (env *WasmEnv, gasUsed uint64, actionResult []byte, err error) {
+@@ -41,7 +70,7 @@ func (vm *WasmVM) deploy(tx *types.Transaction, limit uint64) (env *WasmEnv, gas
+ 		}
+ 	}()
+ 	env.Deploy(attach.Code)
+-	gasUsed, actionResult, err = lib.Deploy(lib.NewGoAPI(env, &lib.GasMeter{}), attach.Code, attach.Args, ctx.ContractAddr(), limit, vm.cfg.IsDebug)
++	gasUsed, actionResult, err = lib.DeployWithFeatures(lib.NewGoAPI(env, &lib.GasMeter{}), attach.Code, attach.Args, ctx.ContractAddr(), limit, vm.cfg.IsDebug, vm.features)
+ 	return env, gasUsed, actionResult, err
+ }
+ 
+@@ -69,7 +98,7 @@ func (vm *WasmVM) call(tx *types.Transaction, limit uint64) (env *WasmEnv, gasUs
+ 			gasUsed = limit
+ 		}
+ 	}()
+-	gasUsed, actionResult, err = lib.Execute(lib.NewGoAPI(env, &lib.GasMeter{}), code, attachment.Method, attachment.Args, contract, limit, vm.cfg.IsDebug)
++	gasUsed, actionResult, err = lib.ExecuteWithFeatures(lib.NewGoAPI(env, &lib.GasMeter{}), code, attachment.Method, attachment.Args, contract, limit, vm.cfg.IsDebug, vm.features)
+ 	return env, gasUsed, actionResult, attachment.Method, err
+ }
+ 
+@@ -112,5 +141,5 @@ func (vm *WasmVM) Run(tx *types.Transaction, wasmGasLimit uint64) *types.TxRecei
+ }
+ 
+ func NewWasmVM(appState *appstate.AppState, blockHeaderProvider BlockHeaderProvider, head *types.Header, cfg *config.Config, commitToState bool, statsCollector collector.StatsCollector) *WasmVM {
+-	return &WasmVM{appState: appState, blockHeaderProvider: blockHeaderProvider, head: head, cfg: cfg, commitToState: commitToState, statsCollector: statsCollector}
++	return &WasmVM{appState: appState, blockHeaderProvider: blockHeaderProvider, head: head, cfg: cfg, commitToState: commitToState, statsCollector: statsCollector, features: governanceWasmFeatures(cfg, head)}
+ }
+diff --git a/vm/wasm/wasm_env.go b/vm/wasm/wasm_env.go
+index d7da3d5..51f3b33 100644
+--- a/vm/wasm/wasm_env.go
++++ b/vm/wasm/wasm_env.go
+@@ -116,6 +116,11 @@ func (w *WasmEnv) Epoch(meter *lib.GasMeter) uint16 {
+ 	return w.appState.State.Epoch()
+ }
+ 
++func (w *WasmEnv) EpochBlock(meter *lib.GasMeter) uint64 {
++	meter.ConsumeGas(costs.GasToWasmGas(costs.ReadGlobalStateGas))
++	return w.appState.State.EpochBlock()
++}
++
+ func (w *WasmEnv) ReadContractData(meter *lib.GasMeter, address lib.Address, key []byte) []byte {
+ 	value := w.readContractData(address, key)
+ 	meter.ConsumeGas(costs.GasToWasmGas(uint64(costs.ReadStatePerByteGas * len(value))))

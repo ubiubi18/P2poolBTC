@@ -29,10 +29,12 @@ Each epoch has one immutable schedule:
 
 The proposal set is sorted deterministically and frozen once. Proposals cannot
 be inserted or reordered during voting. A proposal submitted after cutoff fails
-clearly and does not consume the current epoch slot. The current WASM prototype
-exposes this state machine, but its epoch anchor is not yet authenticated to the
-finalized Idena validation boundary. The first caller can currently choose the
-anchor. That is a deployment blocker, not a configurable operator privilege.
+clearly and does not consume the current epoch slot. The separate Governance
+Day fork candidate adds the read-only `env.epoch_block` host import, backed by
+`State.EpochBlock()`. A caller can persist the authoritative boundary but can
+no longer choose it. Repeating the call in the same epoch must return exactly
+the same anchor. This path is inactive and remains isolated from the legacy
+compatibility profile.
 
 ## Proposal Slot
 
@@ -43,14 +45,14 @@ later revert does not restore it. A malformed transaction that rolls back
 before proposal creation does not consume it. A new slot becomes available in
 the next governance epoch, and identities have independent slots.
 
-The immutable proposal envelope also carries declared changed-file, patch,
-source-package, description, migration-operation, and affected-repository
-counts. Critical limits are 16 repositories, 1,024 files, 16 MiB patch data,
-1 GiB source packages, 64 KiB description data, and 64 migration operations.
-The WASM contract rejects an envelope above those bounds before consuming the
-slot. These counters are CID-bound and independently reviewable, but the pinned
-host cannot fetch every referenced IPFS block to recompute them on-chain. They
-remain attested claims until a bounded proof format is implemented.
+The immutable proposal envelope references `ProposalScopeEvidenceV1`. The CLI
+derives that object from verified parent, candidate, aggregate-patch,
+per-repository source, and per-repository patch CARs. Changed paths, byte
+counters, migration operations, and risk class are recomputed in Rust and in
+the contract from the same bounded canonical DAG-CBOR payload. A proposer can
+no longer supply an independent counter or risk label. Documentation-only
+paths are normal; unknown code is critical; migration paths are migration; and
+runtime, consensus, sharechain, or governance-contract paths are consensus.
 
 ## Epoch Ballot
 
@@ -102,13 +104,16 @@ the configured no-quorum refund. A valid rejection applies the configured
 refund, burn, and treasury split. Accepted bonds become claimable only under
 the deterministic settlement rules.
 
-The current contract permits only critical-class proposals and therefore
-requires a 25 IDNA proposal bond. A review round may be opened with the lower
-normal minimum, but critical proposal creation fails unless the frozen round
-holds the full critical bond. Data-availability attestations must remain valid
+The contract accepts normal proposals only when the objective scope classifier
+derives `normal`; every other path receives the corresponding higher-risk
+threshold. A review round may be opened with the lower normal minimum, but a
+higher-risk proposal fails unless the frozen round holds the full critical
+bond. Data-availability attestations must remain valid
 through finalization, the risk-specific grace period, and the complete
 execution window; delayed finalization rechecks that horizon and expires stale
-evidence.
+evidence. The permissionless availability freeze fails until the complete
+risk-specific provider threshold is present, preventing an early caller from
+locking later providers out of the round.
 
 Passing proposals enter grace. They cannot execute early. Objective challenges
 block execution until deterministically resolved. After grace and all gates,
@@ -117,9 +122,13 @@ it does not automatically install or activate software.
 Canonical history is queried in deterministic pages of at most 64 entries;
 older entries remain immutable and addressable.
 
-The contract currently rejects `normal` risk proposals because no objective,
-contract-verifiable risk classifier is finalized. This fail-closed restriction
-is the second deployment blocker. It must not be replaced by a maintainer flag.
+Deployment has a second, off-chain fail-closed readiness check. It verifies the
+typed scope CAR, all independent build CARs, all public availability CARs, and
+content-addressed external audit CARs. A normal candidate needs two matching
+builders, two complete availability operators, and one passing external audit.
+A critical, migration, or consensus candidate needs three matching builders on
+at least two platform families, three availability operators, and two passing
+external audits. Local duplicate evidence cannot satisfy those thresholds.
 
 ## AI-First User Flow
 

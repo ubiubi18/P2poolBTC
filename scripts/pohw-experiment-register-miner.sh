@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'EOF'
@@ -11,6 +12,7 @@ registration after the Idena signature is supplied.
 Options:
   --idena-address ADDRESS       Idena address to bind to this miner
   --idena-signature-hex HEX     Signature over the printed ownership challenge
+  --idena-signature-stdin       Read the signature from standard input
   --registry-experiment-id ID   Prepare an ownerless Idena registry commitment
   --registry-anchor-file PATH   Finalized public MinerRegistryAnchorV1 receipt
   --output-dir PATH             Output directory for local registration artifacts
@@ -32,6 +34,7 @@ fi
 
 IDENA_ADDRESS=""
 IDENA_SIGNATURE_HEX=""
+IDENA_SIGNATURE_STDIN="false"
 REGISTRY_EXPERIMENT_ID=""
 REGISTRY_ANCHOR_FILE=""
 OUTPUT_DIR=""
@@ -47,6 +50,10 @@ while [[ $# -gt 0 ]]; do
     --idena-signature-hex)
       IDENA_SIGNATURE_HEX="${2:?missing value for --idena-signature-hex}"
       shift 2
+      ;;
+    --idena-signature-stdin)
+      IDENA_SIGNATURE_STDIN="true"
+      shift
       ;;
     --registry-experiment-id)
       REGISTRY_EXPERIMENT_ID="${2:?missing value for --registry-experiment-id}"
@@ -171,7 +178,7 @@ elif [[ -f ".pohw-experiment.env" ]]; then
 fi
 
 if [[ "${POHW_EXPERIMENT_NO_VALUE_ACK:-}" != "I_UNDERSTAND_NO_VALUE" ]]; then
-  echo "Set POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE before joining Experiment 0." >&2
+  echo "Set POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE before joining a PoHW experiment." >&2
   exit 1
 fi
 
@@ -201,7 +208,12 @@ if [[ -n "$REGISTRY_ANCHOR_FILE" && -z "$REGISTRY_EXPERIMENT_ID" ]]; then
   echo "--registry-anchor-file requires --registry-experiment-id (or POHW_MINER_REGISTRY_EXPERIMENT_ID)." >&2
   exit 1
 fi
-if [[ -n "$REGISTRY_EXPERIMENT_ID" && -z "$REGISTRY_ANCHOR_FILE" && -n "$IDENA_SIGNATURE_HEX" ]]; then
+if [[ -n "$IDENA_SIGNATURE_HEX" && "$IDENA_SIGNATURE_STDIN" == "true" ]]; then
+  echo "Use only one of --idena-signature-hex or --idena-signature-stdin." >&2
+  exit 1
+fi
+if [[ -n "$REGISTRY_EXPERIMENT_ID" && -z "$REGISTRY_ANCHOR_FILE" \
+  && ( -n "$IDENA_SIGNATURE_HEX" || "$IDENA_SIGNATURE_STDIN" == "true" ) ]]; then
   echo "Do not sign before the finalized registry anchor is available; the anchor changes the ownership challenge." >&2
   exit 1
 fi
@@ -266,12 +278,28 @@ if source.stat().st_size > MAX_JSON_BYTES:
 data = json.loads(source.read_text(encoding="utf-8"))
 
 PATH_KEYS = {"message_out", "envelope_out", "path"}
+ENDPOINT_KEYS = {"peer_addr"}
+
+def peer_summary(results):
+    attempted = len(results)
+    accepted = sum(
+        1 for item in results if isinstance(item, dict) and item.get("accepted") is True
+    )
+    return {
+        "accepted": accepted,
+        "attempted": attempted,
+        "not_accepted": attempted - accepted,
+    }
 
 def scrub(value):
     if isinstance(value, dict):
         scrubbed = {}
         for key, item in value.items():
-            if key in PATH_KEYS and isinstance(item, str):
+            if key == "peer_results" and isinstance(item, list):
+                scrubbed["peer_delivery_summary"] = peer_summary(item)
+            elif key in PATH_KEYS and isinstance(item, str):
+                scrubbed[key] = "<redacted>"
+            elif key in ENDPOINT_KEYS and isinstance(item, str):
                 scrubbed[key] = "<redacted>"
             else:
                 scrubbed[key] = scrub(item)
@@ -359,8 +387,12 @@ if [[ -n "$REGISTRY_ANCHOR_FILE" ]]; then
   args+=(--registry-anchor-file "$REGISTRY_ANCHOR_FILE")
 fi
 
-if [[ -n "$IDENA_SIGNATURE_HEX" ]]; then
-  args+=(--idena-signature-hex "$IDENA_SIGNATURE_HEX")
+if [[ -n "$IDENA_SIGNATURE_HEX" || "$IDENA_SIGNATURE_STDIN" == "true" ]]; then
+  if [[ "$IDENA_SIGNATURE_STDIN" == "true" ]]; then
+    args+=(--idena-signature-stdin)
+  else
+    args+=(--idena-signature-hex "$IDENA_SIGNATURE_HEX")
+  fi
   args+=(--message-out "$message_out")
   args+=(--envelope-out "$envelope_out")
   for path in "$message_out" "$envelope_out"; do
@@ -410,7 +442,7 @@ case "$status" in
     echo "Next: run scripts/pohw-experiment-preflight.sh ${ENV_FILE:-.pohw-experiment.env}" >&2
     ;;
   *)
-    if [[ -n "$IDENA_SIGNATURE_HEX" ]]; then
+    if [[ -n "$IDENA_SIGNATURE_HEX" || "$IDENA_SIGNATURE_STDIN" == "true" ]]; then
       echo "Next: run scripts/pohw-experiment-preflight.sh ${ENV_FILE:-.pohw-experiment.env}" >&2
     else
       echo "Next: inspect the registration status above before continuing." >&2

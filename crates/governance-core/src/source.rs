@@ -104,6 +104,7 @@ pub struct SourcePackage {
     pub root_cid: Cid,
     pub source_tree_sha256: String,
     pub manifest: SourceTreeManifestV1,
+    pub dag_cbor_bytes: Vec<u8>,
     pub car_bytes: Vec<u8>,
 }
 
@@ -112,6 +113,7 @@ pub struct SourcePatchPackage {
     pub patch_cid: Cid,
     pub patch_sha256: String,
     pub patch: SourcePatchV1,
+    pub dag_cbor_bytes: Vec<u8>,
     pub car_bytes: Vec<u8>,
 }
 
@@ -120,6 +122,7 @@ pub struct VerifiedSourcePatch {
     pub patch_cid: Cid,
     pub patch_sha256: String,
     pub patch: SourcePatchV1,
+    pub dag_cbor_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,7 @@ pub struct VerifiedSourcePackage {
     pub root_cid: Cid,
     pub source_tree_sha256: String,
     pub manifest: SourceTreeManifestV1,
+    pub dag_cbor_bytes: Vec<u8>,
     blocks: BTreeMap<String, Vec<u8>>,
 }
 
@@ -263,6 +267,7 @@ pub fn package_source_tree_with_artifact_exclusions(
         root_cid,
         source_tree_sha256: sha256_hex(&root_bytes),
         manifest,
+        dag_cbor_bytes: root_bytes,
         car_bytes,
     })
 }
@@ -377,6 +382,7 @@ pub fn verify_source_car(bytes: &[u8]) -> Result<VerifiedSourcePackage, SourceEr
         root_cid: parsed.root,
         source_tree_sha256: sha256_hex(root_bytes),
         manifest,
+        dag_cbor_bytes: root_bytes.clone(),
         blocks: parsed.blocks,
     })
 }
@@ -466,6 +472,7 @@ pub fn create_source_patch(
         patch_cid,
         patch_sha256: sha256_hex(&root_bytes),
         patch,
+        dag_cbor_bytes: root_bytes,
         car_bytes,
     })
 }
@@ -527,6 +534,7 @@ pub fn verify_source_patch(
         patch_cid: parsed.root,
         patch_sha256: sha256_hex(root_bytes),
         patch,
+        dag_cbor_bytes: root_bytes.clone(),
     })
 }
 
@@ -559,7 +567,9 @@ pub fn canonical_dag_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, SourceErro
     serde_ipld_dagcbor::to_vec(value).map_err(|error| SourceError::Cbor(error.to_string()))
 }
 
-fn encode_source_manifest(manifest: &SourceTreeManifestV1) -> Result<Vec<u8>, SourceError> {
+pub(crate) fn encode_source_manifest(
+    manifest: &SourceTreeManifestV1,
+) -> Result<Vec<u8>, SourceError> {
     let canonical = CanonicalSourceTreeManifestV1 {
         schema_version: manifest.schema_version,
         kind: manifest.kind.clone(),
@@ -573,7 +583,7 @@ fn encode_source_manifest(manifest: &SourceTreeManifestV1) -> Result<Vec<u8>, So
     canonical_dag_cbor(&canonical)
 }
 
-fn decode_source_manifest(bytes: &[u8]) -> Result<SourceTreeManifestV1, SourceError> {
+pub(crate) fn decode_source_manifest(bytes: &[u8]) -> Result<SourceTreeManifestV1, SourceError> {
     let canonical: CanonicalSourceTreeManifestV1 = serde_ipld_dagcbor::from_slice(bytes)
         .map_err(|error| SourceError::Cbor(error.to_string()))?;
     Ok(SourceTreeManifestV1 {
@@ -584,7 +594,7 @@ fn decode_source_manifest(bytes: &[u8]) -> Result<SourceTreeManifestV1, SourceEr
     })
 }
 
-fn encode_source_patch(patch: &SourcePatchV1) -> Result<Vec<u8>, SourceError> {
+pub(crate) fn encode_source_patch(patch: &SourcePatchV1) -> Result<Vec<u8>, SourceError> {
     let canonical = CanonicalSourcePatchV1 {
         schema_version: patch.schema_version,
         kind: patch.kind.clone(),
@@ -601,7 +611,7 @@ fn encode_source_patch(patch: &SourcePatchV1) -> Result<Vec<u8>, SourceError> {
     canonical_dag_cbor(&canonical)
 }
 
-fn decode_source_patch(bytes: &[u8]) -> Result<SourcePatchV1, SourceError> {
+pub(crate) fn decode_source_patch(bytes: &[u8]) -> Result<SourcePatchV1, SourceError> {
     let canonical: CanonicalSourcePatchV1 = serde_ipld_dagcbor::from_slice(bytes)
         .map_err(|error| SourceError::Cbor(error.to_string()))?;
     Ok(SourcePatchV1 {

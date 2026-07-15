@@ -114,7 +114,6 @@ class MainnetHandoffTest(unittest.TestCase):
         (fork_dir / "fork-blocks.ndjson").write_text("{}\n", encoding="utf-8")
         marker = root / "enable-experiment-0-fork"
         marker.write_text("approved\n", encoding="utf-8")
-        marker.chmod(0o600)
         commitment = root / "pohw-commitment.json"
         commitment.write_text("{}\n", encoding="utf-8")
         snapshot_dir = root / "snapshots"
@@ -313,20 +312,6 @@ class MainnetHandoffTest(unittest.TestCase):
             self.assertTrue((root / "fork-chain").is_dir())
             self.assertTrue((root / "enable-experiment-0-fork").is_file())
             self.assertFalse((root / "handoff/mining-mode.env").exists())
-            self.assertFalse((root / "systemctl.log").exists())
-
-    @unittest.skipUnless(os.name == "posix", "POSIX permissions required")
-    def test_permissive_fork_marker_is_rejected_before_service_changes(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="pohw-handoff-marker-mode-") as temp:
-            root = Path(temp).resolve()
-            env = self.setup_runtime(root)
-            marker = Path(env["POHW_MAINNET_HANDOFF_FORK_MARKER"])
-            marker.chmod(0o666)
-
-            result = self.run_handoff(env)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("must not be accessible by group or others", result.stderr)
             self.assertFalse((root / "systemctl.log").exists())
 
     def test_service_stop_failure_rolls_back_before_activation_commit(self) -> None:

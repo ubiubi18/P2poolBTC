@@ -1,14 +1,3 @@
-diff --git a/.env.e2e b/.env.e2e
-deleted file mode 100644
-index ab67bda0b5f8f0225dd24994880c717d45261298..0000000000000000000000000000000000000000
---- a/.env.e2e
-+++ /dev/null
-@@ -1,4 +0,0 @@
--NODE_ENV=e2e
--NODE_MOCK=http://localhost:12345
--BUMP_EXTRA_FLIPS=10
--FINALIZE_FLIPS=20
-\ No newline at end of file
 diff --git a/main/ai-providers/bridge.js b/main/ai-providers/bridge.js
 index bad8e2ff2e11a03e8b746968d0fd5d1ad2794716..93524b158ebad42ae8b34b323ef4225602213f62 100644
 --- a/main/ai-providers/bridge.js
@@ -321,10 +310,10 @@ index 0000000000000000000000000000000000000000..6c724037e693e08e603a64bd741151bf
 +})
 diff --git a/main/ai-providers/governance-operations.js b/main/ai-providers/governance-operations.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c5ea4c3f4
+index 0000000000000000000000000000000000000000..90273e7c4f4610924231589533d89318d6d69846
 --- /dev/null
 +++ b/main/ai-providers/governance-operations.js
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,428 @@
 +const crypto = require('crypto')
 +
 +const GOVERNANCE_OPERATIONS = Object.freeze([
@@ -445,6 +434,27 @@ index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c
 +  return 'hosted'
 +}
 +
++function normalizeProviderDestination({provider, providerConfig = {}}) {
++  const rawBaseUrl = String(
++    providerConfig && providerConfig.baseUrl ? providerConfig.baseUrl : ''
++  ).trim()
++  if (!rawBaseUrl) {
++    return `provider-default:${provider}`
++  }
++
++  let url
++  try {
++    url = new URL(rawBaseUrl)
++  } catch {
++    throw new Error('AI provider base URL is invalid')
++  }
++  if (!['http:', 'https:'].includes(url.protocol)) {
++    throw new Error('AI provider base URL must use HTTP or HTTPS')
++  }
++  const path = url.pathname.replace(/\/+$/, '') || '/'
++  return `${url.protocol}//${url.host}${path}`
++}
++
 +function normalizeSourcePath(value) {
 +  const raw = String(value || '')
 +    .trim()
@@ -533,6 +543,8 @@ index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c
 +function createContextFingerprint({
 +  operation,
 +  provider,
++  providerConfig,
++  executionKind,
 +  model,
 +  repository,
 +  sourceCid,
@@ -540,10 +552,16 @@ index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c
 +  userInstruction,
 +  files,
 +}) {
++  const providerDestination = normalizeProviderDestination({
++    provider,
++    providerConfig,
++  })
 +  const canonical = JSON.stringify({
 +    schemaVersion: 'GovernanceAgentContextV1',
 +    operation,
 +    provider,
++    providerDestination,
++    executionKind,
 +    model,
 +    repository,
 +    sourceCid,
@@ -583,6 +601,7 @@ index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c
 +    schemaVersion: 'GovernanceAgentRunV1',
 +    operation: prepared.operation,
 +    provider: prepared.provider,
++    providerDestination: normalizeProviderDestination(prepared),
 +    model: prepared.model,
 +    executionKind: prepared.executionKind,
 +    state,
@@ -720,14 +739,15 @@ index 0000000000000000000000000000000000000000..c8b1536d9f785c24bdbea040aac2619c
 +  GOVERNANCE_SYSTEM_PROMPT,
 +  classifyProvider,
 +  createContextFingerprint,
++  normalizeProviderDestination,
 +  prepareGovernanceOperation,
 +}
 diff --git a/main/ai-providers/governance-operations.test.js b/main/ai-providers/governance-operations.test.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..91cd0ff7502fe348cf462208c950940a71594095
+index 0000000000000000000000000000000000000000..de3cc4343ab108ffd5aa5f34dfd3c3644a881180
 --- /dev/null
 +++ b/main/ai-providers/governance-operations.test.js
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,195 @@
 +const {
 +  GOVERNANCE_OPERATIONS,
 +  classifyProvider,
@@ -823,6 +843,53 @@ index 0000000000000000000000000000000000000000..91cd0ff7502fe348cf462208c950940a
 +
 +    expect(first.publicPlan.contextFingerprint).not.toBe(
 +      second.publicPlan.contextFingerprint
++    )
++  })
++
++  it('binds hosted approval to the normalized provider destination', () => {
++    const first = prepareGovernanceOperation(
++      operationPayload({
++        provider: 'openai-compatible',
++        providerConfig: {baseUrl: 'https://review-a.example/v1'},
++        executionConfirmed: true,
++      })
++    )
++    const redirected = prepareGovernanceOperation(
++      operationPayload({
++        provider: 'openai-compatible',
++        providerConfig: {baseUrl: 'https://review-b.example/v1'},
++        executionConfirmed: true,
++        contextDisclosureConfirmed: true,
++        approvedContextFingerprint: first.publicPlan.contextFingerprint,
++      })
++    )
++
++    expect(first.publicPlan.providerDestination).toBe(
++      'https://review-a.example/v1'
++    )
++    expect(redirected.publicPlan.contextFingerprint).not.toBe(
++      first.publicPlan.contextFingerprint
++    )
++    expect(redirected.canRun).toBe(false)
++    expect(redirected.publicPlan.state).toBe('awaiting_context_confirmation')
++  })
++
++  it('does not expose credentials, query values, or fragments in provider destination', () => {
++    const result = prepareGovernanceOperation(
++      operationPayload({
++        provider: 'openai-compatible',
++        providerConfig: {
++          baseUrl:
++            'https://viewer:redacted@review.example:8443/v1/?routing=alternate#hidden',
++        },
++      })
++    )
++
++    expect(result.publicPlan.providerDestination).toBe(
++      'https://review.example:8443/v1'
++    )
++    expect(JSON.stringify(result.publicPlan)).not.toMatch(
++      /viewer|redacted|alternate|hidden/
 +    )
 +  })
 +
@@ -2453,18 +2520,19 @@ index 0000000000000000000000000000000000000000..0ae73316085a4824e470801ab8fae233
 +}
 diff --git a/renderer/shared/components/governance-day-card.test.js b/renderer/shared/components/governance-day-card.test.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e809527be2a91f31e05bccc80ffb450f2c650cb
+index 0000000000000000000000000000000000000000..4c21f976137087e753bdf1e1c731743b0c3a524e
 --- /dev/null
 +++ b/renderer/shared/components/governance-day-card.test.js
-@@ -0,0 +1,55 @@
-+import React from 'react'
-+import {act} from 'react-dom/test-utils'
+@@ -0,0 +1,56 @@
++import React, {act} from 'react'
 +import {createRoot} from 'react-dom/client'
 +import {ChakraProvider} from '@chakra-ui/react'
 +import GovernanceDayCard from './governance-day-card'
 +import {createExperimentalGovernanceState} from '../utils/epoch-governance'
 +
 +const mockPush = jest.fn()
++
++global.IS_REACT_ACT_ENVIRONMENT = true
 +
 +jest.mock('next/router', () => ({
 +  useRouter: () => ({push: mockPush, pathname: '/ai-chat'}),
