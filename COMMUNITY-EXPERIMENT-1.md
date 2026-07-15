@@ -5,6 +5,55 @@ identified Bitcoin Core fork with ordinary Bitcoin transactions, wallets,
 PSBTs, and scripts. It is not Bitcoin mainnet and its coins have no promised
 value.
 
+## Choose Your Journey
+
+There are two different journeys. Do not mix them.
+
+### Lane A: Review And Rehearse Now
+
+Anyone can review the current candidate without joining the live network. This
+lane uses no Idena identity signature, API key, wallet, live peer, root
+installation, systemd unit, Stratum endpoint, or mining hardware:
+
+```sh
+git clone https://github.com/ubiubi18/P2poolBTC.git
+cd P2poolBTC
+git switch --detach origin/vibe/experiment-1-release-readiness
+test -z "$(git status --short)"
+git rev-parse HEAD
+
+STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
+  compatibility/experiment-1-launch-policy.json | \
+  sed -n 's/^launch policy verified: //p')
+test "$STATUS" = blocked-release-readiness
+
+python3 scripts/pohw-experiment-1-manifest.py verify \
+  compatibility/experiment-1-full-consensus.json
+cargo test --locked -p p2pool-node -p pohw-core
+```
+
+For this lane, `blocked-release-readiness`, a clean checkout, a verified
+manifest, and passing tests are the expected success result. Do not continue to
+the privileged installation or registration commands below. The candidate
+branch can move, so include the exact `git rev-parse HEAD` value in every review
+report.
+
+### Lane B: Join Live Only After The Interlock Opens
+
+The live journey has five stages:
+
+| Stage | Outcome required before continuing |
+| --- | --- |
+| 1. Verify release | Exact release commit, source CID, CAR digest, build evidence, launch policy, and manifest all verify independently |
+| 2. Build Core | The pinned Bitcoin Core v31.1 fork is built from source in an isolated `chain=pohw` profile |
+| 3. Verify Core | Activation and manifest match, RPC is loopback-only, a fork peer is connected, and initial block download is complete |
+| 4. Register identity | An eligible public Idena address signs only the exact registration challenge and gossip accepts the envelope |
+| 5. Start P2Pool | Gossip starts before the adapter, local Stratum accepts work, and Core plus sharechain progress is observed locally |
+
+The numbered sections below implement those five stages. Stop immediately on a
+mismatch. A screenshot, GitHub branch, social-media message, or coordinator
+signature cannot replace any required verification result.
+
 ## Public-Join Interlock
 
 You may publish the idea, source, threat model, test results, and sanitized
@@ -1046,6 +1095,16 @@ instead of repeatedly running the smoke tool.
 ## How To Know You Joined Successfully
 
 All rows must pass; a dashboard screenshot alone is not proof.
+
+### Review Or Rehearsal Success
+
+A Lane A rehearsal succeeds when the checkout is clean, the launch-policy
+verifier reports `blocked-release-readiness`, the Experiment 1 manifest
+verifies, and the focused Rust tests pass. It must not create a registration,
+start a service, contact a live peer, or request any secret. This proves only
+that the candidate can be reviewed and built locally.
+
+### Live Join Success
 
 | Check | Required result |
 | --- | --- |

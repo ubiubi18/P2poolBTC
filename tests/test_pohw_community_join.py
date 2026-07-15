@@ -10,6 +10,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+README = ROOT / "README.md"
 SHELL_SCRIPT = ROOT / "scripts" / "pohw-community-join.sh"
 POWERSHELL_SCRIPT = ROOT / "scripts" / "pohw-community-join.ps1"
 SCHEMA = ROOT / "schemas" / "pohw-source-join-v1.schema.json"
@@ -22,6 +23,24 @@ ACTIVATION_ID = "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4
 
 
 class CommunityJoinTests(unittest.TestCase):
+    def test_experiment_1_docs_separate_review_from_live_join(self):
+        readme = README.read_text(encoding="utf-8")
+        guide = EXPERIMENT_1_COMMUNITY_GUIDE.read_text(encoding="utf-8")
+
+        for source in (readme, guide):
+            self.assertIn("Review And Rehearse Now", source)
+            self.assertIn("blocked-release-readiness", source)
+            self.assertIn("vibe/experiment-1-release-readiness", source)
+            self.assertIn("source CID", source)
+            self.assertIn("CAR digest", source)
+            self.assertIn("loopback-only", source)
+            self.assertIn("sharechain", source)
+
+        self.assertIn("Five-Step Live Journey", readme)
+        self.assertIn("Join Live Only After The Interlock Opens", guide)
+        self.assertIn("uses no Idena identity signature", guide)
+        self.assertIn("must not create a registration", guide)
+
     def test_shell_script_is_valid_and_documents_source_only_trust(self):
         subprocess.run(["bash", "-n", str(SHELL_SCRIPT)], check=True)
         result = subprocess.run(

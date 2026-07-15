@@ -39,6 +39,10 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > closed for `chain=pohw` unless the reviewed Idena anchor policy is mandatory.
 > A ready policy must also bind the canonical deployment-readiness report CID
 > and CAR digest; editable status flags alone cannot open public joining.
+> The public `vibe/experiment-1-release-readiness` branch is a review candidate,
+> not a canonical release or permission to connect a miner. Its head may move
+> during review. A live join must use the later exact release commit and the
+> independently published CID, CAR digest, build evidence, and anchor policy.
 
 > **Bitcoin and Idena risk remain real.** Fork coins have no promised value,
 > but inherited Bitcoin scripts use mainnet keys; exposing one can lose real
@@ -97,17 +101,70 @@ SD-only Pi remained observer-only throughout the check.
 
 ## Start Here
 
-For new full transaction, inherited UTXO, wallet, and FROST testing, use the
-[Experiment 1 runbook](EXPERIMENT-1.md). It builds the fork from exact Bitcoin
-Core source and keeps the heavy chainstate on the dedicated host, not the Pi.
+Choose the path that matches what you are trying to do:
 
-The [Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) is the staged
-source-first join procedure. Its public-join interlock intentionally stops at
-the current blocked launch policy. Once the required release, registry, review,
-and second-node evidence exists, the same guide builds both Core and P2poolBTC
-from exact source, supports a pruned miner node without an explorer index, and
-verifies Core, sharechain, and block progress locally. No coordinator-signed
-installer or lead-developer release key is trusted.
+| Goal | What is safe now | Stop condition |
+| --- | --- | --- |
+| Review or rehearse | Inspect the public candidate branch, verify the blocked policy and manifest, then build and test locally without credentials or live services | Do not connect Core, gossip, Stratum, an Idena identity, or mining hardware |
+| Join the live experiment | Wait for the policy verifier to print `ready-for-public-join`, then follow the exact source-first release procedure | Never override the interlock or substitute a moving branch for the exact release commit and CID |
+| Create a separate experiment | Use the operator runbook and generate a new manifest and activation ID intentionally | Never advertise a separately generated network as the existing Experiment 1 |
+
+### Review And Rehearse Now
+
+This path requires no identity signature, API key, wallet, peer endpoint, or
+root installation. The expected policy result is currently
+`blocked-release-readiness`; that is success for a review rehearsal, not a live
+join:
+
+```sh
+git clone https://github.com/ubiubi18/P2poolBTC.git
+cd P2poolBTC
+git switch --detach origin/vibe/experiment-1-release-readiness
+test -z "$(git status --short)"
+git rev-parse HEAD
+
+STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
+  compatibility/experiment-1-launch-policy.json | \
+  sed -n 's/^launch policy verified: //p')
+test "$STATUS" = blocked-release-readiness
+
+python3 scripts/pohw-experiment-1-manifest.py verify \
+  compatibility/experiment-1-full-consensus.json
+cargo test --locked -p p2pool-node -p pohw-core
+```
+
+Do not start systemd units or copy credentials during this lane. Record the
+commit printed by `git rev-parse HEAD` when reporting a review result because
+the candidate branch is not a release identifier.
+
+### Five-Step Live Journey After The Interlock Opens
+
+1. **Verify the release.** Obtain the exact commit, source CID, CAR digest,
+   build evidence, launch policy, and peer information through independent
+   channels. Recompute the hashes locally.
+2. **Build a pruned Core node.** Build the pinned Bitcoin Core v31.1 source and
+   reviewed Experiment 1 patch. Keep `chain=pohw`, the fork datadir, and RPC
+   credentials isolated from Bitcoin mainnet.
+3. **Verify Core.** Confirm the activation ID, manifest digest, P2P connection,
+   `initialblockdownload=false`, and a loopback-only RPC endpoint before using
+   an identity.
+4. **Register an identity.** Publish only the eligible Idena address and a
+   signature over the exact registration challenge. Never export the identity
+   key, backup, password, or node API key.
+5. **Start P2Pool and prove progress.** Start gossip before the adapter, connect
+   mining hardware to the local Stratum endpoint, and verify that an accepted
+   submission advances both the local Core fork height and sharechain state.
+
+The [Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) contains the
+copy-paste procedure, success ladder, stop commands, and safe issue-reporting
+template for these steps. It supports a pruned participant without an explorer
+index. No coordinator-signed installer or lead-developer release key is
+trusted.
+
+For full transaction, inherited UTXO, wallet, FROST, or separate-network
+operator testing, use the [Experiment 1 runbook](EXPERIMENT-1.md). It builds the
+fork from exact Bitcoin Core source and keeps the heavy chainstate on the
+dedicated host, not the Pi.
 
 Experiment 1 runs in its own source-built Bitcoin Core profile. Always pass
 `-chain=pohw` and use the dedicated fork datadir; never point the experiment at
@@ -180,7 +237,7 @@ The current candidate implements:
 
 The locked local parameter-set CID is
 `bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`. The locally
-built WASM candidate is 289,547 bytes with CID
+built WASM candidate is 289,677 bytes with CID
 `bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq` and SHA-256
 `eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc`.
 These values identify test artifacts; they are not deployment authorization.
