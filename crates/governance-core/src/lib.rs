@@ -1,4 +1,6 @@
 pub mod attestation;
+pub mod epoch_demo;
+pub mod epoch_governance;
 pub mod gates;
 pub mod identity;
 pub mod lifecycle;
@@ -11,6 +13,8 @@ pub mod source;
 pub mod types;
 
 pub use attestation::*;
+pub use epoch_demo::*;
+pub use epoch_governance::*;
 pub use gates::{evaluate_gates, AcceptanceEvidence, GateResult, GateResults};
 pub use identity::{flip_trust_bps, IdentityState, MetricsError};
 pub use lifecycle::*;

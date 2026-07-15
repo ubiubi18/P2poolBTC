@@ -17,6 +17,7 @@ let payment = 0n;
 let epoch = 10;
 let block = 1n;
 let exports;
+const contractAddress = Buffer.from("99".repeat(20), "hex");
 
 const imports = {
   env: {
@@ -32,6 +33,7 @@ const imports = {
     },
     remove_storage(keyPtr) { storage.delete(readString(keyPtr)); },
     caller() { return writeBytes(caller); },
+    own_addr() { return writeBytes(contractAddress); },
     pay_amount() { return payment === 0n ? 0 : writeBytes(bigEndian(payment)); },
     create_transfer_promise(addressPtr, amountPtr) {
       transfers.push({ address: Buffer.from(readBytes(addressPtr)).toString("hex"), amount: fromBigEndian(readBytes(amountPtr)) });
@@ -73,7 +75,7 @@ const metricLeaves = addresses.map((address, index) => ({
 }));
 const metricTree = metricsTree(metricLeaves);
 
-const parameterCid = "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm";
+const parameterCid = "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
 const ecosystemManifests = new Map();
 const initialManifest = ecosystemManifestFixture("initial", null, cid("initial-source"), []);
 const initialCid = initialManifest.cid;
@@ -81,6 +83,10 @@ expectFailure(() => call("deploy", [initialCid, cid("wrong-parameters"), metricT
   caller: addresses[0], block: 1n, epoch: 10,
 }));
 call("deploy", [initialCid, parameterCid, metricTree.root, "10"], { caller: addresses[0], block: 1n, epoch: 10 });
+assert.equal(storage.get("epoch-governance:enabled").toString(), "1");
+// Legacy regression cases below deliberately bypass the production deployment
+// invariant through direct emulator storage access. No contract method can do this.
+storage.delete("epoch-governance:enabled");
 
 for (let index = 0; index < addresses.length; index++) {
   const leaf = metricLeaves[index];
@@ -185,12 +191,12 @@ expectFailure(() => call("openReviewRound", [
   unlistedCandidate.cid, unlistedCandidate.hex,
   incompleteAggregatePatch.cid, incompleteAggregatePatch.hex,
   first.pinset.cid, first.pinset.hex,
-], { caller: addresses[0], block: 10n, epoch: 11, payment: 10n * 10n ** 18n }));
+], { caller: addresses[0], block: 10n, epoch: 11, payment: 25n * 10n ** 18n }));
 expectFailure(() => call("openReviewRound", [
   ...first.openArgs.slice(0, 3), `${first.candidateManifest.hex.slice(0, -2)}00`, ...first.openArgs.slice(4),
-], { caller: addresses[0], block: 10n, epoch: 11, payment: 10n * 10n ** 18n }));
+], { caller: addresses[0], block: 10n, epoch: 11, payment: 25n * 10n ** 18n }));
 const firstRound = JSON.parse(call("openReviewRound", first.openArgs, {
-  caller: addresses[0], block: 10n, epoch: 11, payment: 10n * 10n ** 18n,
+  caller: addresses[0], block: 10n, epoch: 11, payment: 25n * 10n ** 18n,
 }));
 const unrelatedAgentSource = dagObject({
   ...first.agents[0].value,
@@ -374,7 +380,7 @@ expectFailure(() => call("executeProposal", [create.proposalId], { caller: addre
 
 call("withdrawRefundableBond", [create.proposalId], { caller: addresses[0], block: 331n, epoch: 12 });
 call("withdrawAttestationBond", [create.proposalId, "agent", first.agents[0].cid], { caller: addresses[0], block: 331n, epoch: 12 });
-assert.equal(transfers.at(-2).amount, 10n * 10n ** 18n);
+assert.equal(transfers.at(-2).amount, 25n * 10n ** 18n);
 assert.equal(transfers.at(-1).amount, 10n ** 18n);
 call("expireProposal", [autoSettledCreate.proposalId], { caller: addresses[7], block: 331n, epoch: 12 });
 call("withdrawRefundableBond", [autoSettledCreate.proposalId], {
@@ -406,12 +412,20 @@ assert.equal(JSON.parse(call("canonicalEcosystemCid", [], { caller: addresses[3]
 call("scheduleWithdrawal", [(100n * 10n ** 18n).toString()], { caller: addresses[0], block: 550n, epoch: 11 });
 call("finalizeUnbonding", [], { caller: addresses[0], block: 580n, epoch: 16 });
 assert.equal(transfers.at(-1).amount, 100n * 10n ** 18n);
+const baseRegisteredWeight = metricLeaves.reduce((total, leaf) => (
+  total + governanceWeight(100n * 10n ** 18n, leaf.state, leaf.trust)
+), 0n);
+assert.equal(decoder.decode(storage.get("governance:total-weight")), baseRegisteredWeight.toString());
 
 const expired = proposalFixtures("expired", addresses, first.candidateCid, cid("candidate-expired"), false, 600, 16);
 const expiredCreate = prepareProposal(expired, 560n, 600n, 16);
 call("openVoting", [expiredCreate.proposalId], { caller: addresses[7], block: 640n, epoch: 16 });
 call("scheduleWithdrawal", [(100n * 10n ** 18n).toString()], { caller: addresses[1], block: 640n, epoch: 16 });
 call("finalizeUnbonding", [], { caller: addresses[1], block: 641n, epoch: 21 });
+assert.equal(
+  decoder.decode(storage.get("governance:total-weight")),
+  (baseRegisteredWeight - governanceWeight(100n * 10n ** 18n, metricLeaves[1].state, metricLeaves[1].trust)).toString(),
+);
 for (let index = 1; index < addresses.length; index++) {
   call("castVote", [expiredCreate.proposalId, "yes"], { caller: addresses[index], block: 642n, epoch: 21 });
 }
@@ -433,14 +447,14 @@ state = JSON.parse(call("expireProposal", [expiredCreate.proposalId], {
   caller: addresses[6], block: 1481n, epoch: 16,
 }));
 assert.equal(state.state, "Expired");
-assert.equal(burns.at(-1), 25n * 10n ** 17n);
+assert.equal(burns.at(-1), 625n * 10n ** 16n);
 assert.equal(JSON.parse(call("canonicalEcosystemCid", [], {
   caller: addresses[3], block: 1481n, epoch: 16,
 })).canonicalEcosystemCid, first.candidateCid);
 call("withdrawRefundableBond", [expiredCreate.proposalId], {
   caller: addresses[0], block: 1482n, epoch: 16,
 });
-assert.equal(transfers.at(-1).amount, 75n * 10n ** 17n);
+assert.equal(transfers.at(-1).amount, 1875n * 10n ** 16n);
 
 call("registerGovernanceStake", [], {
   caller: addresses[0], block: 1490n, epoch: 20, payment: 100n * 10n ** 18n,
@@ -450,6 +464,7 @@ call("registerGovernanceStake", [], {
 });
 call("activateGovernanceStake", [], { caller: addresses[0], block: 1491n, epoch: 21 });
 call("activateGovernanceStake", [], { caller: addresses[1], block: 1491n, epoch: 21 });
+assert.equal(decoder.decode(storage.get("governance:total-weight")), expectedAutoSettledWeight.toString());
 
 exerciseFalseClaimChallenge("agent-false-claim", "agent_test_result", 1600);
 exerciseFalseClaimChallenge("builder-false-claim", "builder_test_result", 1800);
@@ -530,6 +545,221 @@ state = JSON.parse(call("executeProposal", [delayedCreate.proposalId], {
 }));
 assert.equal(state.state, "Executed");
 
+// Epoch-governance profile: one authenticated proposal slot, one frozen set,
+// one batch commit/reveal ballot, grace, and append-only execution history.
+const epochParent = JSON.parse(call("canonicalEcosystemCid", [], {
+  caller: addresses[6], block: 2800n, epoch: 21,
+})).canonicalEcosystemCid;
+const epochFirst = proposalFixtures(
+  "epoch-first", addresses, epochParent, cid("epoch-first-candidate"), false, 2939, 22,
+);
+const epochSecond = proposalFixtures(
+  "epoch-second", addresses, epochParent, cid("epoch-second-candidate"), false, 2939, 22,
+);
+const epochFirstOpened = JSON.parse(call("openReviewRound", epochFirst.openArgs, {
+  caller: addresses[0], block: 2899n, epoch: 21, payment: 25n * 10n ** 18n,
+}));
+const epochSecondOpened = JSON.parse(call("openReviewRound", epochSecond.openArgs, {
+  caller: addresses[0], block: 2899n, epoch: 21, payment: 25n * 10n ** 18n,
+}));
+
+storage.set("epoch-governance:enabled", Buffer.from("1"));
+const schedule = JSON.parse(call("anchorGovernanceEpoch", [], {
+  caller: addresses[9], block: 2900n, epoch: 22,
+}));
+assert.equal(schedule.proposalCutoffBlock, 2940);
+const liveMetricsRoot = storage.get("governance:metrics-root");
+const liveMetricsEpoch = storage.get("governance:metrics-epoch");
+storage.set("governance:metrics-root", Buffer.from("aa".repeat(32)));
+storage.set("governance:metrics-epoch", Buffer.from("99"));
+assert.doesNotThrow(() => call("previewVotingPower", ["22"], {
+  caller: addresses[0], block: 2900n, epoch: 22,
+}));
+storage.set("governance:metrics-root", liveMetricsRoot);
+storage.set("governance:metrics-epoch", liveMetricsEpoch);
+const expectedEpochWeight = addresses.reduce((total, address) => {
+  const snapshot = JSON.parse(call("previewVotingPower", ["22"], {
+    caller: address, block: 2900n, epoch: 22,
+  }));
+  return total + BigInt(snapshot.effectiveVoteWeight);
+}, 0n);
+submitAttestations(epochFirstOpened.reviewRoundId, epochFirst, 2900n, 22);
+submitAttestations(epochSecondOpened.reviewRoundId, epochSecond, 2900n, 22);
+const epochFirstRound = JSON.parse(call("freezeReviewRound", [epochFirstOpened.reviewRoundId], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+const epochSecondRound = JSON.parse(call("freezeReviewRound", [epochSecondOpened.reviewRoundId], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+bindProposalToReview(epochFirst, epochFirstRound.reviewRoundId);
+bindProposalToReview(epochSecond, epochSecondRound.reviewRoundId);
+const wrongParameterProposal = dagObject({
+  ...epochFirst.proposalValue,
+  governanceParameterSetCid: cid("wrong-governance-parameters"),
+  reviewRoundId: epochFirstRound.reviewRoundId,
+});
+expectFailure(() => call("createProposal", [wrongParameterProposal.cid, wrongParameterProposal.hex], {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+const slotAfterWrongParameters = JSON.parse(call("getProposalSlot", ["22", `0x${addresses[0].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(slotAfterWrongParameters.used, false);
+const oversizedProposal = dagObject({
+  ...epochFirst.proposalValue,
+  changedFileCount: 1025,
+  reviewRoundId: epochFirstRound.reviewRoundId,
+});
+expectFailure(() => call("createProposal", [oversizedProposal.cid, oversizedProposal.hex], {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+const slotAfterOversizedProposal = JSON.parse(call("getProposalSlot", ["22", `0x${addresses[0].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(slotAfterOversizedProposal.used, false);
+const cancellationBranch = snapshotHarnessState();
+const cancelledEpochProposal = JSON.parse(call("createProposal", epochFirst.createArgs, {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+const cancelledState = JSON.parse(call("cancelProposalBeforeCutoff", [cancelledEpochProposal.proposalId], {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+assert.equal(cancelledState.state, "CancelledBeforeCutoff");
+const cancelledSlot = JSON.parse(call("getProposalSlot", ["22", `0x${addresses[0].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(cancelledSlot.used, true);
+assert.equal(cancelledSlot.proposalId, cancelledEpochProposal.proposalId);
+expectFailure(() => call("createProposal", epochSecond.createArgs, {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+restoreHarnessState(cancellationBranch);
+const epochCreated = JSON.parse(call("createProposal", epochFirst.createArgs, {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+const epochCreatedState = JSON.parse(call("proposalState", [epochCreated.proposalId], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(epochCreatedState.pos.snapshot, expectedEpochWeight.toString());
+call("submitProposalMetadataRoot", [epochCreated.proposalId, epochCreated.metadataRoot], {
+  caller: addresses[7], block: 2939n, epoch: 22,
+});
+call("attachRecoveryManifest", [
+  epochCreated.proposalId,
+  epochFirst.proposalValue.rollbackManifestCid,
+  epochFirst.proposalValue.rollbackInstructionsCid,
+], { caller: addresses[0], block: 2939n, epoch: 22 });
+expectFailure(() => call("createProposal", epochSecond.createArgs, {
+  caller: addresses[0], block: 2939n, epoch: 22,
+}));
+const slot = JSON.parse(call("getProposalSlot", ["22", `0x${addresses[0].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(slot.proposalId, epochCreated.proposalId);
+const independentSlot = JSON.parse(call("getProposalSlot", ["22", `0x${addresses[1].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(independentSlot.used, false);
+const nextEpochSlot = JSON.parse(call("getProposalSlot", ["23", `0x${addresses[0].toString("hex")}`], {
+  caller: addresses[9], block: 2939n, epoch: 22,
+}));
+assert.equal(nextEpochSlot.used, false);
+
+const epochSet = JSON.parse(call("freezeEpochProposalSet", [], {
+  caller: addresses[9], block: 2940n, epoch: 22,
+}));
+assert.equal(epochSet.proposals.length, 1);
+assert.equal(epochSet.proposals[0].proposalId, epochCreated.proposalId);
+expectFailure(() => call("openVoting", [epochCreated.proposalId], {
+  caller: addresses[9], block: 2941n, epoch: 22,
+}));
+
+const epochChoices = `${epochCreated.proposalId}:yes`;
+const epochVoters = addresses.slice(0, 12);
+const epochSecrets = epochVoters.map((voter, index) => ({
+  nonce: BigInt(index + 1),
+  salt: digest(`epoch-salt-${index}`).toString("hex"),
+  commitment: epochBallotCommitment({
+    epoch: 22,
+    voter,
+    frozenRoot: epochSet.frozenRoot,
+    choices: ["yes"],
+    nonce: BigInt(index + 1),
+    salt: digest(`epoch-salt-${index}`),
+  }),
+}));
+epochVoters.forEach((voter, index) => call("commitEpochBallot", [epochSecrets[index].commitment], {
+  caller: voter, block: 2980n, epoch: 22,
+}));
+expectFailure(() => call("revealEpochBallot", [epochChoices, epochSecrets[0].nonce, digest("wrong-salt").toString("hex")], {
+  caller: epochVoters[0], block: 3000n, epoch: 22,
+}));
+epochVoters.forEach((voter, index) => call("revealEpochBallot", [
+  epochChoices, epochSecrets[index].nonce, epochSecrets[index].salt,
+], { caller: voter, block: 3000n, epoch: 22 }));
+const staleAvailabilityBranch = snapshotHarnessState();
+const staleAvailabilityResult = JSON.parse(call("finalizeEpochVoting", [], {
+  caller: addresses[9], block: 3160n, epoch: 22,
+}));
+assert.equal(staleAvailabilityResult.proposals[0].state, "Expired");
+restoreHarnessState(staleAvailabilityBranch);
+const epochFinalized = JSON.parse(call("finalizeEpochVoting", [], {
+  caller: addresses[9], block: 3020n, epoch: 22,
+}));
+assert.equal(epochFinalized.proposals[0].state, "AcceptedPendingGrace");
+const epochDecision = JSON.parse(call("getEpochDecisionRecord", [epochCreated.proposalId], {
+  caller: addresses[9], block: 3020n, epoch: 22,
+}));
+assert.equal(epochDecision.record.state, "AcceptedPendingGrace");
+assert.equal(epochDecision.record.proposalSetRoot, epochSet.frozenRoot);
+assert.equal(epochDecision.decisionRecordCid, rawObject(JSON.stringify(epochDecision.record)).cid);
+expectFailure(() => call("enterExecutionReadyState", [epochCreated.proposalId], {
+  caller: addresses[9], block: 3199n, epoch: 22,
+}));
+call("enterExecutionReadyState", [epochCreated.proposalId], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+});
+expectFailure(() => call("executeRevert", [epochCreated.proposalId], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+}));
+state = JSON.parse(call("executeProposal", [epochCreated.proposalId], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+}));
+assert.equal(state.state, "Executed");
+const history = JSON.parse(call("getCanonicalHistory", [], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+}));
+assert.equal(history.totalCount, 1);
+assert.equal(history.start, 0);
+assert.equal(history.nextStart, null);
+assert.equal(history.entries.length, 1);
+assert.equal(history.entries[0].previousCid, epochParent);
+assert.equal(history.entries[0].newCid, epochFirst.candidateCid);
+assert.equal(history.entries[0].decisionRecordCid, epochDecision.decisionRecordCid);
+const historyPage = JSON.parse(call("getCanonicalHistoryPage", ["0", "1"], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+}));
+assert.deepEqual(historyPage, history);
+expectFailure(() => call("getCanonicalHistoryPage", ["0", "65"], {
+  caller: addresses[9], block: 3200n, epoch: 22,
+}));
+expectFailure(() => call("claimNoQuorumRefund", [epochCreated.proposalId], {
+  caller: addresses[0], block: 3200n, epoch: 22,
+}));
+const transferCountBeforeAcceptedClaim = transfers.length;
+const acceptedClaim = JSON.parse(call("claimAcceptedProposalBond", [epochCreated.proposalId], {
+  caller: addresses[0], block: 3200n, epoch: 22,
+}));
+assert.equal(acceptedClaim.amount, (25n * 10n ** 18n).toString());
+assert.equal(transfers.length, transferCountBeforeAcceptedClaim + 1);
+expectFailure(() => call("claimAcceptedProposalBond", [epochCreated.proposalId], {
+  caller: addresses[0], block: 3200n, epoch: 22,
+}));
+const unbonding = JSON.parse(call("beginUnbonding", [(10n ** 18n).toString()], {
+  caller: addresses[12], block: 3201n, epoch: 22,
+}));
+assert.equal(unbonding.readyEpoch, "27");
+
 assert(events.some((event) => event.name === "CanonicalEcosystemUpdatedV1"));
 console.log(`Contract emulator passed: ${events.length} events, ${transfers.length} transfers, ${burns.length} burns`);
 
@@ -596,6 +826,8 @@ function proposalFixtures(
   const rationaleCid = cid(`${prefix}-rationale`);
   const migrationNotesCid = cid(`${prefix}-migration-notes`);
   const testPlanCid = cid(`${prefix}-test-plan`);
+  const rollbackManifestCid = cid(`${prefix}-rollback-manifest`);
+  const rollbackInstructionsCid = cid(`${prefix}-rollback-instructions`);
   const pinsetCids = [
     candidateCid,
     patchCid,
@@ -605,6 +837,8 @@ function proposalFixtures(
     rationaleCid,
     migrationNotesCid,
     testPlanCid,
+    rollbackManifestCid,
+    rollbackInstructionsCid,
     ...candidateArtifacts.map((artifact) => artifact.cid),
   ].sort();
   const pinset = dagObject({
@@ -733,7 +967,7 @@ function proposalFixtures(
       probeResultCid: availability[index].testResult.cid,
       available: true,
       observedAtBlockOrTimestamp: attestationBlock,
-      expiresAtBlock: creationBlock + 500,
+      expiresAtBlock: creationBlock + 1000,
       bondAtoms: (10n ** 18n).toString(),
       authentication: "on-chain-submitter",
     }));
@@ -748,18 +982,26 @@ function proposalFixtures(
   const availabilityTree = attestationTree("data_availability_v1", availabilityFields);
   const proposalValue = {
     schemaVersion: 1,
+    governanceParameterSetCid: parameterCid,
     parentCanonicalEcosystemCid: parentCid,
     candidateEcosystemCid: candidateCid,
     affectedRepositories: ["P2poolBTC"],
+    changedFileCount: 1,
+    patchBytes: 1024,
+    sourcePackageBytes: 4096,
+    descriptionBytes: 512,
+    migrationOperationCount: 0,
     baseSourceCids: { P2poolBTC: parentManifest.sourceCid },
     candidateSourceCids: { P2poolBTC: sourceCid },
     patchCid,
     proposerAddress: `0x${owners[0].toString("hex")}`,
-    proposalBondAtoms: (10n * 10n ** 18n).toString(),
+    proposalBondAtoms: (25n * 10n ** 18n).toString(),
     riskClass: "critical",
     rationaleCid,
     migrationNotesCid,
     testPlanCid,
+    rollbackManifestCid,
+    rollbackInstructionsCid,
     releaseManifestCid: null,
     criticalFindingWaiverCid: null,
     agentReviewRoot: agentTree.root,
@@ -805,7 +1047,7 @@ function proposalFixtures(
 
 function openAndFreezeReview(fixtures, openBlock, freezeBlock, openEpoch, freezeEpoch) {
   const opened = JSON.parse(call("openReviewRound", fixtures.openArgs, {
-    caller: addresses[0], block: openBlock, epoch: openEpoch, payment: 10n * 10n ** 18n,
+    caller: addresses[0], block: openBlock, epoch: openEpoch, payment: 25n * 10n ** 18n,
   }));
   submitAttestations(opened.reviewRoundId, fixtures, openBlock + 1n, openEpoch);
   const frozen = JSON.parse(call("freezeReviewRound", [opened.reviewRoundId], {
@@ -978,7 +1220,10 @@ function exerciseFalseClaimChallenge(prefix, kind, creationBlock) {
   call("withdrawRefundableBond", [created.proposalId], {
     caller: addresses[0], block: BigInt(creationBlock + 162), epoch: 21,
   });
-  assert.equal(transfers.at(-1).amount, (proposerIsOffender ? 5n : 9n) * 10n ** 18n);
+  assert.equal(
+    transfers.at(-1).amount,
+    (proposerIsOffender ? 125n : 225n) * 10n ** 17n,
+  );
   if (kind === "availability_probe") {
     call("withdrawAttestationBond", [created.proposalId, "availability", target.cid], {
       caller: target.owner, block: BigInt(creationBlock + 162), epoch: 21,
@@ -1004,10 +1249,7 @@ function submitAttestations(reviewRoundId, fixtures, atBlock, atEpoch = 11) {
 }
 
 function call(method, args, context = {}) {
-  const snapshot = new Map([...storage].map(([key, value]) => [key, Buffer.from(value)]));
-  const eventLength = events.length;
-  const transferLength = transfers.length;
-  const burnLength = burns.length;
+  const snapshot = snapshotHarnessState();
   caller = Buffer.from(context.caller ?? caller);
   payment = context.payment ?? 0n;
   epoch = context.epoch ?? epoch;
@@ -1022,14 +1264,34 @@ function call(method, args, context = {}) {
     if (result === undefined || result === 0) return null;
     return readString(result);
   } catch (error) {
-    storage.clear();
-    for (const [key, value] of snapshot) storage.set(key, value);
-    events.length = eventLength;
-    transfers.length = transferLength;
-    burns.length = burnLength;
-    payment = 0n;
+    restoreHarnessState(snapshot);
     throw error;
   }
+}
+
+function snapshotHarnessState() {
+  return {
+    storage: new Map([...storage].map(([key, value]) => [key, Buffer.from(value)])),
+    eventLength: events.length,
+    transferLength: transfers.length,
+    burnLength: burns.length,
+    caller: Buffer.from(caller),
+    payment,
+    epoch,
+    block,
+  };
+}
+
+function restoreHarnessState(snapshot) {
+  storage.clear();
+  for (const [key, value] of snapshot.storage) storage.set(key, Buffer.from(value));
+  events.length = snapshot.eventLength;
+  transfers.length = snapshot.transferLength;
+  burns.length = snapshot.burnLength;
+  caller = Buffer.from(snapshot.caller);
+  payment = snapshot.payment;
+  epoch = snapshot.epoch;
+  block = snapshot.block;
 }
 
 function expectFailure(fn) {
@@ -1206,6 +1468,29 @@ function u16be(value) {
   const output = Buffer.alloc(2);
   output.writeUInt16BE(value);
   return output;
+}
+
+function u32be(value) {
+  const output = Buffer.alloc(4);
+  output.writeUInt32BE(value);
+  return output;
+}
+
+function epochBallotCommitment({ epoch, voter, frozenRoot, choices, nonce, salt }) {
+  const chainId = Buffer.from("idena-mainnet");
+  return digest(Buffer.concat([
+    Buffer.from("IDENA_CODE_DAO_EPOCH_BALLOT_V1"),
+    u32be(chainId.length),
+    chainId,
+    contractAddress,
+    u64be(epoch),
+    voter,
+    Buffer.from(frozenRoot, "hex"),
+    u32be(choices.length),
+    Buffer.from(choices.map((choice) => choice === "yes" ? 1 : choice === "no" ? 2 : 3)),
+    u64be(nonce),
+    salt,
+  ])).toString("hex");
 }
 
 function flipTrust(finalized, reported) {

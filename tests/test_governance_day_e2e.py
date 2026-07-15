@@ -1,0 +1,114 @@
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "tests" / "governance" / "governance-day-e2e.sh"
+ASSEMBLER = (
+    ROOT / "tests" / "governance" / "assemble-governance-day-e2e-report.mjs"
+)
+INTEGRATION = ROOT / "compatibility" / "governance-day-idena-ai-integration.json"
+PARAMETERS = ROOT / "compatibility" / "governance-day-parameters.json"
+PARAMETER_LOCK = ROOT / "compatibility" / "governance-day-parameters.lock.json"
+LOCAL_CANDIDATE_LOCK = (
+    ROOT / "compatibility" / "governance-day-local-candidate-lock.json"
+)
+
+
+class GovernanceDayE2ETests(unittest.TestCase):
+    def test_governance_day_parameter_lock_binds_every_consumer(self):
+        lock = json.loads(PARAMETER_LOCK.read_text(encoding="utf-8"))
+        parameter_bytes = PARAMETERS.read_bytes()
+        self.assertEqual(lock["status"], "experimental-local-only")
+        self.assertFalse(lock["authorizedForDeployment"])
+        self.assertEqual(lock["sourceSha256"], hashlib.sha256(parameter_bytes).hexdigest())
+        cid = lock["parameterSetCid"]
+        for path in [
+            ROOT / "contracts" / "idena-code-governance" / "assembly" / "index.ts",
+            ROOT / "contracts" / "idena-code-governance" / "scripts" / "emulator-test.mjs",
+            ROOT / "crates" / "p2pool-node" / "src" / "governance_api.rs",
+        ]:
+            self.assertIn(cid, path.read_text(encoding="utf-8"))
+
+    def test_idena_ai_integration_record_is_exact_and_inactive(self):
+        record = json.loads(INTEGRATION.read_text(encoding="utf-8"))
+        patch = ROOT / record["integrationPatch"]["path"]
+        patch_bytes = patch.read_bytes()
+        self.assertEqual(record["status"], "experimental-local-only")
+        self.assertEqual(record["canonicalAuthorization"], "none")
+        self.assertFalse(record["deploymentPermitted"])
+        self.assertFalse(record["releasePublicationPermitted"])
+        self.assertFalse(record["automaticInstall"])
+        self.assertFalse(record["automaticRollback"])
+        self.assertEqual(record["integrationPatch"]["size"], len(patch_bytes))
+        self.assertEqual(
+            record["integrationPatch"]["sha256"],
+            hashlib.sha256(patch_bytes).hexdigest(),
+        )
+        self.assertRegex(record["sourcePackage"]["canonicalSourceCid"], r"^bafy")
+        self.assertEqual(record["sourcePackage"]["status"], "packaged-local-candidate")
+        self.assertFalse(record["sourcePackage"]["policyRelaxed"])
+        self.assertEqual(record["sourcePackage"]["removedForbiddenPath"], ".env.e2e")
+
+    def test_local_candidate_lock_cannot_authorize_deployment(self):
+        lock = json.loads(LOCAL_CANDIDATE_LOCK.read_text(encoding="utf-8"))
+        self.assertEqual(lock["status"], "experimental-local-only")
+        self.assertFalse(lock["authorizedForDeployment"])
+        self.assertFalse(lock["authorizedForRelease"])
+        self.assertFalse(lock["canonicalReferenceChangePermitted"])
+        self.assertIsNone(lock["source"]["candidateSourceCid"])
+        self.assertFalse(lock["governanceProfile"]["normalRiskEnabled"])
+        self.assertFalse(lock["governanceProfile"]["epochAnchorAuthenticated"])
+        self.assertIsNone(lock["idenaAiIntegration"]["sourcePackagingBlocker"])
+        self.assertRegex(lock["idenaAiIntegration"]["canonicalSourceCid"], r"^bafy")
+        self.assertFalse(lock["executionPolicy"]["automaticInstall"])
+        self.assertFalse(lock["executionPolicy"]["automaticRollback"])
+        self.assertEqual(lock["executionPolicy"]["canonicalHistoryPageLimit"], 64)
+        self.assertEqual(
+            lock["parameterSet"]["cid"],
+            json.loads(PARAMETER_LOCK.read_text(encoding="utf-8"))["parameterSetCid"],
+        )
+
+    def test_harness_is_explicit_disposable_and_non_deploying(self):
+        subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('POHW_CONFIRM_LOCAL_TEST_PATCH" != "YES"', source)
+        self.assertIn("mktemp -d", source)
+        self.assertIn("git -C \"$IDENA_AI_ROOT\" archive", source)
+        self.assertIn("git -C \"$idena_ai_test_root\" apply --check", source)
+        self.assertIn("demo-epoch-governance", source)
+        self.assertIn("governance_vertical_slice", source)
+        self.assertIn("proposal-verify", source)
+        self.assertNotIn("git push", source)
+        self.assertNotIn("docker push", source)
+        self.assertNotIn("npm publish", source)
+
+    def test_report_assembler_requires_every_numbered_step(self):
+        source = ASSEMBLER.read_text(encoding="utf-8")
+        self.assertIn("step <= 33", source)
+        self.assertIn("missing concrete evidence", source)
+        self.assertIn("automaticCodeInstall: false", source)
+        self.assertIn("onChainRevertWhileChainStuck: false", source)
+
+    @unittest.skipUnless(
+        os.environ.get("POHW_RUN_GOVERNANCE_DAY_E2E") == "1",
+        "set POHW_RUN_GOVERNANCE_DAY_E2E=1 with IDENA_AI_ROOT to run both repositories",
+    )
+    def test_cross_repository_governance_day(self):
+        environment = os.environ.copy()
+        environment["POHW_CONFIRM_LOCAL_TEST_PATCH"] = "YES"
+        subprocess.run(
+            [str(SCRIPT)],
+            cwd=ROOT,
+            check=True,
+            timeout=1200,
+            env=environment,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

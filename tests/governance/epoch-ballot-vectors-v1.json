@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "domain": "IDENA_CODE_DAO_EPOCH_BALLOT_V1",
+  "encoding": "domain || u32be(len(chainId)) || chainId || contractAddress20 || u64be(epoch) || voterAddress20 || frozenRoot32 || u32be(choiceCount) || choiceBytes(YES=1,NO=2,ABSTAIN=3) || u64be(nonce) || salt32",
+  "cases": [
+    {
+      "name": "three-choice-reference",
+      "chainId": "idena-mainnet",
+      "contractAddress": "0x9999999999999999999999999999999999999999",
+      "governanceEpoch": 421,
+      "voterAddress": "0x1111111111111111111111111111111111111111",
+      "frozenProposalSetRoot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "choices": ["yes", "no", "abstain"],
+      "ballotNonce": 42,
+      "salt": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expectedCommitment": "b78404c9a6545b1fe89bd2ea81e558b655e6829430af19e46798df71ad8a8cab"
+    }
+  ]
+}

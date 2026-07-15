@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/GovernanceScheduleV1.schema.json",
+  "title": "GovernanceScheduleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "governanceEpoch", "epochAnchorBlock", "proposalCutoffBlock", "commitStartBlock", "commitEndBlock", "revealEndBlock"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "governanceEpoch": {"type": "integer", "minimum": 0},
+    "epochAnchorBlock": {"type": "integer", "minimum": 0},
+    "proposalCutoffBlock": {"type": "integer", "minimum": 1},
+    "commitStartBlock": {"type": "integer", "minimum": 1},
+    "commitEndBlock": {"type": "integer", "minimum": 1},
+    "revealEndBlock": {"type": "integer", "minimum": 1}
+  }
+}

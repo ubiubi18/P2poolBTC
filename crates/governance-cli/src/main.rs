@@ -8,25 +8,28 @@ use governance_core::{
     build_attestation_commitment_fields, checkout_source_car, cid_for, create_source_patch,
     data_availability_commitment_fields, effective_vote_weight, flip_trust_bps,
     package_agent_review_attestation, package_build_attestation, package_change_proposal,
-    package_data_availability_attestation, package_ecosystem_manifest,
+    package_dag_cbor, package_data_availability_attestation, package_ecosystem_manifest,
     package_ecosystem_patch_manifest, package_governance_parameters,
     package_identity_metrics_attestation, package_identity_metrics_snapshot,
     package_pinset_manifest_for_transition_with_additional, package_release_manifest,
     package_source_tree_with_artifact_exclusions, package_toolchain_manifest_for_ecosystem,
-    sha256_hex, stake_score, verify_agent_review_attestation_car, verify_build_attestation_car,
-    verify_car_integrity, verify_change_proposal_car, verify_data_availability_attestation_car,
-    verify_ecosystem_manifest_car, verify_ecosystem_patch_manifest_car,
-    verify_ecosystem_transition, verify_governance_parameters_car,
-    verify_identity_metrics_attestation_car, verify_identity_metrics_snapshot_car,
-    verify_pinset_manifest_car, verify_pinset_manifest_for_transition, verify_release_manifest_car,
-    verify_source_car, verify_source_patch, verify_toolchain_manifest_car,
+    run_local_governance_day_protocol_demo, sha256_hex, stake_score,
+    validate_epoch_governance_parameters, verify_agent_review_attestation_car,
+    verify_build_attestation_car, verify_car_integrity, verify_change_proposal_car,
+    verify_dag_cbor_car, verify_data_availability_attestation_car, verify_ecosystem_manifest_car,
+    verify_ecosystem_patch_manifest_car, verify_ecosystem_transition,
+    verify_governance_parameters_car, verify_identity_metrics_attestation_car,
+    verify_identity_metrics_snapshot_car, verify_pinset_manifest_car,
+    verify_pinset_manifest_for_transition, verify_release_manifest_car, verify_source_car,
+    verify_source_patch, verify_toolchain_manifest_car,
     verify_tree_matches_car_with_artifact_exclusions, AcceptanceEvidence, AgentReviewAttestationV1,
     AttestationCommitmentEntryV1, BuildAttestationV1, ChangeProposalContentV1,
-    DataAvailabilityAttestationV1, EcosystemManifestV1, EcosystemPatchManifestV1, GateResults,
-    GovernanceParameterSetV1, IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1,
-    IdentityState, PinsetManifestV1, ReleaseManifestV1, RiskClass, SourcePatchV1,
-    SourceTreeManifestV1, ToolchainManifestV1, AGENT_REVIEW_COMMITMENT_DOMAIN,
-    BUILD_ATTESTATION_COMMITMENT_DOMAIN, DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+    DataAvailabilityAttestationV1, EcosystemManifestV1, EcosystemPatchManifestV1,
+    EpochGovernanceParameterSetV1, GateResults, GovernanceParameterSetV1,
+    IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1,
+    ReleaseManifestV1, RiskClass, SourcePatchV1, SourceTreeManifestV1, ToolchainManifestV1,
+    AGENT_REVIEW_COMMITMENT_DOMAIN, BUILD_ATTESTATION_COMMITMENT_DOMAIN,
+    DATA_AVAILABILITY_COMMITMENT_DOMAIN,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -163,6 +166,18 @@ enum Command {
     },
     /// Inspect and verify a canonical governance-parameter CAR.
     ParametersInspect {
+        #[arg(long)]
+        car: PathBuf,
+    },
+    /// Package the exact immutable Governance Day parameters as DAG-CBOR.
+    EpochParametersPackage {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Inspect and verify a canonical Governance Day parameter CAR.
+    EpochParametersInspect {
         #[arg(long)]
         car: PathBuf,
     },
@@ -314,6 +329,12 @@ enum Command {
     },
     /// Compare fixed stake-farming, whale, turnout, AI, and builder scenarios.
     SimulateScenarios,
+    /// Run the deterministic local-only Governance Day protocol demonstration.
+    DemoEpochGovernance {
+        /// Optional absolute directory for the deterministic JSON report.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -461,6 +482,16 @@ struct ParametersView {
     parameter_set_sha256: String,
     car_sha256: String,
     parameters: GovernanceParameterSetV1,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EpochParametersView {
+    schema_version: u16,
+    parameter_set_cid: String,
+    parameter_set_sha256: String,
+    car_sha256: String,
+    parameters: EpochGovernanceParameterSetV1,
 }
 
 #[derive(Debug, Serialize)]
@@ -639,6 +670,10 @@ async fn main() -> Result<()> {
             parameters_package_command(&input, &output_dir)
         }
         Command::ParametersInspect { car } => parameters_inspect_command(&car),
+        Command::EpochParametersPackage { input, output_dir } => {
+            epoch_parameters_package_command(&input, &output_dir)
+        }
+        Command::EpochParametersInspect { car } => epoch_parameters_inspect_command(&car),
         Command::ReleasePackage { input, output_dir } => {
             release_package_command(&input, &output_dir)
         }
@@ -725,7 +760,24 @@ async fn main() -> Result<()> {
             reported_authored_flips,
         ),
         Command::SimulateScenarios => print_json(&build_scenario_report()?),
+        Command::DemoEpochGovernance { output_dir } => {
+            demo_epoch_governance_command(output_dir.as_deref())
+        }
     }
+}
+
+fn demo_epoch_governance_command(output_dir: Option<&Path>) -> Result<()> {
+    let report = run_local_governance_day_protocol_demo()
+        .context("local Governance Day protocol demonstration failed")?;
+    if let Some(output_dir) = output_dir {
+        require_absolute(output_dir, "demo output directory")?;
+        let output = secure_output_directory(output_dir)?;
+        write_new(
+            &output.join("governance-day-protocol-demo.json"),
+            &deterministic_json(&report)?,
+        )?;
+    }
+    print_json(&report)
 }
 
 fn package_command(
@@ -1040,6 +1092,47 @@ fn parameters_inspect_command(car: &Path) -> Result<()> {
     let bytes = read_regular_file(car, "governance parameter CAR")?;
     let package = verify_governance_parameters_car(&bytes)?;
     print_json(&ParametersView {
+        schema_version: 1,
+        parameter_set_cid: package.root_cid.to_string(),
+        parameter_set_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&bytes),
+        parameters: package.value,
+    })
+}
+
+fn epoch_parameters_package_command(input: &Path, output_dir: &Path) -> Result<()> {
+    let parameters: EpochGovernanceParameterSetV1 =
+        read_json_file(input, "Governance Day parameter set")?;
+    validate_epoch_governance_parameters(&parameters)?;
+    let package = package_dag_cbor(parameters)?;
+    let view = EpochParametersView {
+        schema_version: 1,
+        parameter_set_cid: package.root_cid.to_string(),
+        parameter_set_sha256: package.root_sha256,
+        car_sha256: sha256_hex(&package.car_bytes),
+        parameters: package.value,
+    };
+    let output = secure_output_directory(output_dir)?;
+    write_new(
+        &output.join("governance-day-parameters.car"),
+        &package.car_bytes,
+    )?;
+    write_new(
+        &output.join("governance-day-parameters.json"),
+        &deterministic_json(&view)?,
+    )?;
+    write_new(
+        &output.join("governance-day-parameters.cid"),
+        format!("{}\n", view.parameter_set_cid).as_bytes(),
+    )?;
+    print_json(&view)
+}
+
+fn epoch_parameters_inspect_command(car: &Path) -> Result<()> {
+    let bytes = read_regular_file(car, "Governance Day parameter CAR")?;
+    let package = verify_dag_cbor_car::<EpochGovernanceParameterSetV1>(&bytes)?;
+    validate_epoch_governance_parameters(&package.value)?;
+    print_json(&EpochParametersView {
         schema_version: 1,
         parameter_set_cid: package.root_cid.to_string(),
         parameter_set_sha256: package.root_sha256,
@@ -1827,5 +1920,23 @@ mod scenario_tests {
                     .parse::<u128>()
                     .unwrap()
         );
+    }
+
+    #[test]
+    fn epoch_governance_demo_command_is_explicitly_local() {
+        let command = Cli::try_parse_from([
+            "pohw-governance",
+            "demo-epoch-governance",
+            "--output-dir",
+            "/tmp/governance-demo",
+        ])
+        .unwrap();
+        assert!(matches!(
+            command.command,
+            Command::DemoEpochGovernance { .. }
+        ));
+        let report = run_local_governance_day_protocol_demo().unwrap();
+        assert!(report.local_test_data);
+        assert!(!report.code_installed_automatically);
     }
 }

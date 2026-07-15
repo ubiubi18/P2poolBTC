@@ -12,6 +12,14 @@ export const STATE_ACCEPTED_PENDING_EXECUTION: u8 = 6;
 export const STATE_EXECUTED: u8 = 7;
 export const STATE_STALE: u8 = 8;
 export const STATE_EXPIRED: u8 = 9;
+export const STATE_NO_QUORUM: u8 = 10;
+export const STATE_ACCEPTED_PENDING_GRACE: u8 = 11;
+export const STATE_PROPOSAL_SET_FROZEN: u8 = 12;
+export const STATE_VOTING_COMMIT: u8 = 13;
+export const STATE_VOTING_REVEAL: u8 = 14;
+export const STATE_CANCELLED_BEFORE_CUTOFF: u8 = 15;
+export const STATE_REVERT_PROPOSED: u8 = 16;
+export const STATE_REVERTED: u8 = 17;
 
 export const REVIEW_ROUND_OPEN: u8 = 0;
 export const REVIEW_ROUND_FROZEN: u8 = 1;
@@ -325,7 +333,7 @@ function parseReviewRoundState(value: string): u8 {
 
 function parseProposalState(value: string): u8 {
   const state = parseU8(value);
-  assert(state <= STATE_EXPIRED, "corrupt proposal state");
+  assert(state <= STATE_REVERTED, "corrupt proposal state");
   return state;
 }
 

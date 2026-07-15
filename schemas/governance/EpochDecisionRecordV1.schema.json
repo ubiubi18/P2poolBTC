@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/EpochDecisionRecordV1.schema.json",
+  "title": "EpochDecisionRecordV1",
+  "description": "Canonical JSON decision record derived by the governance contract after a frozen Governance Day ballot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "proposalId", "parameterSetCid", "governanceEpoch", "proposalSetRoot", "yesWeight", "noWeight", "abstainWeight", "totalRegisteredWeight", "distinctParticipants", "distinctYesIdentities", "verifiedOrHumanYesIdentities", "state", "finalizedAtBlock", "graceEndBlock"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "proposalId": {
+      "anyOf": [
+        {"$ref": "common.schema.json#/$defs/Sha256"},
+        {"type": "string", "pattern": "^GOV-[0-9]+-[0-9a-f]{16}$"}
+      ]
+    },
+    "parameterSetCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "governanceEpoch": {"type": "integer", "minimum": 0},
+    "proposalSetRoot": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "yesWeight": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "noWeight": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "abstainWeight": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "totalRegisteredWeight": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "distinctParticipants": {"type": "integer", "minimum": 0},
+    "distinctYesIdentities": {"type": "integer", "minimum": 0},
+    "verifiedOrHumanYesIdentities": {"type": "integer", "minimum": 0},
+    "state": {"enum": ["Stale", "NoQuorum", "Rejected", "AcceptedPendingGrace", "Expired"]},
+    "finalizedAtBlock": {"type": "integer", "minimum": 0},
+    "graceEndBlock": {
+      "anyOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "null"}
+      ]
+    }
+  }
+}

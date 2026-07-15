@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/EpochGovernanceBriefV1.schema.json",
+  "title": "EpochGovernanceBriefV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "governanceEpoch", "frozenProposalSetRoot", "generatedBy", "proposals"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "governanceEpoch": {"type": "integer", "minimum": 0},
+    "frozenProposalSetRoot": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "generatedBy": {"type": "string", "minLength": 1, "maxLength": 200},
+    "proposals": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposalId", "title", "proposer", "affectedRepositories", "riskClass", "baseCid", "candidateCid", "sourceFacts", "testEvidence", "aiFindings", "discussionClaims", "userNotes", "importantChangedFiles", "unresolvedCriticalFindings", "proposalBondAtoms", "currentLocalBallotChoice"],
+        "properties": {
+          "proposalId": {"type": "string"},
+          "title": {"type": "string"},
+          "proposer": {"$ref": "common.schema.json#/$defs/Address"},
+          "affectedRepositories": {"type": "array", "items": {"type": "string"}},
+          "riskClass": {"$ref": "common.schema.json#/$defs/RiskClass"},
+          "baseCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+          "candidateCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+          "sourceFacts": {"type": "array", "items": {"type": "string"}},
+          "testEvidence": {"type": "array", "items": {"type": "string"}},
+          "aiFindings": {"type": "array", "items": {"type": "string"}},
+          "discussionClaims": {"type": "array", "items": {"type": "string"}},
+          "userNotes": {"type": "array", "items": {"type": "string"}},
+          "importantChangedFiles": {"type": "array", "items": {"type": "string"}},
+          "unresolvedCriticalFindings": {"type": "integer", "minimum": 0},
+          "proposalBondAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+          "currentLocalBallotChoice": {"enum": ["yes", "no", "abstain", "postponed"]}
+        }
+      }
+    }
+  }
+}

@@ -578,9 +578,18 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
     );
     let content = ChangeProposalContentV1 {
         schema_version: 1,
+        governance_parameter_set_cid: parameter_package.root_cid.to_string(),
         parent_canonical_ecosystem_cid: parent.root_cid.to_string(),
         candidate_ecosystem_cid: candidate.root_cid.to_string(),
         affected_repositories: vec!["P2poolBTC".to_string(), "idena-go".to_string()],
+        changed_file_count: 2,
+        patch_bytes: aggregate_patch.car_bytes.len() as u64,
+        source_package_bytes: candidate_sources
+            .iter()
+            .map(|package| package.car_bytes.len() as u64)
+            .sum(),
+        description_bytes: rationale.car_bytes.len() as u32,
+        migration_operation_count: 0,
         base_source_cids: BTreeMap::from([
             (
                 "P2poolBTC".to_string(),
@@ -606,6 +615,8 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         rationale_cid: rationale.root_cid.to_string(),
         migration_notes_cid: migration.root_cid.to_string(),
         test_plan_cid: test_plan.root_cid.to_string(),
+        rollback_manifest_cid: migration.root_cid.to_string(),
+        rollback_instructions_cid: migration.root_cid.to_string(),
         release_manifest_cid: None,
         critical_finding_waiver_cid: None,
         agent_review_root: agent_commitment.root.clone(),

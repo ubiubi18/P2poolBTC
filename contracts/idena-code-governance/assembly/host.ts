@@ -12,6 +12,9 @@ declare function envRemoveStorage(key: usize): void;
 @external("env", "caller")
 declare function envCaller(): usize;
 
+@external("env", "own_addr")
+declare function envOwnAddress(): usize;
+
 @external("env", "pay_amount")
 declare function envPayAmount(): usize;
 
@@ -105,6 +108,16 @@ export function callerBytes(): Uint8Array {
 
 export function callerHex(): string {
   return bytesToHex(callerBytes());
+}
+
+export function ownAddressBytes(): Uint8Array {
+  const value = ptrToBytes(envOwnAddress());
+  assert(value.length == 20, "contract address must be 20 bytes");
+  return value;
+}
+
+export function ownAddressHex(): string {
+  return bytesToHex(ownAddressBytes());
 }
 
 export function attachedAmount(): u128 {

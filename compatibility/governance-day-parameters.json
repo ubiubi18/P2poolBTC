@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "stakeQuantumAtoms": "1000000000000",
+  "minimumActiveStakeAtoms": "1000000000000000000",
+  "normalProposalBondAtoms": "10000000000000000000",
+  "criticalProposalBondAtoms": "25000000000000000000",
+  "rejectedBondBurnBps": 5000,
+  "rejectedBondTreasuryBps": 5000,
+  "noQuorumFeeAtoms": "100000000000000000",
+  "cancellationFeeAtoms": "100000000000000000",
+  "maximumProposalsPerEpoch": 64,
+  "schedule": {
+    "proposalCutoff": 40,
+    "commitStart": 80,
+    "commitEnd": 100,
+    "revealEnd": 120,
+    "normalGraceBlocks": 60,
+    "criticalGraceBlocks": 180,
+    "executionWindowBlocks": 600,
+    "observationWindowBlocks": 600
+  },
+  "normalLimits": {
+    "maxAffectedRepositories": 4,
+    "maxChangedFiles": 128,
+    "maxPatchBytes": 2097152,
+    "maxSourcePackageBytes": 268435456,
+    "maxDescriptionBytes": 16384,
+    "maxMigrationOperations": 8
+  },
+  "criticalLimits": {
+    "maxAffectedRepositories": 16,
+    "maxChangedFiles": 1024,
+    "maxPatchBytes": 16777216,
+    "maxSourcePackageBytes": 1073741824,
+    "maxDescriptionBytes": 65536,
+    "maxMigrationOperations": 64
+  },
+  "normal": {
+    "turnoutQuorumBps": 2000,
+    "yesThresholdBps": 6667,
+    "minimumParticipatingIdentities": 7,
+    "minimumYesIdentities": 7,
+    "minimumVerifiedOrHumanYes": 3,
+    "minimumAiAttestations": 2,
+    "minimumAiIndependenceGroups": 2,
+    "minimumAiFamilies": 1,
+    "minimumBuilders": 2,
+    "minimumBuilderPlatforms": 1,
+    "minimumDataAvailabilityProviders": 2,
+    "requireMatchingBuildDigests": true
+  },
+  "critical": {
+    "turnoutQuorumBps": 3000,
+    "yesThresholdBps": 7500,
+    "minimumParticipatingIdentities": 12,
+    "minimumYesIdentities": 12,
+    "minimumVerifiedOrHumanYes": 5,
+    "minimumAiAttestations": 3,
+    "minimumAiIndependenceGroups": 3,
+    "minimumAiFamilies": 2,
+    "minimumBuilders": 3,
+    "minimumBuilderPlatforms": 2,
+    "minimumDataAvailabilityProviders": 3,
+    "requireMatchingBuildDigests": true
+  }
+}

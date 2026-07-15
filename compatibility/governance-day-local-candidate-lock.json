@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "pohw-governance-day-local-candidate-2026-07-15-v1",
+  "status": "experimental-local-only",
+  "authorizedForDeployment": false,
+  "authorizedForRelease": false,
+  "canonicalReferenceChangePermitted": false,
+  "source": {
+    "repository": "https://github.com/ubiubi18/P2poolBTC.git",
+    "baseCommit": "182f58526078c1b9ffd015dd6955625c10d438e5",
+    "candidateSourceCid": null,
+    "candidateSourceStatus": "uncommitted-local-worktree",
+    "reason": "A source CID that includes this lock cannot recursively authorize itself. Package the final reviewed tree into an external EcosystemManifestV1 candidate instead."
+  },
+  "governanceProfile": {
+    "mode": "immutable-epoch-governance-day",
+    "legacyPerProposalVotingEnabled": false,
+    "normalRiskEnabled": false,
+    "normalRiskBlocker": "missing-objective-contract-verifiable-risk-classifier",
+    "epochAnchorAuthenticated": false,
+    "epochAnchorBlocker": "pinned-wasm-host-does-not-expose-finalized-validation-boundary"
+  },
+  "parameterSet": {
+    "path": "compatibility/governance-day-parameters.json",
+    "lockPath": "compatibility/governance-day-parameters.lock.json",
+    "cid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
+    "sha256": "788782538cbcb9137d4b9e9feb6b5ed368a7017067dda158c4383e68da73a02c"
+  },
+  "contractArtifact": {
+    "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
+    "cid": "bafkreif2se5hppplvl2bhv3eszawodfkbnmfl7eq2luotc2rf5x45qxufi",
+    "sha256": "ba913a77bdebaaf413d7649641670caa0b5855fc90d2e8e98b512f6fcec2f42a",
+    "size": 257979,
+    "abiExports": 62,
+    "buildStatus": "local-non-attested"
+  },
+  "idenaAiIntegration": {
+    "baseCommit": "30fe9651dd53a39cb7c465a2332c46b455c42afd",
+    "patchPath": "integrations/idena-ai-governance-day.patch",
+    "patchSha256": "dbd28607c03b2a65001b0885407b1eb68ce98ac1a9a79586031b1a2258146850",
+    "patchSize": 114247,
+    "canonicalSourceCid": "bafyreiedew34otx523a3axnbzccu23p62bctlrfptc4bk2y2ghjg27w54y",
+    "sourceTreeSha256": "8325b7c74efdd6c1b05da1c8854d6dfed04535c4af98b8156b1a31d26d7edde6",
+    "sourcePackagingBlocker": null
+  },
+  "executionPolicy": {
+    "automaticInstall": false,
+    "automaticRollback": false,
+    "unilateralExecution": false,
+    "unilateralRevert": false,
+    "canonicalHistoryPageLimit": 64
+  },
+  "notes": [
+    "This file is an inventory of one local candidate build, not DAO authorization.",
+    "The existing legacy compatibility lock and governance-fork lock remain unchanged.",
+    "Independent clean-room rebuilds, public IPFS replication, authenticated epoch anchoring, and external audit are still required."
+  ]
+}

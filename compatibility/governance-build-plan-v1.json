@@ -109,7 +109,7 @@
         {
           "repository": "P2poolBTC",
           "path": "scripts/pohw-governance-runtime-gate.py",
-          "sha256": "279d5d446fae08a94ca38e494380f313dc786686e718665a846a3d152fe05300",
+          "sha256": "abb33beec5fbfe01d354c775a7166302a9a67b125253a18d83bbb0f9f512e740",
           "format": "digest-only"
         },
         {

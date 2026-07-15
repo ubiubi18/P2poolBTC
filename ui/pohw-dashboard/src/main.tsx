@@ -139,18 +139,88 @@ interface GovernanceDashboardResponse {
     sourceTreeCid: string;
   }>;
   proposals: GovernanceProposal[];
+  epochGovernance?: GovernanceEpochView | null;
+  canonicalHistory?: GovernanceCanonicalExecution[];
+  recovery?: GovernanceRecoveryView | null;
+}
+
+type GovernanceEpochPhase =
+  | "ProposalSubmission"
+  | "FrozenReview"
+  | "VotingCommit"
+  | "VotingReveal"
+  | "Finalization"
+  | "Grace"
+  | "Execution"
+  | "Closed";
+
+interface GovernanceEpochView {
+  governanceEpoch: number;
+  currentBlock: number;
+  phase: GovernanceEpochPhase;
+  schedule: {
+    epochAnchorBlock: number;
+    proposalCutoffBlock: number;
+    commitStartBlock: number;
+    commitEndBlock: number;
+    revealEndBlock: number;
+  };
+  frozenProposalSetRoot: string | null;
+  orderedProposalIds: string[];
+  frozenAtBlock: number | null;
+  reviewedProposals: number;
+  unresolvedProposals: number;
+  validAgentAttestations: number;
+  committedBallots: number;
+  revealedBallots: number;
+  votingPowerSnapshotReady: boolean;
+  graceEndBlock: number | null;
+  openChallenges: number;
+  executionReadyProposals: number;
+}
+
+interface GovernanceCanonicalExecution {
+  executionId: string;
+  previousCanonicalEcosystemCid: string;
+  newCanonicalEcosystemCid: string;
+  proposalId: string;
+  governanceEpoch: number;
+  decisionRecordCid: string;
+  executionBlock: number;
+  rollbackManifestCid: string;
+  releaseRollbackInstructionsCid: string;
+  observationWindowEndBlock: number;
+  revertsExecutionId: string | null;
+}
+
+interface GovernanceRecoveryView {
+  chainRpcAvailable: boolean;
+  localLastKnownGoodStaged: boolean;
+  stagedEcosystemCid: string | null;
+  recoveryManifestCid: string | null;
+  explicitUserConfirmationRequired: boolean;
+  automaticInstallEnabled: boolean;
+  automaticRollbackEnabled: boolean;
+  onChainRevertAvailable: boolean;
+  warning: string;
 }
 
 interface GovernanceProposal {
   proposalId: string;
   proposalCid: string;
   candidateEcosystemCid: string;
+  parameterSetCid: string;
   reviewRoundId: string;
   reviewRoundState: "Open" | "Frozen" | "Claimed" | "Expired";
   reviewRoundAgentAttestations: number;
   reviewRoundBuildAttestations: number;
   reviewRoundAvailabilityAttestations: number;
   affectedRepositories: string[];
+  changedFileCount: number;
+  patchBytes: number;
+  sourcePackageBytes: number;
+  descriptionBytes: number;
+  migrationOperationCount: number;
   diffSummary: string;
   riskClass: "normal" | "critical" | "consensus" | "migration";
   bondAtoms: string;
@@ -178,6 +248,8 @@ interface GovernanceProposal {
   dataAvailability: {
     independentAttestors: number;
     requiredAttestors: number;
+    validUntilBlock: number;
+    requiredValidUntilBlock: number;
     passed: boolean;
   };
   pos: {
@@ -190,6 +262,8 @@ interface GovernanceProposal {
     passed: boolean;
   };
   pohw: {
+    distinctParticipatingIdentities: number;
+    requiredParticipatingIdentities: number;
     distinctYesIdentities: number;
     requiredYesIdentities: number;
     verifiedOrHumanYesIdentities: number;
@@ -1238,6 +1312,15 @@ function GovernanceWorkspace({
             </div>
           </section>
 
+          {data.epochGovernance ? (
+            <GovernanceDayOverview epoch={data.epochGovernance} />
+          ) : (
+            <div className="governance-empty">
+              <Clock3 size={18} />
+              <span>Governance Day schedule is not present in this verified snapshot</span>
+            </div>
+          )}
+
           <section className="governance-repositories">
             <div className="governance-section-heading">
               <h2>Repository sources</h2>
@@ -1273,10 +1356,112 @@ function GovernanceWorkspace({
               <GovernanceProposalCard key={proposal.proposalId} proposal={proposal} />
             ))}
           </section>
+
+          <GovernanceHistory entries={data.canonicalHistory ?? []} />
+          {data.recovery ? <GovernanceRecovery recovery={data.recovery} /> : null}
         </>
       )}
     </section>
   );
+}
+
+function GovernanceDayOverview({ epoch }: { epoch: GovernanceEpochView }) {
+  const schedule = epoch.schedule;
+  const milestones = [
+    ["Proposal cutoff", schedule.proposalCutoffBlock],
+    ["Commit opens", schedule.commitStartBlock],
+    ["Commit closes", schedule.commitEndBlock],
+    ["Reveal closes", schedule.revealEndBlock]
+  ] as const;
+  return (
+    <section className="governance-day">
+      <div className="governance-section-heading">
+        <div>
+          <span>Shared epoch ballot</span>
+          <h2>Governance Day - Epoch {epoch.governanceEpoch}</h2>
+        </div>
+        <strong className="governance-phase">{splitGovernancePhase(epoch.phase)}</strong>
+      </div>
+      <div className="governance-day-grid">
+        <div><span>Frozen proposals</span><strong>{epoch.orderedProposalIds.length}</strong><small>{epoch.frozenProposalSetRoot ? shortHash(epoch.frozenProposalSetRoot) : "Not frozen"}</small></div>
+        <div><span>Review status</span><strong>{epoch.reviewedProposals} reviewed</strong><small>{epoch.unresolvedProposals} unresolved / {epoch.validAgentAttestations} AI attestations</small></div>
+        <div><span>Ballots</span><strong>{epoch.committedBallots} committed</strong><small>{epoch.revealedBallots} revealed; one ballot covers the frozen set</small></div>
+        <div><span>Voting power</span><strong>{epoch.votingPowerSnapshotReady ? "Snapshot ready" : "Snapshot pending"}</strong><small>Sublinear locked IDNA; identity age ignored</small></div>
+        <div><span>Challenges</span><strong>{epoch.openChallenges} open</strong><small>{epoch.executionReadyProposals} proposals execution-ready</small></div>
+      </div>
+      <div className="governance-timeline" aria-label="Governance epoch block schedule">
+        {milestones.map(([label, block]) => (
+          <div className={epoch.currentBlock >= block ? "passed" : "pending"} key={label}>
+            <span>{label}</span>
+            <strong>Block {block}</strong>
+            <small>{epoch.currentBlock >= block ? "Reached" : `${block - epoch.currentBlock} blocks remaining`}</small>
+          </div>
+        ))}
+        {epoch.graceEndBlock ? (
+          <div className={epoch.currentBlock >= epoch.graceEndBlock ? "passed" : "pending"}>
+            <span>Grace ends</span>
+            <strong>Block {epoch.graceEndBlock}</strong>
+            <small>{epoch.currentBlock >= epoch.graceEndBlock ? "Reached" : `${epoch.graceEndBlock - epoch.currentBlock} blocks remaining`}</small>
+          </div>
+        ) : null}
+      </div>
+      <p className="governance-boundary">
+        Chain block {epoch.currentBlock}. The frozen proposal set cannot change during commit or reveal. Finalization and execution never install software automatically.
+      </p>
+    </section>
+  );
+}
+
+function GovernanceHistory({ entries }: { entries: GovernanceCanonicalExecution[] }) {
+  return (
+    <section className="governance-history">
+      <div className="governance-section-heading">
+        <h2>Canonical history</h2>
+        <span>{entries.length} append-only executions</span>
+      </div>
+      {entries.length === 0 ? (
+        <div className="governance-empty"><GitBranch size={18} /><span>No canonical execution has been recorded</span></div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Epoch / block</th><th>Previous CID</th><th>New CID</th><th>Execution</th><th>Recovery</th></tr></thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr key={entry.executionId}>
+                  <td data-label="Epoch / block"><strong>{entry.governanceEpoch}</strong> / {entry.executionBlock}</td>
+                  <td data-label="Previous CID"><code title={captureSafeTitle(entry.previousCanonicalEcosystemCid)}>{shortHash(entry.previousCanonicalEcosystemCid)}</code></td>
+                  <td data-label="New CID"><code title={captureSafeTitle(entry.newCanonicalEcosystemCid)}>{shortHash(entry.newCanonicalEcosystemCid)}</code></td>
+                  <td data-label="Execution"><code title={captureSafeTitle(entry.executionId)}>{shortHash(entry.executionId)}</code></td>
+                  <td data-label="Recovery">{entry.revertsExecutionId ? `Reverts ${shortHash(entry.revertsExecutionId)}` : `Observe through ${entry.observationWindowEndBlock}`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function GovernanceRecovery({ recovery }: { recovery: GovernanceRecoveryView }) {
+  return (
+    <section className={recovery.chainRpcAvailable ? "governance-recovery" : "governance-recovery chain-stuck"}>
+      <AlertTriangle size={19} />
+      <div>
+        <strong>{recovery.chainRpcAvailable ? "Recovery boundary" : "Chain RPC unavailable"}</strong>
+        <p>{recovery.warning}</p>
+        <small>
+          {recovery.localLastKnownGoodStaged ? "Verified last-known-good content is staged. " : "No last-known-good content is staged. "}
+          Explicit confirmation is required; automatic install and automatic rollback are disabled.
+          {!recovery.chainRpcAvailable ? " An on-chain revert cannot execute while the chain is stuck." : ""}
+        </small>
+      </div>
+    </section>
+  );
+}
+
+function splitGovernancePhase(phase: GovernanceEpochPhase): string {
+  return phase.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) {
@@ -1288,7 +1473,7 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
       value: (proposal.pos.yesThresholdBps / 100).toFixed(2) + "% threshold"
     },
     {
-      detail: proposal.pohw.verifiedOrHumanYesIdentities + "/" + proposal.pohw.requiredVerifiedOrHumanYes + " Verified or Human",
+      detail: proposal.pohw.distinctParticipatingIdentities + "/" + proposal.pohw.requiredParticipatingIdentities + " participants; " + proposal.pohw.verifiedOrHumanYesIdentities + "/" + proposal.pohw.requiredVerifiedOrHumanYes + " Verified or Human",
       label: "PoHW",
       passed: proposal.pohw.passed,
       value: proposal.pohw.distinctYesIdentities + "/" + proposal.pohw.requiredYesIdentities + " identities"
@@ -1306,7 +1491,8 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
       value: proposal.builds.independentBuilders + "/" + proposal.builds.requiredBuilders + " builders"
     },
     {
-      detail: "independent eligible operators",
+      detail: "valid through block " + proposal.dataAvailability.validUntilBlock
+        + " (required " + proposal.dataAvailability.requiredValidUntilBlock + ")",
       label: "Availability",
       passed: proposal.dataAvailability.passed,
       value: proposal.dataAvailability.independentAttestors + "/" + proposal.dataAvailability.requiredAttestors + " attestations"
@@ -1327,8 +1513,10 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
       </header>
       <div className="proposal-cids">
         <span>Candidate <code title={captureSafeTitle(proposal.candidateEcosystemCid)}>{shortHash(proposal.candidateEcosystemCid)}</code></span>
+        <span>Parameters <code title={captureSafeTitle(proposal.parameterSetCid)}>{shortHash(proposal.parameterSetCid)}</code></span>
         <span>Review round <code title={captureSafeTitle(proposal.reviewRoundId)}>{shortHash(proposal.reviewRoundId)}</code> <strong>{proposal.reviewRoundState}</strong></span>
         <span>Repositories <strong>{proposal.affectedRepositories.join(", ")}</strong></span>
+        <span>Scope <strong>{proposal.changedFileCount} files / {formatBytes(proposal.patchBytes)} patch / {proposal.migrationOperationCount} migrations</strong></span>
       </div>
       <div className="governance-gates">
         {gates.map((gate) => (
@@ -3758,6 +3946,19 @@ function formatCoverage(value?: string | null) {
 
 function formatInt(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value < 0) return "unknown";
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let scaled = value / 1024;
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  return `${scaled.toFixed(scaled >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
 function formatScore(value: number) {

@@ -22,6 +22,14 @@ import {
   transfer,
 } from "./host";
 import {
+  epochAttestationGatesPass,
+  initializeEpochGovernanceProfile,
+  isEpochGovernanceEnabled,
+  isBoundRevertProposal,
+  recordEpochExecution,
+  registerEpochProposal,
+} from "./epoch_governance";
+import {
   effectiveVoteWeight,
   flipTrustBps,
   parseAmount,
@@ -32,6 +40,16 @@ import {
   statusBps,
 } from "./math";
 import { sha256 } from "./sha256";
+import {
+  SCHEDULED_WEIGHT_DELTA_KEY,
+  SCHEDULED_WEIGHT_EPOCH_KEY,
+  TOTAL_WEIGHT_KEY,
+  WEIGHT_EPOCH_KEY,
+  WEIGHT_LAST_CHANGED_BLOCK_KEY,
+  replaceGlobalWeight,
+  replaceScheduledWeightDelta,
+  syncGlobalWeightEpoch,
+} from "./stake_weight";
 import { CanonicalDagCborMap, verifiedCanonicalDagCborMap, verifiedFalseResult } from "./dag_cbor";
 import {
   BondRecord,
@@ -48,9 +66,17 @@ import {
   STATE_DRAFT,
   STATE_EXECUTED,
   STATE_EXPIRED,
+  STATE_ACCEPTED_PENDING_GRACE,
+  STATE_CANCELLED_BEFORE_CUTOFF,
+  STATE_NO_QUORUM,
+  STATE_PROPOSAL_SET_FROZEN,
   STATE_REJECTED,
+  STATE_REVERT_PROPOSED,
+  STATE_REVERTED,
   STATE_REVIEW_OPEN,
   STATE_STALE,
+  STATE_VOTING_COMMIT,
+  STATE_VOTING_REVEAL,
   STATE_VOTING_OPEN,
   loadProposal,
   loadReviewRound,
@@ -70,6 +96,30 @@ import {
   verifyIdentityMetricsProof,
 } from "./validation";
 
+export {
+  anchorGovernanceEpoch,
+  attachAiReviewRoot,
+  attachBuildRoot,
+  attachRecoveryManifest,
+  cancelProposalBeforeCutoff,
+  commitEpochBallot,
+  createRevertProposal,
+  enterExecutionReadyState,
+  freezeEpochProposalSet,
+  getCanonicalHistory,
+  getCanonicalHistoryPage,
+  getEpochBallotReceipt,
+  getEpochDecisionRecord,
+  getEpochProposalSet,
+  getGovernanceEpoch,
+  getGovernanceSchedule,
+  getProposalSlot,
+  getTreasuryState,
+  previewVotingPower,
+  revealEpochBallot,
+  finalizeEpochVoting,
+} from "./epoch_governance";
+
 export { allocate };
 
 const SCHEMA_VERSION = "1";
@@ -79,13 +129,8 @@ const CANONICAL_CID_KEY = "governance:canonical-cid";
 const PARAMETER_CID_KEY = "governance:parameter-cid";
 const METRICS_ROOT_KEY = "governance:metrics-root";
 const METRICS_EPOCH_KEY = "governance:metrics-epoch";
-const TOTAL_WEIGHT_KEY = "governance:total-weight";
-const WEIGHT_LAST_CHANGED_BLOCK_KEY = "governance:weight-last-changed-block";
-const WEIGHT_EPOCH_KEY = "governance:weight-epoch";
-const SCHEDULED_WEIGHT_EPOCH_KEY = "governance:scheduled-weight-epoch";
-const SCHEDULED_WEIGHT_DELTA_KEY = "governance:scheduled-weight-delta";
 
-const EXPECTED_PARAMETER_CID = "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm";
+const EXPECTED_PARAMETER_CID = "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
 const REVIEW_BLOCKS: u64 = 40;
 const VOTING_BLOCKS: u64 = 120;
 const CHALLENGE_BLOCKS: u64 = 60;
@@ -102,6 +147,7 @@ const MIN_IDENTITY_METRICS_ATTESTATIONS: u32 = 3;
 
 const MIN_ACTIVE_STAKE_ATOMS = "1000000000000000000";
 const MIN_PROPOSAL_BOND_ATOMS = "10000000000000000000";
+const CRITICAL_PROPOSAL_BOND_ATOMS = "25000000000000000000";
 const MIN_REVIEWER_BOND_ATOMS = "1000000000000000000";
 const MIN_BUILDER_BOND_ATOMS = "1000000000000000000";
 const MIN_AVAILABILITY_BOND_ATOMS = "1000000000000000000";
@@ -138,6 +184,7 @@ export function deploy(
   setString(TOTAL_WEIGHT_KEY, "0");
   setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
   setString(WEIGHT_EPOCH_KEY, currentEpoch().toString());
+  initializeEpochGovernanceProfile();
   emitVersionedEvent("GovernanceInitializedV1", [canonicalCid, parameterCid, metricsRoot, metricsEpoch.toString()]);
 }
 
@@ -200,11 +247,17 @@ export function scheduleWithdrawal(amountPtr: usize): usize {
   return okJson("readyEpoch", readyEpoch.toString());
 }
 
+export function beginUnbonding(amountPtr: usize): usize {
+  return scheduleWithdrawal(amountPtr);
+}
+
 export function finalizeUnbonding(): usize {
   ensureInitialized();
   requireNoPayment();
-  syncGlobalWeightEpoch();
   const address = callerHex();
+  // A matured pending lot is already reflected in the settled global weight.
+  // Materialize it before replacing this voter's nonlinear aggregate weight.
+  activateStakeFor(address);
   const key = withdrawalKey(address);
   const fields = getString(key).split("~");
   assert(fields.length == 3, "no scheduled withdrawal exists");
@@ -536,6 +589,7 @@ export function createProposal(
   );
   payload.requireExactKeys(proposalPayloadKeys());
   assert(parseU16(payload.unsigned("schemaVersion")) == 1, "proposal schema version is unsupported");
+  const proposalParameterCid = payload.string("governanceParameterSetCid");
   const parent = payload.string("parentCanonicalEcosystemCid");
   const candidateCid = payload.string("candidateEcosystemCid");
   const patchCid = payload.string("patchCid");
@@ -549,6 +603,8 @@ export function createProposal(
   const candidateMetricsEpochString = payload.nullableUnsigned("candidateIdentityMetricsEpoch");
   const waiverCid = payload.nullableString("criticalFindingWaiverCid");
   const releaseManifestCid = payload.nullableString("releaseManifestCid");
+  const rollbackManifestCid = payload.string("rollbackManifestCid");
+  const rollbackInstructionsCid = payload.string("rollbackInstructionsCid");
   const contentProposer = canonicalPayloadAddress(payload.string("proposerAddress"));
   const contentBond = parseAmount(payload.string("proposalBondAtoms"));
   const creation = parseU64(payload.unsigned("creationBlock"));
@@ -559,13 +615,22 @@ export function createProposal(
   const votingEnd = parseU64(payload.unsigned("votingEnd"));
   const challengeEnd = parseU64(payload.unsigned("challengeEnd"));
   const proposalAffectedBinding = validateProposalNestedPayload(payload);
+  assert(
+    proposalParameterCid == getString(PARAMETER_CID_KEY),
+    "proposal governance parameter set does not match this contract",
+  );
   assert(isCanonicalManifestCid(candidateCid), "candidate ecosystem CID must be canonical DAG-CBOR CIDv1");
   assert(isCanonicalManifestCid(patchCid), "patch CID must be canonical DAG-CBOR CIDv1");
   assert(isRiskClass(risk), "unknown proposal risk class");
+  validateProposalDeclaredLimits(payload, risk);
   assert(risk != "normal", "normal proposal gates are disabled until an objective risk classifier is deployed");
   assert(isCanonicalHash(agentRoot) && isCanonicalHash(buildRoot) && isCanonicalHash(availabilityRoot), "attestation roots must be lowercase SHA-256");
   assert(waiverCid.length == 0 || (risk != "normal" && isCanonicalManifestCid(waiverCid)), "critical waiver must be an immutable CID on a critical proposal");
   assert(releaseManifestCid.length == 0 || isCanonicalManifestCid(releaseManifestCid), "release manifest must use canonical DAG-CBOR CIDv1");
+  assert(
+    isCanonicalContentCid(rollbackManifestCid) && isCanonicalContentCid(rollbackInstructionsCid),
+    "rollback metadata must use canonical CIDv1/SHA2-256",
+  );
   assert(contentProposer == proposer, "proposal proposer does not match the caller");
   assert(round.state == REVIEW_ROUND_FROZEN, "proposal review round is not frozen");
   assert(round.opener == proposer, "only the bonded review-round opener may create its proposal");
@@ -580,6 +645,11 @@ export function createProposal(
   assert(
     releaseManifestCid.length == 0 || hasKey(reviewPinsetMemberKey(round.id, releaseManifestCid)),
     "release manifest is not committed by the opening pinset",
+  );
+  assert(
+    hasKey(reviewPinsetMemberKey(round.id, rollbackManifestCid))
+      && hasKey(reviewPinsetMemberKey(round.id, rollbackInstructionsCid)),
+    "proposal rollback metadata must be committed by the opening pinset",
   );
   assert(
     waiverCid.length == 0 || hasKey(reviewPinsetMemberKey(round.id, waiverCid)),
@@ -622,6 +692,10 @@ export function createProposal(
   }
   const bond = round.bondAmount();
   assert(bond == contentBond, "proposal bond does not match the bonded review round");
+  const requiredBond = risk == "normal"
+    ? parseAmount(MIN_PROPOSAL_BOND_ATOMS)
+    : parseAmount(CRITICAL_PROPOSAL_BOND_ATOMS);
+  assert(bond >= requiredBond, "proposal bond is below its risk-class minimum");
   const draftExpiry = checkedBlockAdd(creation, REVIEW_BLOCKS);
   const executeAfter = checkedBlockAdd(challengeEnd, TIMELOCK_BLOCKS);
   const metadataRoot = hashString("IDENA_GOV_PROPOSAL_METADATA_V2\x00" + proposalCid);
@@ -642,9 +716,15 @@ export function createProposal(
     round.builderConflictCount, round.availabilityOwnerCount, round.artifactDigest,
     waiverCid, releaseManifestCid, "", "", "", bond.toString(), "0", false,
   );
-  assert(attestationGatesPass(proposal), "frozen review round does not satisfy the proposal risk-class gates");
+  assert(
+    isEpochGovernanceEnabled()
+      ? epochAttestationGatesPass(proposal)
+      : attestationGatesPass(proposal),
+    "frozen review round does not satisfy the proposal risk-class gates",
+  );
   round.state = REVIEW_ROUND_CLAIMED;
   round.proposalId = proposalId;
+  registerEpochProposal(proposal, rollbackManifestCid, rollbackInstructionsCid);
   saveReviewRound(round);
   saveProposal(proposal);
   emitVersionedEvent("ProposalCreatedV1", [proposalId, reviewRoundId, parent, candidateCid, proposalCid, metadataRoot]);
@@ -812,6 +892,7 @@ export function submitDataAvailabilityAttestation(
   const payloadOwner = canonicalPayloadAddress(payload.string("operatorIdentity"));
   const payloadBond = parseAmount(payload.string("bondAtoms"));
   const available = payload.boolean("available");
+  const expiresAtBlock = parseU64(payload.unsigned("expiresAtBlock"));
   const verifiedCids = validateAvailabilityNestedPayload(payload, round);
   assert(isCanonicalRawCid(payload.string("probeResultCid")), "availability probe must use raw CIDv1/SHA2-256");
   assert(payloadOwner == owner, "availability attestation owner does not match the caller");
@@ -819,8 +900,11 @@ export function submitDataAvailabilityAttestation(
   assert(payload.string("authentication") == "on-chain-submitter", "unsupported availability attestation authentication");
   assert(parseU64(payload.unsigned("observedAtBlockOrTimestamp")) <= currentBlock(), "availability attestation is from the future");
   assert(
-    parseU64(payload.unsigned("expiresAtBlock")) >= checkedBlockAdd(maxReviewChallengeEnd(round), CHALLENGE_BLOCKS),
-    "availability expires before the latest possible effective challenge deadline",
+    expiresAtBlock >= checkedBlockAdd(
+      checkedBlockAdd(maxReviewChallengeEnd(round), TIMELOCK_BLOCKS),
+      EXECUTION_WINDOW_BLOCKS,
+    ),
+    "availability expires before the latest possible execution deadline",
   );
   const pinsetCid = payload.string("pinsetCid");
   const providerId = payload.string("providerId");
@@ -838,6 +922,10 @@ export function submitDataAvailabilityAttestation(
     setString(availabilityVerifiedCidKey(round.id, cid, verifiedCids[i]), "1");
   }
   setString(availabilityAvailableKey(round.id, cid), available ? "1" : "0");
+  const expiryKey = reviewAvailabilityMinimumExpiryKey(round.id);
+  if (!hasKey(expiryKey) || expiresAtBlock < parseU64(getString(expiryKey))) {
+    setString(expiryKey, expiresAtBlock.toString());
+  }
   reserveStakeSlashSlot(owner);
   appendReviewEntry(round, "availability", fields);
   setString(marker, fields);
@@ -850,6 +938,7 @@ export function submitDataAvailabilityAttestation(
 export function openVoting(proposalIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
+  assert(!isEpochGovernanceEnabled(), "per-proposal voting is disabled by the epoch governance profile");
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_REVIEW_OPEN, "proposal review is not open");
   assert(currentBlock() >= proposal.votingStart && currentBlock() < proposal.votingEnd, "voting window is not open");
@@ -867,6 +956,7 @@ export function openVoting(proposalIdPtr: usize): usize {
 export function castVote(proposalIdPtr: usize, choicePtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
+  assert(!isEpochGovernanceEnabled(), "per-proposal voting is disabled by the epoch governance profile");
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_VOTING_OPEN, "proposal voting is not open");
   assert(currentBlock() >= proposal.votingStart && currentBlock() < proposal.votingEnd, "voting deadline has elapsed");
@@ -893,6 +983,7 @@ export function castVote(proposalIdPtr: usize, choicePtr: usize): usize {
 export function finalizeVoting(proposalIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
+  assert(!isEpochGovernanceEnabled(), "per-proposal voting is disabled by the epoch governance profile");
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_VOTING_OPEN, "proposal voting is not open");
   assert(currentBlock() >= proposal.votingEnd, "voting deadline has not elapsed");
@@ -927,7 +1018,11 @@ export function submitObjectiveChallenge(
   ensureInitialized();
   requireNoPayment();
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
-  assert(proposal.state == STATE_ACCEPTED_PENDING_CHALLENGE, "proposal is not challengeable");
+  assert(
+    proposal.state == STATE_ACCEPTED_PENDING_CHALLENGE
+      || proposal.state == STATE_ACCEPTED_PENDING_GRACE,
+    "proposal is not challengeable",
+  );
   assert(currentBlock() < proposal.challengeEnd, "challenge deadline has elapsed");
   const kind = argumentString(kindPtr, 32);
   const cid = argumentString(attestationCidPtr, 128);
@@ -1049,6 +1144,7 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
 export function advanceChallengePeriod(proposalIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
+  assert(!isEpochGovernanceEnabled(), "use enterExecutionReadyState for epoch governance");
   const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
   assert(proposal.state == STATE_ACCEPTED_PENDING_CHALLENGE, "proposal is not awaiting challenge completion");
   assert(currentBlock() >= proposal.challengeEnd, "challenge deadline has not elapsed");
@@ -1085,6 +1181,7 @@ export function executeProposal(proposalIdPtr: usize): usize {
   }
   proposal.state = STATE_EXECUTED;
   proposal.refundableBond = proposal.bond;
+  recordEpochExecution(proposal, oldCid);
   releaseReviewCandidateForProposal(proposal);
   saveProposal(proposal);
   emitVersionedEvent(
@@ -1092,6 +1189,14 @@ export function executeProposal(proposalIdPtr: usize): usize {
     [oldCid, proposal.candidateCid, proposal.id, proposal.agentRoot, proposal.buildRoot, proposal.availabilityRoot],
   );
   return proposalStateJson(proposal);
+}
+
+export function executeRevert(proposalIdPtr: usize): usize {
+  ensureInitialized();
+  requireNoPayment();
+  const proposalId = validProposalId(argumentString(proposalIdPtr, 64));
+  assert(isBoundRevertProposal(proposalId), "proposal is not bound to a historical execution");
+  return executeProposal(proposalIdPtr);
 }
 
 export function expireProposal(proposalIdPtr: usize): usize {
@@ -1132,6 +1237,25 @@ export function withdrawRefundableBond(proposalIdPtr: usize): usize {
   emitVersionedEvent("ProposalBondWithdrawnV1", [proposal.id, address, amount.toString()]);
   transfer(hexToBytes(address), amount);
   return okJson("amount", amount.toString());
+}
+
+export function claimAcceptedProposalBond(proposalIdPtr: usize): usize {
+  ensureInitialized();
+  requireNoPayment();
+  const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
+  assert(
+    proposal.state == STATE_EXECUTED || proposal.state == STATE_REVERTED,
+    "accepted proposal has not executed",
+  );
+  return withdrawRefundableBond(proposalIdPtr);
+}
+
+export function claimNoQuorumRefund(proposalIdPtr: usize): usize {
+  ensureInitialized();
+  requireNoPayment();
+  const proposal = loadProposal(validProposalId(argumentString(proposalIdPtr, 64)));
+  assert(proposal.state == STATE_NO_QUORUM, "proposal did not end without quorum");
+  return withdrawRefundableBond(proposalIdPtr);
 }
 
 export function withdrawAttestationBond(
@@ -1335,59 +1459,6 @@ function registeredWeight(address: string, stake: u128): u128 {
   const metrics = MetricsRecord.decode(getString(key));
   if (metrics.root != getString(METRICS_ROOT_KEY) || metrics.sourceEpoch != parseStoredU16(METRICS_EPOCH_KEY)) return u128.Zero;
   return effectiveVoteWeight(stake, statusBps(metrics.state), metrics.trustBps);
-}
-
-function replaceGlobalWeight(oldWeight: u128, newWeight: u128): void {
-  if (oldWeight == newWeight) return;
-  const current = parseAmount(getString(TOTAL_WEIGHT_KEY));
-  assert(current >= oldWeight, "global registered weight underflow");
-  setString(TOTAL_WEIGHT_KEY, (current - oldWeight + newWeight).toString());
-  setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
-}
-
-function replaceScheduledWeightDelta(activationEpoch: u16, oldDelta: u128, newDelta: u128): void {
-  if (activationEpoch <= parseStoredU16(WEIGHT_EPOCH_KEY)) {
-    const currentWeight = parseAmount(getString(TOTAL_WEIGHT_KEY));
-    assert(currentWeight >= oldDelta, "replayed governance weight underflow");
-    const replacement = currentWeight - oldDelta + newDelta;
-    setString(TOTAL_WEIGHT_KEY, replacement.toString());
-    if (replacement != currentWeight) setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
-    return;
-  }
-  if (hasKey(SCHEDULED_WEIGHT_EPOCH_KEY)) {
-    assert(
-      parseStoredU16(SCHEDULED_WEIGHT_EPOCH_KEY) == activationEpoch,
-      "multiple unsettled governance weight epochs are not permitted",
-    );
-  } else {
-    setString(SCHEDULED_WEIGHT_EPOCH_KEY, activationEpoch.toString());
-  }
-  const current = hasKey(SCHEDULED_WEIGHT_DELTA_KEY)
-    ? parseAmount(getString(SCHEDULED_WEIGHT_DELTA_KEY))
-    : u128.Zero;
-  assert(current >= oldDelta, "scheduled governance weight underflow");
-  const replacement = current - oldDelta + newDelta;
-  setString(SCHEDULED_WEIGHT_DELTA_KEY, replacement.toString());
-}
-
-function syncGlobalWeightEpoch(): void {
-  const current = currentEpoch();
-  const settled = parseStoredU16(WEIGHT_EPOCH_KEY);
-  // The production host is monotonic. Returning here also keeps local replay
-  // tools from mutating weight state when they inspect an older checkpoint.
-  if (current < settled) return;
-  if (hasKey(SCHEDULED_WEIGHT_EPOCH_KEY)) {
-    const scheduledEpoch = parseStoredU16(SCHEDULED_WEIGHT_EPOCH_KEY);
-    assert(scheduledEpoch > settled, "scheduled governance weight epoch is stale");
-    if (scheduledEpoch <= current) {
-      const delta = parseAmount(getString(SCHEDULED_WEIGHT_DELTA_KEY));
-      setString(TOTAL_WEIGHT_KEY, (parseAmount(getString(TOTAL_WEIGHT_KEY)) + delta).toString());
-      if (!delta.isZero()) setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
-      removeKey(SCHEDULED_WEIGHT_EPOCH_KEY);
-      removeKey(SCHEDULED_WEIGHT_DELTA_KEY);
-    }
-  }
-  if (current != settled) setString(WEIGHT_EPOCH_KEY, current.toString());
 }
 
 function requireCurrentEligibleMetrics(address: string): MetricsRecord {
@@ -1767,11 +1838,25 @@ function stateName(state: u8): string {
   if (state == STATE_EXECUTED) return "Executed";
   if (state == STATE_STALE) return "Stale";
   if (state == STATE_EXPIRED) return "Expired";
+  if (state == STATE_NO_QUORUM) return "NoQuorum";
+  if (state == STATE_ACCEPTED_PENDING_GRACE) return "AcceptedPendingGrace";
+  if (state == STATE_PROPOSAL_SET_FROZEN) return "ProposalSetFrozen";
+  if (state == STATE_VOTING_COMMIT) return "VotingCommit";
+  if (state == STATE_VOTING_REVEAL) return "VotingReveal";
+  if (state == STATE_CANCELLED_BEFORE_CUTOFF) return "CancelledBeforeCutoff";
+  if (state == STATE_REVERT_PROPOSED) return "RevertProposed";
+  if (state == STATE_REVERTED) return "Reverted";
   return "Unknown";
 }
 
 function isTerminalState(state: u8): bool {
-  return state == STATE_REJECTED || state == STATE_EXECUTED || state == STATE_STALE || state == STATE_EXPIRED;
+  return state == STATE_REJECTED
+    || state == STATE_NO_QUORUM
+    || state == STATE_EXECUTED
+    || state == STATE_REVERTED
+    || state == STATE_STALE
+    || state == STATE_EXPIRED
+    || state == STATE_CANCELLED_BEFORE_CUTOFF;
 }
 
 function isRiskClass(value: string): bool {
@@ -2037,6 +2122,8 @@ function validateProposalNestedPayload(payload: CanonicalDagCborMap): string {
   assert(isCanonicalContentCid(payload.string("rationaleCid")), "rationale must be an immutable CID");
   assert(isCanonicalContentCid(payload.string("migrationNotesCid")), "migration notes must be an immutable CID");
   assert(isCanonicalContentCid(payload.string("testPlanCid")), "test plan must be an immutable CID");
+  assert(isCanonicalContentCid(payload.string("rollbackManifestCid")), "rollback manifest must be an immutable CID");
+  assert(isCanonicalContentCid(payload.string("rollbackInstructionsCid")), "rollback instructions must be an immutable CID");
   const baseCids = new Array<string>();
   const candidateCids = new Array<string>();
   for (let i = 0; i < affected.length; i++) {
@@ -2044,6 +2131,27 @@ function validateProposalNestedPayload(payload: CanonicalDagCborMap): string {
     candidateCids.push(candidate.string(affected[i]));
   }
   return sourceTransitionBinding(affected, baseCids, candidateCids);
+}
+
+function validateProposalDeclaredLimits(payload: CanonicalDagCborMap, risk: string): void {
+  const critical = risk != "normal";
+  const maxRepositories: u32 = critical ? 16 : 4;
+  const maxChangedFiles: u32 = critical ? 1024 : 128;
+  const maxPatchBytes: u64 = critical ? 16 * 1024 * 1024 : 2 * 1024 * 1024;
+  const maxSourcePackageBytes: u64 = critical ? 1024 * 1024 * 1024 : 256 * 1024 * 1024;
+  const maxDescriptionBytes: u32 = critical ? 64 * 1024 : 16 * 1024;
+  const maxMigrationOperations: u32 = critical ? 64 : 8;
+  const changedFiles = parseU32(payload.unsigned("changedFileCount"));
+  const patchBytes = parseU64(payload.unsigned("patchBytes"));
+  const sourcePackageBytes = parseU64(payload.unsigned("sourcePackageBytes"));
+  const descriptionBytes = parseU32(payload.unsigned("descriptionBytes"));
+  const migrationOperations = parseU32(payload.unsigned("migrationOperationCount"));
+  assert(<u32>payload.stringArray("affectedRepositories").length <= maxRepositories, "affected repository limit exceeded");
+  assert(changedFiles > 0 && changedFiles <= maxChangedFiles, "changed-file limit exceeded");
+  assert(patchBytes > 0 && patchBytes <= maxPatchBytes, "patch-size limit exceeded");
+  assert(sourcePackageBytes > 0 && sourcePackageBytes <= maxSourcePackageBytes, "source-package limit exceeded");
+  assert(descriptionBytes > 0 && descriptionBytes <= maxDescriptionBytes, "description-size limit exceeded");
+  assert(migrationOperations <= maxMigrationOperations, "migration-operation limit exceeded");
 }
 
 function validateAgentNestedPayload(
@@ -2429,10 +2537,12 @@ function isCanonicalI32(value: string): bool {
 
 function proposalPayloadKeys(): string[] {
   return [
-    "schemaVersion", "parentCanonicalEcosystemCid", "candidateEcosystemCid",
-    "affectedRepositories", "baseSourceCids", "candidateSourceCids", "patchCid", "reviewRoundId",
+    "schemaVersion", "governanceParameterSetCid", "parentCanonicalEcosystemCid", "candidateEcosystemCid",
+    "affectedRepositories", "changedFileCount", "patchBytes", "sourcePackageBytes", "descriptionBytes",
+    "migrationOperationCount", "baseSourceCids", "candidateSourceCids", "patchCid", "reviewRoundId",
     "proposerAddress", "proposalBondAtoms", "riskClass", "rationaleCid",
-    "migrationNotesCid", "testPlanCid", "releaseManifestCid", "criticalFindingWaiverCid",
+    "migrationNotesCid", "testPlanCid", "rollbackManifestCid", "rollbackInstructionsCid",
+    "releaseManifestCid", "criticalFindingWaiverCid",
     "agentReviewRoot", "buildAttestationRoot", "dataAvailabilityRoot",
     "creationBlock", "creationEpoch", "stakingEpoch", "identityMetricsEpoch",
     "candidateIdentityMetricsRoot", "candidateIdentityMetricsEpoch",
@@ -2635,6 +2745,9 @@ function availabilityVerifiedCidKey(reviewRoundId: string, attestationCid: strin
 }
 function availabilityAvailableKey(reviewRoundId: string, attestationCid: string): string {
   return "availability-available:" + reviewRoundId + ":" + attestationCid;
+}
+function reviewAvailabilityMinimumExpiryKey(reviewRoundId: string): string {
+  return "review-availability-min-expiry:" + reviewRoundId;
 }
 function buildDigestCountKey(reviewRoundId: string): string {
   return "build-digest-count:" + reviewRoundId;

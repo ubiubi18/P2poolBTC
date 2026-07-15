@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/RecoveryManifestV1.schema.json",
+  "title": "RecoveryManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "canonicalHistoryCid", "lastKnownGoodEcosystemCid", "releaseManifestCid", "artifactCid", "artifactSha256", "compatibilityMetadataCid", "rollbackInstructionsCid", "chainRpcRequiredForOnChainRevert"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "canonicalHistoryCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "lastKnownGoodEcosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "releaseManifestCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "artifactCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "artifactSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "compatibilityMetadataCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "rollbackInstructionsCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "chainRpcRequiredForOnChainRevert": {"const": true}
+  }
+}

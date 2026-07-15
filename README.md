@@ -130,6 +130,73 @@ boundaries in more detail.
 reproduction only. Do not use its activation, launcher, or handoff instructions
 to join the current Experiment 1 network.
 
+## Governance Day (Local-Only Candidate)
+
+The governance work is a separate experimental vertical slice. It does not
+control the live Experiment 1 deployment and has not been deployed to Idena,
+published as a release, or authorized as a canonical ecosystem manifest.
+
+The current candidate implements:
+
+- one on-chain proposal slot per eligible Idena identity and governance epoch;
+  cancellation, rejection, expiration, and no quorum do not restore the slot,
+- one deterministic frozen proposal set and one bounded commit/reveal epoch
+  ballot covering every proposal in the exact frozen order,
+- sublinear voting based on the integer square root of active locked IDNA,
+  bounded Human/Verified/Newbie status multipliers, and finalized authored-flip
+  trust; identity age, birthday, generation, and repository status are ignored,
+- independent stake, identity-breadth, AI-review, reproducible-build, and public
+  data-availability gates,
+- grace-delayed, permissionless execution with objective challenges,
+  append-only canonical history, decentralized revert proposals, and a local
+  last-known-good recovery flow that never installs software automatically,
+- deterministic source-tree, patch, parameter, attestation, and CAR packaging
+  with CID and SHA-256 verification, and
+- an exact-base IdenaAI integration in which `idena.AI` is the primary
+  governance interface. Agents can prepare reviews, discussions, and ballot
+  drafts, but every file disclosure, mutation, signature, vote, reveal,
+  publication, execution, and recovery action requires explicit user approval.
+  Manual community review remains available and is displayed separately from
+  AI findings.
+
+The locked local parameter-set CID is
+`bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`. The locally
+built WASM candidate is 257,979 bytes with CID
+`bafkreif2se5hppplvl2bhv3eszawodfkbnmfl7eq2luotc2rf5x45qxufi` and SHA-256
+`ba913a77bdebaaf413d7649641670caa0b5855fc90d2e8e98b512f6fcec2f42a`.
+These values identify test artifacts; they are not deployment authorization.
+The current contract accepts only critical-class proposals, requires the
+locked 25 IDNA test bond at proposal creation, and rechecks that independent
+data-availability attestations remain valid through finalization, the extended
+grace period, and the full execution window.
+
+Deployment deliberately fails closed for two unresolved issues: the pinned
+WASM host cannot authenticate the Governance Day epoch anchor to a finalized
+Idena validation boundary, and no objective contract-verifiable classifier yet
+distinguishes normal-risk proposals from critical changes. Proposal scope
+counters are also CID-bound but proposer-declared until a bounded on-chain
+proof format exists. Do not deploy this candidate by substituting a maintainer
+flag or trusted key.
+
+Run the local protocol demo and the exact-base 33-step IdenaAI flow with:
+
+```sh
+cargo run -p governance-cli -- demo-epoch-governance \
+  --output-dir "$PWD/target/governance-day-demo"
+
+env POHW_CONFIRM_LOCAL_TEST_PATCH=YES \
+  IDENA_AI_ROOT=/absolute/path/to/idena-ai \
+  tests/governance/governance-day-e2e.sh
+```
+
+The second command applies the checked IdenaAI patch only to a disposable
+archive, verifies its deterministic source CID, and performs no deployment,
+Git push, release publication, installation, or automatic rollback. See
+[Governance Day](docs/governance/GOVERNANCE-DAY.md),
+[Governance operations](docs/governance/OPERATIONS.md),
+[known limitations](docs/governance/KNOWN-LIMITATIONS.md), and
+[chain-liveness recovery](docs/governance/chain-liveness-recovery.md).
+
 ## Status
 
 Working prototype pieces:
@@ -160,7 +227,16 @@ Working prototype pieces:
 - optional host-only Esplora index integration; pool participants do not run a
   Bitcoin address index or enable Bitcoin Core `txindex`,
 - Vite/React combined explorer and participant dashboard,
-- Raspberry Pi systemd helpers for snapshots, gossip mesh, dashboard API, and dashboard UI.
+- Raspberry Pi systemd helpers for snapshots, gossip mesh, dashboard API, and dashboard UI,
+- Rust and AssemblyScript Governance Day state machines with one proposal per
+  identity per epoch, deterministic batch ballots, sublinear stake weighting,
+  grace periods, paginated canonical history, and decentralized revert
+  proposals,
+- governance source/CAR tooling, strict schemas, local candidate locks, a
+  read-only governance API/dashboard, and a 33-step cross-repository test, and
+- provider-neutral IdenaAI governance operations, AI-first Builder/DAO/Social
+  navigation, optional manual review, disclosure confirmation, and local ballot
+  preparation without automatic signing or submission.
 
 Not done yet:
 
@@ -169,7 +245,12 @@ Not done yet:
 - production P2Pool fork-choice and anti-eclipse logic,
 - long-running networked ChillDKG/FROST signer daemon,
 - complete idena-go reward extraction for every reward source,
-- Idena SDK/bindgen packaging decision, WASM deployment, and data availability publishing.
+- authenticated finalized-validation anchoring for Governance Day,
+- an objective on-chain normal-risk classifier and bounded proof of proposal
+  scope,
+- independent clean-room governance builders, public IPFS replication and
+  availability attestations, external audit, and WASM deployment, and
+- Idena SDK/bindgen packaging decision for the eventual governed client path.
 
 ## Repository Layout
 
@@ -177,12 +258,16 @@ Not done yet:
 crates/pohw-core          consensus/accounting/vault primitives
 crates/p2pool-node        local node, gossip, dashboard API, Bitcoin RPC checks
 crates/idena-lite-indexer local idena-go snapshot builder
-crates/pohw-agent        source verifier and loopback community join wizard
+crates/pohw-agent         source verifier and loopback community join wizard
+crates/governance-core    deterministic governance math, lifecycle, and manifests
+crates/governance-cli     source/CAR, proposal, attestation, simulation, and demo CLI
 ui/pohw-dashboard         React dashboard
-contracts/                Idena WASM snapshot registry
+contracts/                Idena snapshot, miner-registry, and governance WASM contracts
+schemas/governance/       canonical governance object schemas
+integrations/             exact-base local integration patches; never credentials
 deploy/systemd            Raspberry Pi service templates
 scripts/                  Pi helper scripts
-docs/                     design artifacts
+docs/governance/          architecture, operations, security, and recovery boundaries
 ```
 
 ## Defaults
@@ -1374,14 +1459,27 @@ Important boundaries:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
+cargo build --workspace
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m unittest discover -s pohw_idena_rpc/tests -p 'test_*.py' -v
 corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
+corepack pnpm --dir contracts/idena-code-governance install --frozen-lockfile
+corepack pnpm --dir contracts/idena-code-governance build
+corepack pnpm --dir contracts/idena-code-governance test
 bash -n scripts/*.sh
 gitleaks git . --redact
+```
+
+The Governance Day cross-repository test is opt-in because it requires an
+exact IdenaAI checkout and applies a patch to a disposable archive:
+
+```sh
+env POHW_CONFIRM_LOCAL_TEST_PATCH=YES \
+  IDENA_AI_ROOT=/absolute/path/to/idena-ai \
+  tests/governance/governance-day-e2e.sh
 ```
 
 ## License

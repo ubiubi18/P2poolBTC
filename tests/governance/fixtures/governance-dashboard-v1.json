@@ -1,0 +1,140 @@
+{
+  "apiVersion": "pohw-governance-dashboard-v1",
+  "schemaVersion": 1,
+  "experimental": true,
+  "status": "verified-local-snapshot",
+  "safetyLabel": "EXPERIMENTAL / NO-VALUE / NOT DAO-DEPLOYED",
+  "governanceContractAddress": "0x1111111111111111111111111111111111111111",
+  "currentCanonicalEcosystemCid": "bafyreibvxjl3wepac4f4lhstu7kriyqbcmeqxtt5g5pb47uwge6aggxnny",
+  "identityMetrics": {
+    "metricsRoot": "2222222222222222222222222222222222222222222222222222222222222222",
+    "sourceEpoch": 421,
+    "replayCommitment": "3333333333333333333333333333333333333333333333333333333333333333",
+    "independentAttestors": 3,
+    "requiredAttestors": 3,
+    "conflict": false,
+    "certified": true
+  },
+  "repositories": [
+    {
+      "name": "IdenaAI",
+      "sourceTreeCid": "bafyreiggk64gscaqmi3zn5hl26sfwjaueidx47uulalvjakbuwzmakzpvy"
+    },
+    {
+      "name": "P2poolBTC",
+      "sourceTreeCid": "bafyreibvxjl3wepac4f4lhstu7kriyqbcmeqxtt5g5pb47uwge6aggxnny"
+    }
+  ],
+  "proposals": [
+    {
+      "proposalId": "4444444444444444444444444444444444444444444444444444444444444444",
+      "proposalCid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
+      "candidateEcosystemCid": "bafyreiggk64gscaqmi3zn5hl26sfwjaueidx47uulalvjakbuwzmakzpvy",
+      "parameterSetCid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
+      "reviewRoundId": "5555555555555555555555555555555555555555555555555555555555555555",
+      "reviewRoundState": "Claimed",
+      "reviewRoundAgentAttestations": 3,
+      "reviewRoundBuildAttestations": 3,
+      "reviewRoundAvailabilityAttestations": 3,
+      "affectedRepositories": [
+        "IdenaAI",
+        "P2poolBTC"
+      ],
+      "changedFileCount": 24,
+      "patchBytes": 114247,
+      "sourcePackageBytes": 4194304,
+      "descriptionBytes": 2048,
+      "migrationOperationCount": 2,
+      "diffSummary": "Local Governance Day vertical slice with AI-first review and batch commit/reveal.",
+      "riskClass": "critical",
+      "bondAtoms": "25000000000000000000",
+      "agentReviewRoot": "6666666666666666666666666666666666666666666666666666666666666666",
+      "buildAttestationRoot": "7777777777777777777777777777777777777777777777777777777777777777",
+      "dataAvailabilityRoot": "8888888888888888888888888888888888888888888888888888888888888888",
+      "aiReviews": {
+        "validAttestations": 3,
+        "requiredAttestations": 3,
+        "distinctModelFamilies": 2,
+        "requiredModelFamilies": 2,
+        "distinctOwnerIdentities": 3,
+        "requiredOwnerIdentities": 3,
+        "unresolvedCriticalFindings": 0,
+        "passed": true
+      },
+      "builds": {
+        "independentBuilders": 3,
+        "requiredBuilders": 3,
+        "distinctPlatforms": 2,
+        "requiredPlatforms": 2,
+        "matchingCoreArtifactDigests": true,
+        "passed": true
+      },
+      "dataAvailability": {
+        "independentAttestors": 3,
+        "requiredAttestors": 3,
+        "validUntilBlock": 900,
+        "requiredValidUntilBlock": 720,
+        "passed": true
+      },
+      "pos": {
+        "yesWeight": "40",
+        "noWeight": "5",
+        "abstainWeight": "5",
+        "snapshottedRegisteredWeight": "100",
+        "turnoutQuorumBps": 3000,
+        "yesThresholdBps": 7500,
+        "passed": true
+      },
+      "pohw": {
+        "distinctParticipatingIdentities": 12,
+        "requiredParticipatingIdentities": 12,
+        "distinctYesIdentities": 12,
+        "requiredYesIdentities": 12,
+        "verifiedOrHumanYesIdentities": 5,
+        "requiredVerifiedOrHumanYes": 5,
+        "passed": true
+      },
+      "challengeStatus": "closed",
+      "executionStatus": "waiting for grace period",
+      "state": "AcceptedPendingGrace"
+    }
+  ],
+  "epochGovernance": {
+    "governanceEpoch": 421,
+    "currentBlock": 130,
+    "phase": "Grace",
+    "schedule": {
+      "epochAnchorBlock": 1,
+      "proposalCutoffBlock": 40,
+      "commitStartBlock": 80,
+      "commitEndBlock": 100,
+      "revealEndBlock": 120
+    },
+    "frozenProposalSetRoot": "9999999999999999999999999999999999999999999999999999999999999999",
+    "orderedProposalIds": [
+      "4444444444444444444444444444444444444444444444444444444444444444"
+    ],
+    "frozenAtBlock": 40,
+    "reviewedProposals": 1,
+    "unresolvedProposals": 0,
+    "validAgentAttestations": 3,
+    "committedBallots": 12,
+    "revealedBallots": 12,
+    "votingPowerSnapshotReady": true,
+    "graceEndBlock": 300,
+    "openChallenges": 0,
+    "executionReadyProposals": 0
+  },
+  "canonicalHistory": [],
+  "recovery": {
+    "chainRpcAvailable": true,
+    "localLastKnownGoodStaged": false,
+    "stagedEcosystemCid": null,
+    "recoveryManifestCid": null,
+    "explicitUserConfirmationRequired": true,
+    "automaticInstallEnabled": false,
+    "automaticRollbackEnabled": false,
+    "onChainRevertAvailable": true,
+    "warning": "Local test snapshot only. Execution changes a CID reference and never installs software automatically."
+  }
+}

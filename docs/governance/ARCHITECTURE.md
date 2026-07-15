@@ -44,6 +44,16 @@ proposal after all gates, challenge period, and timelock pass.
    path-, size-, SHA-256-, and CID-bound by the governance-fork lock and is
    injected with Go's read-only build overlay; it does not modify or silently
    reinterpret the pinned idena-go source tree.
+10. The Governance Day profile adds one proposal slot per eligible identity and
+    epoch, one deterministic frozen proposal set, one complete commit/reveal
+    epoch ballot, grace-delayed execution, append-only canonical history,
+    decentralized revert proposals, and explicit local recovery staging.
+    Deployment initializes this profile permanently; no contract method can
+    re-enable the legacy independent per-proposal voting path. Canonical
+    history is append-only and exposed through bounded 64-entry pages.
+11. IdenaAI is the primary experimental governance interface. Its provider-
+    neutral agents prepare reviews and briefs, but the user controls every
+    ballot choice, signature, submission, and local rollback confirmation.
 
 ## Four Independent Gates
 
@@ -74,3 +84,10 @@ without changing mainnet consensus. Any new host function, identity-state
 counter, genesis change, network ID, or validation rule belongs exclusively in
 `compatibility/governance-fork-lock.json`, with a distinct network identifier,
 activation mechanism, replay/migration gates, source CIDs, and artifact digests.
+
+The current Governance Day contract cannot authenticate its epoch anchor to a
+finalized validation boundary with the pinned host ABI; first-caller anchoring
+is therefore a deployment blocker. Any required runtime capability belongs only
+in the separate governance-fork profile and requires deterministic gas, replay,
+and migration tests. The contract also fails closed for `normal` risk proposals
+until an objective on-chain risk classifier exists.

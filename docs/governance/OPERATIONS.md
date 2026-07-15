@@ -9,7 +9,54 @@ Use Go 1.26.5, Rust 1.97.0, Node 24.18.0, npm 11.16.0, and pnpm 11.11.0 for
 attested builds. Local versions that differ are suitable only for development
 and must be reported as non-attested.
 
+## Governance Day local demonstration
+
+Build the deterministic protocol fixture first:
+
+```sh
+cargo run -p governance-cli -- demo-epoch-governance \
+  --output-dir "$PWD/target/governance-day-demo"
+```
+
+Run the complete 33-step cross-repository scenario against an exact local
+IdenaAI checkout. The confirmation variable allows only local patch application
+for the disposable test; it does not authorize a deployment, publication,
+installation, rollback, or canonical-reference update.
+
+```sh
+env POHW_CONFIRM_LOCAL_TEST_PATCH=YES \
+  IDENA_AI_ROOT=/absolute/path/to/idena-ai \
+  tests/governance/governance-day-e2e.sh
+```
+
+The report labels all identities, balances, votes, CIDs, and transactions as
+local test data. It records a public-IPFS sidecar result separately. If Docker
+is unavailable, the sidecar step is reported as not run; it is never presented
+as an availability attestation. See `GOVERNANCE-DAY.md` and
+`chain-liveness-recovery.md` for protocol and recovery boundaries.
+
 ## Package and inspect parameters
+
+Governance Day uses a separate immutable parameter object:
+
+```sh
+cargo run -p governance-cli -- epoch-parameters-package \
+  --input compatibility/governance-day-parameters.json \
+  --output-dir /tmp/governance-day-parameters
+
+cargo run -p governance-cli -- epoch-parameters-inspect \
+  --car /tmp/governance-day-parameters/governance-day-parameters.car
+```
+
+The expected CID is
+`bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`.
+Treat any other CID as a different governance experiment. The local candidate
+artifact inventory is
+`compatibility/governance-day-local-candidate-lock.json`; it is explicitly
+non-authorizing and must not be used as a deployment instruction.
+
+The earlier per-proposal parameter package remains inspectable for migration
+and regression testing:
 
 ```sh
 cargo run -p governance-cli -- parameters-package \
@@ -22,9 +69,24 @@ cargo run -p governance-cli -- parameters-inspect \
 
 ## Package source and publish to a public sidecar
 
+Stage the exact candidate through an isolated Git index first. Git is used
+only to enumerate the candidate bytes; the resulting source CID, not the
+commit or branch, is the content identity. This includes tracked edits,
+deletions, and non-ignored new files while excluding `.git`, ignored build
+artifacts, caches, and local environment files.
+
 ```sh
+BASE_COMMIT="$(git rev-parse HEAD)"
+INDEX_DIR="$(mktemp -d /tmp/pohw-source-index.XXXXXX)"
+SOURCE_STAGE="$(mktemp -d /tmp/pohw-source-stage.XXXXXX)"
+
+GIT_INDEX_FILE="$INDEX_DIR/index" git read-tree "$BASE_COMMIT"
+GIT_INDEX_FILE="$INDEX_DIR/index" git add -A
+GIT_INDEX_FILE="$INDEX_DIR/index" git checkout-index \
+  --all --prefix="$SOURCE_STAGE/"
+
 cargo run -p governance-cli -- package \
-  --root "$PWD" \
+  --root "$SOURCE_STAGE" \
   --repository P2poolBTC \
   --output-dir /tmp/p2pool-source
 
@@ -37,6 +99,11 @@ cargo run -p governance-cli -- pin \
   --store "$HOME/.local/share/pohw-governance/pins" \
   --kubo-api http://127.0.0.1:5001
 ```
+
+Do not add generated binaries to the source tree or bypass a packaging
+rejection. The IdenaAI local integration follows the same rule: its tracked
+`.env.e2e` is deleted by the exact-base patch, and the 33-step harness verifies
+that its deterministic source CID matches the inactive integration record.
 
 Do not reuse the idena-go IPFS repository. Keep Kubo's control API on loopback.
 External pin providers are optional and require operator-specific credentials

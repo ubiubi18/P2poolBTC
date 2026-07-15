@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "integrationId": "idena-ai-governance-day-local-slice-2026-07-15-v1",
+  "status": "experimental-local-only",
+  "canonicalAuthorization": "none",
+  "deploymentPermitted": false,
+  "releasePublicationPermitted": false,
+  "automaticInstall": false,
+  "automaticRollback": false,
+  "repository": {
+    "name": "IdenaAI",
+    "url": "https://github.com/ubiubi18/IdenaAI.git",
+    "baseCommit": "30fe9651dd53a39cb7c465a2332c46b455c42afd",
+    "baseRevisionKind": "exact-commit"
+  },
+  "integrationPatch": {
+    "path": "integrations/idena-ai-governance-day.patch",
+    "format": "git-binary-patch-v1",
+    "size": 114247,
+    "sha256": "dbd28607c03b2a65001b0885407b1eb68ce98ac1a9a79586031b1a2258146850"
+  },
+  "dependencyLocks": [
+    {
+      "path": "package-lock.json",
+      "size": 615337,
+      "sha256": "0b8a73378c00f37a5612096080cf317bf7e02b450e5eaead89fd2ca1c27bf49a"
+    }
+  ],
+  "sourcePackage": {
+    "canonicalSourceCid": "bafyreiedew34otx523a3axnbzccu23p62bctlrfptc4bk2y2ghjg27w54y",
+    "sourceTreeSha256": "8325b7c74efdd6c1b05da1c8854d6dfed04535c4af98b8156b1a31d26d7edde6",
+    "carSha256": "5444bf1f48c6dc78fb78cef48dab7f7fb6b9e39be814755e94ca5e4057b6c51d",
+    "fileCount": 713,
+    "totalBytes": 19429469,
+    "status": "packaged-local-candidate",
+    "removedForbiddenPath": ".env.e2e",
+    "policy": "environment files are rejected from canonical source trees",
+    "policyRelaxed": false
+  },
+  "toolchains": {
+    "node": "24.18.0",
+    "npm": "11.16.0"
+  },
+  "validation": {
+    "applyCheck": "git apply --check integrations/idena-ai-governance-day.patch",
+    "focusedTests": "npm exec -- jest main/ai-providers/governance-operations.test.js main/ai-providers/governance-operations-bridge.test.js renderer/shared/components/ai-first-navigation.test.js renderer/shared/components/governance-day-card.test.js renderer/shared/utils/epoch-governance.test.js renderer/shared/utils/governance-day-local-e2e.test.js --runInBand",
+    "rendererBuild": "npm run build:renderer",
+    "crossRepositoryHarness": "POHW_CONFIRM_LOCAL_TEST_PATCH=YES IDENA_AI_ROOT=/absolute/path/to/idena-ai tests/governance/governance-day-e2e.sh"
+  },
+  "limitations": [
+    "This patch is transport for a local test and is not a canonical source CID.",
+    "No Git branch, publisher identity, or repository location authorizes installation.",
+    "Governance Day deployment remains blocked by unauthenticated epoch anchoring and the missing objective normal-risk classifier."
+  ]
+}

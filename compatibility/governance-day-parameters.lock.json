@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "status": "experimental-local-only",
+  "authorizedForDeployment": false,
+  "sourcePath": "compatibility/governance-day-parameters.json",
+  "sourceSha256": "112b0016a90eb19e592029fc2c0da957a0349de6195cfe2c72bda59a9b553c1d",
+  "parameterSetCid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
+  "parameterSetSha256": "788782538cbcb9137d4b9e9feb6b5ed368a7017067dda158c4383e68da73a02c",
+  "carSha256": "07e0aebcfa99f1d7d60843f5ef36af9a549f2f2da8dfd890ff064d571fd381c4",
+  "packageCommand": "cargo run -p governance-cli -- epoch-parameters-package --input compatibility/governance-day-parameters.json --output-dir <empty-output-dir>",
+  "notes": "This lock identifies local test parameters only. It is not a canonical ecosystem authorization, deployment record, or release."
+}

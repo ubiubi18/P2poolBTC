@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/EpochGovernanceParameterSetV1.schema.json",
+  "title": "EpochGovernanceParameterSetV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "stakeQuantumAtoms", "minimumActiveStakeAtoms", "normalProposalBondAtoms", "criticalProposalBondAtoms", "rejectedBondBurnBps", "rejectedBondTreasuryBps", "noQuorumFeeAtoms", "cancellationFeeAtoms", "maximumProposalsPerEpoch", "schedule", "normalLimits", "criticalLimits", "normal", "critical"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "stakeQuantumAtoms": {"const": "1000000000000"},
+    "minimumActiveStakeAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "normalProposalBondAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "criticalProposalBondAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "rejectedBondBurnBps": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "rejectedBondTreasuryBps": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "noQuorumFeeAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "cancellationFeeAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "maximumProposalsPerEpoch": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "schedule": {"$ref": "#/$defs/schedule"},
+    "normalLimits": {"$ref": "#/$defs/limits"},
+    "criticalLimits": {"$ref": "#/$defs/limits"},
+    "normal": {"$ref": "#/$defs/gates"},
+    "critical": {"$ref": "#/$defs/gates"}
+  },
+  "$defs": {
+    "schedule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proposalCutoff", "commitStart", "commitEnd", "revealEnd", "normalGraceBlocks", "criticalGraceBlocks", "executionWindowBlocks", "observationWindowBlocks"],
+      "properties": {
+        "proposalCutoff": {"type": "integer", "minimum": 1},
+        "commitStart": {"type": "integer", "minimum": 1},
+        "commitEnd": {"type": "integer", "minimum": 1},
+        "revealEnd": {"type": "integer", "minimum": 1},
+        "normalGraceBlocks": {"type": "integer", "minimum": 1},
+        "criticalGraceBlocks": {"type": "integer", "minimum": 1},
+        "executionWindowBlocks": {"type": "integer", "minimum": 1},
+        "observationWindowBlocks": {"type": "integer", "minimum": 1}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maxAffectedRepositories", "maxChangedFiles", "maxPatchBytes", "maxSourcePackageBytes", "maxDescriptionBytes", "maxMigrationOperations"],
+      "properties": {
+        "maxAffectedRepositories": {"type": "integer", "minimum": 1},
+        "maxChangedFiles": {"type": "integer", "minimum": 1},
+        "maxPatchBytes": {"type": "integer", "minimum": 1},
+        "maxSourcePackageBytes": {"type": "integer", "minimum": 1},
+        "maxDescriptionBytes": {"type": "integer", "minimum": 1},
+        "maxMigrationOperations": {"type": "integer", "minimum": 0}
+      }
+    },
+    "gates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turnoutQuorumBps", "yesThresholdBps", "minimumParticipatingIdentities", "minimumYesIdentities", "minimumVerifiedOrHumanYes", "minimumAiAttestations", "minimumAiIndependenceGroups", "minimumAiFamilies", "minimumBuilders", "minimumBuilderPlatforms", "minimumDataAvailabilityProviders", "requireMatchingBuildDigests"],
+      "properties": {
+        "turnoutQuorumBps": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "yesThresholdBps": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "minimumParticipatingIdentities": {"type": "integer", "minimum": 1},
+        "minimumYesIdentities": {"type": "integer", "minimum": 1},
+        "minimumVerifiedOrHumanYes": {"type": "integer", "minimum": 0},
+        "minimumAiAttestations": {"type": "integer", "minimum": 1},
+        "minimumAiIndependenceGroups": {"type": "integer", "minimum": 1},
+        "minimumAiFamilies": {"type": "integer", "minimum": 1},
+        "minimumBuilders": {"type": "integer", "minimum": 1},
+        "minimumBuilderPlatforms": {"type": "integer", "minimum": 1},
+        "minimumDataAvailabilityProviders": {"type": "integer", "minimum": 1},
+        "requireMatchingBuildDigests": {"type": "boolean"}
+      }
+    }
+  }
+}

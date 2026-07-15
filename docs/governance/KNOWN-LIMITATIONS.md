@@ -2,6 +2,33 @@
 
 This implementation is safe only for local, no-value testing.
 
+- Governance Day schedule anchoring is not authenticated to the finalized
+  Idena validation lifecycle by the pinned WASM host ABI. The current first
+  caller can choose the epoch anchor. Deployment is blocked until an objective
+  anchor is supplied by a separately reviewed governance-fork capability or an
+  equally deterministic legacy-compatible mechanism.
+- `normal` risk-class proposals are rejected by the Governance Day contract.
+  No objective contract-verifiable classifier currently distinguishes normal
+  code changes from critical, migration, consensus, or recovery changes. A
+  maintainer-selected label would recreate privileged authority, so this path
+  intentionally fails closed.
+- Proposal scope counters are immutable and bounded by the locked parameter
+  profile, but they are currently proposer-declared and checked by independent
+  review/build workers. The pinned WASM host cannot retrieve and decode every
+  referenced source and patch block. A public-testnet candidate needs a
+  bounded Merkle proof or equivalent on-chain-verifiable scope commitment.
+- The local candidate requires the 25 IDNA critical bond at proposal creation.
+  Review rounds can still be opened before risk is known with the lower 10
+  IDNA floor; an underfunded critical round cannot create a proposal and must
+  expire before its refundable balance is claimed.
+- The IdenaAI integration is represented as a local, exact-base patch because
+  this task forbids publishing branches. Its tracked `.env.e2e` was removed
+  from the candidate rather than exempted, so deterministic source packaging
+  passes without relaxing the environment-file policy. The patch and source
+  CID are local candidate evidence, not a release or DAO authorization.
+- Local rollback support verifies, stages, inspects, and simulates a return to
+  last-known-good software. It does not install binaries, replace files, stop
+  processes, or claim that an on-chain revert works while the chain is stuck.
 - Nothing is deployed. There is no authorized contract address, initial
   ecosystem CID, genesis CID, activation block, release, or public testnet.
 - The exact lock-bound contract now deploys and executes through idena-go's
@@ -48,7 +75,9 @@ This implementation is safe only for local, no-value testing.
   attestation and referenced policy, result, finding, toolchain, SBOM, and
   artifact CID. An availability attestation's own CID is necessarily excluded
   from its recursively described set; its canonical bytes are instead checked
-  directly at submission. No finite attestation proves future persistence.
+  directly at submission. The Governance Day path stores the minimum
+  attestation expiry and rechecks that it spans finalization, grace, and the
+  execution window. No finite attestation proves future persistence.
 - Bitcoin Core build evidence records a distinct checksummed dependency-fetch
   phase and a sealed `depends` prefix, but it cannot portably enforce network
   isolation for the later dependency build. Independent builders must apply
@@ -129,6 +158,9 @@ This implementation is safe only for local, no-value testing.
   from bounded vote and attestation evidence. Diff summaries and affected-
   repository labels remain local index metadata until the desktop also decodes
   the full proposal CID.
+- Canonical history is append-only and paginated at 64 entries per contract
+  query. The dashboard snapshot itself remains capped at 1,024 history entries;
+  archival consumers must page and persist older entries independently.
 - The Rust lifecycle engine emulates WASM transaction rollback by snapshotting
   state around fallible balance, vote, settlement, and execution transitions.
   This is appropriate for tests and simulation but can be expensive at maximum

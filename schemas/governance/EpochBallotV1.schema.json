@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/EpochBallotV1.schema.json",
+  "title": "EpochBallotV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "governanceEpoch", "voterAddress", "votingPowerSnapshotReference", "orderedChoices", "localNotes", "ballotNonce", "commitmentSalt", "commitment"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "governanceEpoch": {"type": "integer", "minimum": 0},
+    "voterAddress": {"$ref": "common.schema.json#/$defs/Address"},
+    "votingPowerSnapshotReference": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "orderedChoices": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposalId", "choice"],
+        "properties": {
+          "proposalId": {"type": "string", "pattern": "^GOV-[0-9]+-[0-9a-f]{16}$"},
+          "choice": {"enum": ["yes", "no", "abstain"]}
+        }
+      }
+    },
+    "localNotes": {
+      "description": "Local-only UX data. It is never encoded into the on-chain commitment.",
+      "type": "object",
+      "additionalProperties": {"type": "string", "maxLength": 8192}
+    },
+    "ballotNonce": {"type": "integer", "minimum": 0},
+    "commitmentSalt": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "commitment": {"$ref": "common.schema.json#/$defs/Sha256"}
+  }
+}

@@ -94,9 +94,15 @@ pub struct AttestationCommitmentEntryV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeProposalContentV1 {
     pub schema_version: u16,
+    pub governance_parameter_set_cid: String,
     pub parent_canonical_ecosystem_cid: String,
     pub candidate_ecosystem_cid: String,
     pub affected_repositories: Vec<String>,
+    pub changed_file_count: u32,
+    pub patch_bytes: u64,
+    pub source_package_bytes: u64,
+    pub description_bytes: u32,
+    pub migration_operation_count: u32,
     pub base_source_cids: BTreeMap<String, String>,
     pub candidate_source_cids: BTreeMap<String, String>,
     pub patch_cid: String,
@@ -108,6 +114,8 @@ pub struct ChangeProposalContentV1 {
     pub rationale_cid: String,
     pub migration_notes_cid: String,
     pub test_plan_cid: String,
+    pub rollback_manifest_cid: String,
+    pub rollback_instructions_cid: String,
     pub release_manifest_cid: Option<String>,
     pub critical_finding_waiver_cid: Option<String>,
     pub agent_review_root: String,
@@ -1101,6 +1109,9 @@ impl GovernanceEngine {
         self.sync_all_stakes(clock.epoch)?;
         content.proposer_address = normalize_governance_address(&content.proposer_address)?;
         validate_proposal_content(&content, &self.parameters, clock)?;
+        if content.governance_parameter_set_cid != self.governance_parameter_set_cid {
+            return Err(GovernanceError::InvalidProposal);
+        }
         if content.parent_canonical_ecosystem_cid != self.canonical_ecosystem_cid {
             return Err(GovernanceError::StaleParent);
         }
@@ -1159,6 +1170,8 @@ impl GovernanceEngine {
                     content.rationale_cid.as_str(),
                     content.migration_notes_cid.as_str(),
                     content.test_plan_cid.as_str(),
+                    content.rollback_manifest_cid.as_str(),
+                    content.rollback_instructions_cid.as_str(),
                 ]
                 .iter()
                 .all(|cid| round.pinset_cids.iter().any(|member| member == *cid))
@@ -2682,6 +2695,7 @@ fn validate_proposal_content(
         return Err(GovernanceError::InvalidProposal);
     }
     for cid in [
+        &content.governance_parameter_set_cid,
         &content.parent_canonical_ecosystem_cid,
         &content.candidate_ecosystem_cid,
         &content.patch_cid,
@@ -2692,6 +2706,8 @@ fn validate_proposal_content(
         &content.rationale_cid,
         &content.migration_notes_cid,
         &content.test_plan_cid,
+        &content.rollback_manifest_cid,
+        &content.rollback_instructions_cid,
     ] {
         validate_content_cid(cid)?;
     }
@@ -2727,12 +2743,51 @@ fn validate_proposal_content(
         _ => return Err(GovernanceError::InvalidProposal),
     }
     if content.affected_repositories.is_empty()
-        || content.affected_repositories.len() > 64
+        || content.affected_repositories.len() > 16
         || !strict_sorted_unique(&content.affected_repositories)
         || content
             .affected_repositories
             .iter()
             .any(|name| !valid_repository_name(name))
+    {
+        return Err(GovernanceError::InvalidProposal);
+    }
+    let (
+        max_repositories,
+        max_changed_files,
+        max_patch_bytes,
+        max_source_bytes,
+        max_description_bytes,
+        max_migration_operations,
+    ) = if content.risk_class.is_critical() {
+        (
+            16usize,
+            1_024u32,
+            16 * 1024 * 1024u64,
+            1024 * 1024 * 1024u64,
+            64 * 1024u32,
+            64u32,
+        )
+    } else {
+        (
+            4usize,
+            128u32,
+            2 * 1024 * 1024u64,
+            256 * 1024 * 1024u64,
+            16 * 1024u32,
+            8u32,
+        )
+    };
+    if content.affected_repositories.len() > max_repositories
+        || content.changed_file_count == 0
+        || content.changed_file_count > max_changed_files
+        || content.patch_bytes == 0
+        || content.patch_bytes > max_patch_bytes
+        || content.source_package_bytes == 0
+        || content.source_package_bytes > max_source_bytes
+        || content.description_bytes == 0
+        || content.description_bytes > max_description_bytes
+        || content.migration_operation_count > max_migration_operations
     {
         return Err(GovernanceError::InvalidProposal);
     }
@@ -3833,9 +3888,15 @@ mod tests {
             .clone();
         ChangeProposalContentV1 {
             schema_version: 1,
+            governance_parameter_set_cid: cid("parameters"),
             parent_canonical_ecosystem_cid: fixture.parent.root_cid.to_string(),
             candidate_ecosystem_cid: fixture.candidate.root_cid.to_string(),
             affected_repositories: vec!["P2poolBTC".to_string()],
+            changed_file_count: 1,
+            patch_bytes: 100,
+            source_package_bytes: 1_000,
+            description_bytes: 100,
+            migration_operation_count: 0,
             base_source_cids: BTreeMap::from([("P2poolBTC".to_string(), base_source)]),
             candidate_source_cids: BTreeMap::from([("P2poolBTC".to_string(), candidate_source)]),
             patch_cid: fixture.patch.root_cid.to_string(),
@@ -3846,6 +3907,8 @@ mod tests {
             rationale_cid: cid("rationale"),
             migration_notes_cid: cid("migration"),
             test_plan_cid: cid("test-plan"),
+            rollback_manifest_cid: cid("migration"),
+            rollback_instructions_cid: cid("migration"),
             release_manifest_cid: None,
             critical_finding_waiver_cid: None,
             agent_review_root: agents.root.clone(),
@@ -5088,6 +5151,35 @@ mod tests {
             ),
             Err(GovernanceError::InvalidContentAddress(_))
         ));
+    }
+
+    #[test]
+    fn proposal_content_enforces_governance_day_scope_limits() {
+        let entries = vec![AttestationCommitmentEntryV1 {
+            attestation_cid: cid("scope-attestation"),
+            canonical_fields: "scope-fields".to_string(),
+        }];
+        let commitment =
+            build_attestation_commitment(AGENT_REVIEW_COMMITMENT_DOMAIN, &entries).unwrap();
+        let parameters = GovernanceParameterSetV1::experimental_defaults();
+        let clock = GovernanceClock {
+            block: 50,
+            epoch: 2,
+        };
+        let mut content = proposal_content(&address(1), &commitment, &commitment, &commitment);
+        assert!(validate_proposal_content(&content, &parameters, clock).is_ok());
+
+        content.changed_file_count = 1_025;
+        assert_eq!(
+            validate_proposal_content(&content, &parameters, clock),
+            Err(GovernanceError::InvalidProposal)
+        );
+        content.changed_file_count = 1;
+        content.patch_bytes = 16 * 1024 * 1024 + 1;
+        assert_eq!(
+            validate_proposal_content(&content, &parameters, clock),
+            Err(GovernanceError::InvalidProposal)
+        );
     }
 
     #[test]

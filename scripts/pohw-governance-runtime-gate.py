@@ -131,11 +131,12 @@ def hash_regular_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), len(payload)
 
 
-def verify_contract_artifact(contract: Path, lock: dict[str, Any]) -> tuple[str, int, str]:
-    prototype = lock.get("governancePrototype")
-    require(isinstance(prototype, dict), "lock is missing governancePrototype")
-    artifact = prototype.get("contractArtifact")
-    require(isinstance(artifact, dict), "lock is missing the governance contract artifact")
+def verify_artifact_descriptor(
+    contract: Path,
+    artifact: Any,
+    lock_label: str = "governance lock",
+) -> tuple[str, int, str]:
+    require(isinstance(artifact, dict), f"{lock_label} is missing the governance contract artifact")
     expected_sha256 = artifact.get("sha256")
     expected_size = artifact.get("size")
     expected_cid = artifact.get("cid")
@@ -146,10 +147,16 @@ def verify_contract_artifact(contract: Path, lock: dict[str, Any]) -> tuple[str,
     require(isinstance(expected_size, int) and expected_size > 0, "invalid locked contract size")
     require(isinstance(expected_cid, str), "invalid locked contract CID")
     actual_sha256, actual_size = hash_regular_file(contract)
-    require(actual_sha256 == expected_sha256, "contract SHA-256 does not match the governance lock")
-    require(actual_size == expected_size, "contract size does not match the governance lock")
-    require(raw_cid(actual_sha256) == expected_cid, "contract raw CID does not match the governance lock")
+    require(actual_sha256 == expected_sha256, f"contract SHA-256 does not match the {lock_label}")
+    require(actual_size == expected_size, f"contract size does not match the {lock_label}")
+    require(raw_cid(actual_sha256) == expected_cid, f"contract raw CID does not match the {lock_label}")
     return expected_sha256, expected_size, expected_cid
+
+
+def verify_contract_artifact(contract: Path, lock: dict[str, Any]) -> tuple[str, int, str]:
+    prototype = lock.get("governancePrototype")
+    require(isinstance(prototype, dict), "lock is missing governancePrototype")
+    return verify_artifact_descriptor(contract, prototype.get("contractArtifact"))
 
 
 def resolve_locked_relative_file(root: Path, value: Any, label: str) -> Path:

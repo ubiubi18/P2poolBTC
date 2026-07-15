@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use cid::{Cid, Version};
-use governance_core::{evaluate_gates, AcceptanceEvidence, GateParameterSet, RiskClass};
+use governance_core::{
+    evaluate_gates, AcceptanceEvidence, EpochGateParametersV1, EpochGovernanceParameterSetV1,
+    GateParameterSet, RiskClass,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -9,9 +12,12 @@ use std::path::Path;
 const MAX_GOVERNANCE_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GOVERNANCE_PROPOSALS: usize = 256;
 const MAX_GOVERNANCE_REPOSITORIES: usize = 64;
-const MAX_AFFECTED_REPOSITORIES: usize = 64;
+const MAX_AFFECTED_REPOSITORIES: usize = 16;
 const MAX_GATE_ATTESTATIONS: u32 = 256;
+const MAX_CANONICAL_HISTORY_ENTRIES: usize = 1_024;
 const EXPERIMENTAL_LABEL: &str = "EXPERIMENTAL / NO-VALUE / NOT DAO-DEPLOYED";
+const EXPECTED_GOVERNANCE_PARAMETER_SET_CID: &str =
+    "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -26,6 +32,73 @@ pub struct GovernanceDashboardResponseV1 {
     pub identity_metrics: Option<GovernanceIdentityMetricsCertificationV1>,
     pub repositories: Vec<GovernanceRepositoryViewV1>,
     pub proposals: Vec<GovernanceProposalViewV1>,
+    #[serde(default)]
+    pub epoch_governance: Option<GovernanceEpochViewV1>,
+    #[serde(default)]
+    pub canonical_history: Vec<GovernanceCanonicalExecutionViewV1>,
+    #[serde(default)]
+    pub recovery: Option<GovernanceRecoveryViewV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GovernanceEpochViewV1 {
+    pub governance_epoch: u64,
+    pub current_block: u64,
+    pub phase: String,
+    pub schedule: GovernanceScheduleViewV1,
+    pub frozen_proposal_set_root: Option<String>,
+    pub ordered_proposal_ids: Vec<String>,
+    pub frozen_at_block: Option<u64>,
+    pub reviewed_proposals: u32,
+    pub unresolved_proposals: u32,
+    pub valid_agent_attestations: u32,
+    pub committed_ballots: u32,
+    pub revealed_ballots: u32,
+    pub voting_power_snapshot_ready: bool,
+    pub grace_end_block: Option<u64>,
+    pub open_challenges: u32,
+    pub execution_ready_proposals: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GovernanceScheduleViewV1 {
+    pub epoch_anchor_block: u64,
+    pub proposal_cutoff_block: u64,
+    pub commit_start_block: u64,
+    pub commit_end_block: u64,
+    pub reveal_end_block: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GovernanceCanonicalExecutionViewV1 {
+    pub execution_id: String,
+    pub previous_canonical_ecosystem_cid: String,
+    pub new_canonical_ecosystem_cid: String,
+    pub proposal_id: String,
+    pub governance_epoch: u64,
+    pub decision_record_cid: String,
+    pub execution_block: u64,
+    pub rollback_manifest_cid: String,
+    pub release_rollback_instructions_cid: String,
+    pub observation_window_end_block: u64,
+    pub reverts_execution_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GovernanceRecoveryViewV1 {
+    pub chain_rpc_available: bool,
+    pub local_last_known_good_staged: bool,
+    pub staged_ecosystem_cid: Option<String>,
+    pub recovery_manifest_cid: Option<String>,
+    pub explicit_user_confirmation_required: bool,
+    pub automatic_install_enabled: bool,
+    pub automatic_rollback_enabled: bool,
+    pub on_chain_revert_available: bool,
+    pub warning: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,12 +126,18 @@ pub struct GovernanceProposalViewV1 {
     pub proposal_id: String,
     pub proposal_cid: String,
     pub candidate_ecosystem_cid: String,
+    pub parameter_set_cid: String,
     pub review_round_id: String,
     pub review_round_state: String,
     pub review_round_agent_attestations: u32,
     pub review_round_build_attestations: u32,
     pub review_round_availability_attestations: u32,
     pub affected_repositories: Vec<String>,
+    pub changed_file_count: u32,
+    pub patch_bytes: u64,
+    pub source_package_bytes: u64,
+    pub description_bytes: u32,
+    pub migration_operation_count: u32,
     pub diff_summary: String,
     pub risk_class: String,
     pub bond_atoms: String,
@@ -104,6 +183,8 @@ pub struct GovernanceBuildGateV1 {
 pub struct GovernanceAvailabilityGateV1 {
     pub independent_attestors: u32,
     pub required_attestors: u32,
+    pub valid_until_block: u64,
+    pub required_valid_until_block: u64,
     pub passed: bool,
 }
 
@@ -122,6 +203,8 @@ pub struct GovernancePosGateV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GovernancePohwGateV1 {
+    pub distinct_participating_identities: u32,
+    pub required_participating_identities: u32,
     pub distinct_yes_identities: u32,
     pub required_yes_identities: u32,
     pub verified_or_human_yes_identities: u32,
@@ -164,6 +247,9 @@ fn unconfigured() -> GovernanceDashboardResponseV1 {
         identity_metrics: None,
         repositories: vec![],
         proposals: vec![],
+        epoch_governance: None,
+        canonical_history: vec![],
+        recovery: None,
     }
 }
 
@@ -220,6 +306,10 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
         validate_sha256(&proposal.proposal_id)?;
         validate_object_cid(&proposal.proposal_cid)?;
         validate_object_cid(&proposal.candidate_ecosystem_cid)?;
+        validate_object_cid(&proposal.parameter_set_cid)?;
+        if proposal.parameter_set_cid != EXPECTED_GOVERNANCE_PARAMETER_SET_CID {
+            bail!("proposal parameter set does not match this dashboard build");
+        }
         validate_sha256(&proposal.review_round_id)?;
         if !matches!(
             proposal.review_round_state.as_str(),
@@ -237,23 +327,50 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
         ] {
             validate_sha256(digest)?;
         }
-        if !proposal_ids.insert(&proposal.proposal_id) {
+        if !proposal_ids.insert(proposal.proposal_id.clone()) {
             bail!("duplicate governance proposal ID");
         }
-        if proposal.affected_repositories.is_empty()
-            || proposal.affected_repositories.len() > MAX_AFFECTED_REPOSITORIES
-            || !is_sorted_unique_labels(&proposal.affected_repositories)
-        {
-            bail!("proposal affected repositories are invalid");
-        }
-        validate_text(&proposal.diff_summary, 1, 4_096)?;
         if !matches!(
             proposal.risk_class.as_str(),
             "normal" | "critical" | "consensus" | "migration"
         ) {
             bail!("proposal risk class is invalid");
         }
-        validate_amount(&proposal.bond_atoms)?;
+        if proposal.risk_class == "normal" {
+            bail!("normal proposal snapshots are disabled until an objective risk classifier is deployed");
+        }
+        let profile = EpochGovernanceParameterSetV1::experimental_defaults();
+        let limits = if proposal.risk_class == "normal" {
+            profile.normal_limits
+        } else {
+            profile.critical_limits
+        };
+        if proposal.affected_repositories.is_empty()
+            || proposal.affected_repositories.len() > limits.max_affected_repositories as usize
+            || proposal.affected_repositories.len() > MAX_AFFECTED_REPOSITORIES
+            || !is_sorted_unique_labels(&proposal.affected_repositories)
+            || proposal.changed_file_count == 0
+            || proposal.changed_file_count > limits.max_changed_files
+            || proposal.patch_bytes == 0
+            || proposal.patch_bytes > limits.max_patch_bytes
+            || proposal.source_package_bytes == 0
+            || proposal.source_package_bytes > limits.max_source_package_bytes
+            || proposal.description_bytes == 0
+            || proposal.description_bytes > limits.max_description_bytes
+            || proposal.migration_operation_count > limits.max_migration_operations
+        {
+            bail!("proposal scope exceeds its parameter-set limits");
+        }
+        validate_text(&proposal.diff_summary, 1, 4_096)?;
+        let bond = parse_amount(&proposal.bond_atoms)?;
+        let minimum_bond = if proposal.risk_class == "normal" {
+            parse_amount(&profile.normal_proposal_bond_atoms)?
+        } else {
+            parse_amount(&profile.critical_proposal_bond_atoms)?
+        };
+        if bond < minimum_bond {
+            bail!("proposal bond is below its locked risk-class minimum");
+        }
         for amount in [
             &proposal.pos.yes_weight,
             &proposal.pos.no_weight,
@@ -267,13 +384,22 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
             || !matches!(
                 proposal.state.as_str(),
                 "Draft"
+                    | "Submitted"
                     | "ReviewOpen"
                     | "VotingOpen"
+                    | "ProposalSetFrozen"
+                    | "VotingCommit"
+                    | "VotingReveal"
                     | "AcceptedPendingChallenge"
+                    | "AcceptedPendingGrace"
                     | "Rejected"
+                    | "NoQuorum"
                     | "Challenged"
                     | "AcceptedPendingExecution"
                     | "Executed"
+                    | "CancelledBeforeCutoff"
+                    | "RevertProposed"
+                    | "Reverted"
                     | "Stale"
                     | "Expired"
             )
@@ -284,6 +410,173 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
         validate_text(&proposal.execution_status, 1, 160)?;
         validate_proposal_gates(proposal)?;
     }
+    validate_epoch_governance(value.epoch_governance.as_ref(), &proposal_ids)?;
+    validate_canonical_history(value)?;
+    validate_recovery(value.recovery.as_ref())?;
+    Ok(())
+}
+
+fn validate_epoch_governance(
+    epoch: Option<&GovernanceEpochViewV1>,
+    proposal_ids: &BTreeSet<String>,
+) -> Result<()> {
+    let Some(epoch) = epoch else {
+        return Ok(());
+    };
+    let schedule = &epoch.schedule;
+    if !(schedule.epoch_anchor_block < schedule.proposal_cutoff_block
+        && schedule.proposal_cutoff_block < schedule.commit_start_block
+        && schedule.commit_start_block < schedule.commit_end_block
+        && schedule.commit_end_block < schedule.reveal_end_block)
+    {
+        bail!("governance epoch schedule is not strictly ordered");
+    }
+    if !matches!(
+        epoch.phase.as_str(),
+        "ProposalSubmission"
+            | "FrozenReview"
+            | "VotingCommit"
+            | "VotingReveal"
+            | "Finalization"
+            | "Grace"
+            | "Execution"
+            | "Closed"
+    ) {
+        bail!("governance epoch phase is invalid");
+    }
+    let expected_window_phase = if epoch.current_block < schedule.proposal_cutoff_block {
+        Some("ProposalSubmission")
+    } else if epoch.current_block < schedule.commit_start_block {
+        Some("FrozenReview")
+    } else if epoch.current_block < schedule.commit_end_block {
+        Some("VotingCommit")
+    } else if epoch.current_block < schedule.reveal_end_block {
+        Some("VotingReveal")
+    } else {
+        None
+    };
+    if expected_window_phase.is_some_and(|expected| expected != epoch.phase) {
+        bail!("governance epoch phase does not match its chain block window");
+    }
+    if epoch.reviewed_proposals as usize > epoch.ordered_proposal_ids.len()
+        || epoch.unresolved_proposals as usize > epoch.ordered_proposal_ids.len()
+        || epoch.reviewed_proposals as usize + epoch.unresolved_proposals as usize
+            > epoch.ordered_proposal_ids.len()
+        || epoch.valid_agent_attestations > MAX_GATE_ATTESTATIONS.saturating_mul(64)
+        || epoch.revealed_ballots > epoch.committed_ballots
+        || epoch.open_challenges > MAX_GOVERNANCE_PROPOSALS as u32
+        || epoch.execution_ready_proposals > MAX_GOVERNANCE_PROPOSALS as u32
+    {
+        bail!("governance epoch counters are inconsistent");
+    }
+    if epoch.ordered_proposal_ids.len() > MAX_GOVERNANCE_PROPOSALS
+        || !is_sorted_unique_sha256(&epoch.ordered_proposal_ids)
+        || epoch
+            .ordered_proposal_ids
+            .iter()
+            .any(|proposal_id| !proposal_ids.contains(proposal_id))
+    {
+        bail!("frozen governance proposal set is invalid");
+    }
+    match (
+        epoch.frozen_proposal_set_root.as_deref(),
+        epoch.frozen_at_block,
+    ) {
+        (None, None) if epoch.ordered_proposal_ids.is_empty() => {
+            if epoch.current_block >= schedule.proposal_cutoff_block {
+                bail!("governance proposal set was not frozen at cutoff");
+            }
+        }
+        (Some(root), Some(frozen_at)) => {
+            validate_sha256(root)?;
+            if frozen_at < schedule.proposal_cutoff_block
+                || frozen_at >= schedule.commit_start_block
+                || epoch.ordered_proposal_ids.is_empty()
+            {
+                bail!("governance proposal set freeze metadata is invalid");
+            }
+        }
+        _ => bail!("governance proposal set freeze metadata is incomplete"),
+    }
+    if epoch.phase == "Grace" && epoch.grace_end_block.is_none()
+        || epoch
+            .grace_end_block
+            .is_some_and(|block| block <= schedule.reveal_end_block)
+    {
+        bail!("governance grace-period metadata is invalid");
+    }
+    Ok(())
+}
+
+fn validate_canonical_history(value: &GovernanceDashboardResponseV1) -> Result<()> {
+    if value.canonical_history.len() > MAX_CANONICAL_HISTORY_ENTRIES {
+        bail!("canonical governance history exceeds the display limit");
+    }
+    let mut execution_ids = BTreeSet::new();
+    let mut previous_execution_block = None;
+    let mut expected_previous_cid = None;
+    for entry in &value.canonical_history {
+        validate_sha256(&entry.execution_id)?;
+        validate_sha256(&entry.proposal_id)?;
+        validate_object_cid(&entry.previous_canonical_ecosystem_cid)?;
+        validate_object_cid(&entry.new_canonical_ecosystem_cid)?;
+        validate_content_cid(&entry.decision_record_cid)?;
+        validate_content_cid(&entry.rollback_manifest_cid)?;
+        validate_content_cid(&entry.release_rollback_instructions_cid)?;
+        if !execution_ids.insert(entry.execution_id.as_str())
+            || previous_execution_block.is_some_and(|block| block >= entry.execution_block)
+            || expected_previous_cid
+                .is_some_and(|cid: &str| cid != entry.previous_canonical_ecosystem_cid)
+            || entry.previous_canonical_ecosystem_cid == entry.new_canonical_ecosystem_cid
+            || entry.observation_window_end_block < entry.execution_block
+        {
+            bail!("canonical governance history is not append-only and continuous");
+        }
+        if let Some(reverted_execution) = entry.reverts_execution_id.as_deref() {
+            validate_sha256(reverted_execution)?;
+            if !execution_ids.contains(reverted_execution)
+                || reverted_execution == entry.execution_id
+            {
+                bail!("canonical governance revert does not reference prior history");
+            }
+        }
+        previous_execution_block = Some(entry.execution_block);
+        expected_previous_cid = Some(entry.new_canonical_ecosystem_cid.as_str());
+    }
+    if let (Some(canonical), Some(last)) = (
+        value.current_canonical_ecosystem_cid.as_deref(),
+        value.canonical_history.last(),
+    ) {
+        if canonical != last.new_canonical_ecosystem_cid {
+            bail!("canonical governance history tip does not match the current CID");
+        }
+    }
+    Ok(())
+}
+
+fn validate_recovery(recovery: Option<&GovernanceRecoveryViewV1>) -> Result<()> {
+    let Some(recovery) = recovery else {
+        return Ok(());
+    };
+    if recovery.automatic_install_enabled
+        || recovery.automatic_rollback_enabled
+        || !recovery.explicit_user_confirmation_required
+        || recovery.on_chain_revert_available && !recovery.chain_rpc_available
+    {
+        bail!("governance recovery state would imply an unsafe automatic action");
+    }
+    if let Some(cid) = recovery.staged_ecosystem_cid.as_deref() {
+        validate_object_cid(cid)?;
+    }
+    if let Some(cid) = recovery.recovery_manifest_cid.as_deref() {
+        validate_object_cid(cid)?;
+    }
+    if recovery.local_last_known_good_staged
+        != (recovery.staged_ecosystem_cid.is_some() && recovery.recovery_manifest_cid.is_some())
+    {
+        bail!("governance recovery staging metadata is inconsistent");
+    }
+    validate_text(&recovery.warning, 1, 512)?;
     Ok(())
 }
 
@@ -302,6 +595,12 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         proposal.builds.required_platforms,
         proposal.data_availability.independent_attestors,
         proposal.data_availability.required_attestors,
+        proposal.pohw.distinct_participating_identities,
+        proposal.pohw.required_participating_identities,
+        proposal.pohw.distinct_yes_identities,
+        proposal.pohw.required_yes_identities,
+        proposal.pohw.verified_or_human_yes_identities,
+        proposal.pohw.required_verified_or_human_yes,
     ];
     if counts.iter().any(|count| *count > MAX_GATE_ATTESTATIONS)
         || proposal.ai_reviews.required_attestations == 0
@@ -310,6 +609,8 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         || proposal.builds.required_builders == 0
         || proposal.builds.required_platforms == 0
         || proposal.data_availability.required_attestors == 0
+        || proposal.pohw.required_participating_identities == 0
+        || proposal.pohw.required_yes_identities == 0
         || proposal.ai_reviews.distinct_model_families > proposal.ai_reviews.valid_attestations
         || proposal.ai_reviews.distinct_owner_identities > proposal.ai_reviews.valid_attestations
         || proposal.builds.distinct_platforms > proposal.builds.independent_builders
@@ -317,7 +618,9 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         || proposal.builds.independent_builders > proposal.review_round_build_attestations
         || proposal.data_availability.independent_attestors
             > proposal.review_round_availability_attestations
+        || proposal.pohw.distinct_yes_identities > proposal.pohw.distinct_participating_identities
         || proposal.pohw.verified_or_human_yes_identities > proposal.pohw.distinct_yes_identities
+        || proposal.pohw.required_yes_identities > proposal.pohw.required_participating_identities
         || proposal.pohw.required_verified_or_human_yes > proposal.pohw.required_yes_identities
     {
         bail!("proposal gate evidence is inconsistent");
@@ -335,18 +638,7 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         bail!("proposal turnout exceeds snapshotted registered weight");
     }
 
-    let parameters = GateParameterSet {
-        turnout_quorum_bps: proposal.pos.turnout_quorum_bps,
-        yes_threshold_bps: proposal.pos.yes_threshold_bps,
-        minimum_yes_identities: proposal.pohw.required_yes_identities,
-        minimum_verified_or_human_yes: proposal.pohw.required_verified_or_human_yes,
-        minimum_agent_attestations: proposal.ai_reviews.required_attestations,
-        minimum_agent_families: proposal.ai_reviews.required_model_families,
-        minimum_agent_owners: proposal.ai_reviews.required_owner_identities,
-        minimum_builders: proposal.builds.required_builders,
-        minimum_builder_platforms: proposal.builds.required_platforms,
-        minimum_data_availability_providers: proposal.data_availability.required_attestors,
-    };
+    let profile = EpochGovernanceParameterSetV1::experimental_defaults();
     let evidence = AcceptanceEvidence {
         yes_weight,
         no_weight,
@@ -370,23 +662,73 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         "migration" => RiskClass::Migration,
         _ => unreachable!("risk class was validated before gate recomputation"),
     };
-    let recomputed = evaluate_gates(risk, &parameters, &parameters, &evidence);
+    let expected = if risk.is_critical() {
+        profile.critical
+    } else {
+        profile.normal
+    };
+    if proposal.pos.turnout_quorum_bps != expected.turnout_quorum_bps
+        || proposal.pos.yes_threshold_bps != expected.yes_threshold_bps
+        || proposal.pohw.required_participating_identities
+            != expected.minimum_participating_identities
+        || proposal.pohw.required_yes_identities != expected.minimum_yes_identities
+        || proposal.pohw.required_verified_or_human_yes != expected.minimum_verified_or_human_yes
+        || proposal.ai_reviews.required_attestations != expected.minimum_ai_attestations
+        || proposal.ai_reviews.required_model_families != expected.minimum_ai_families
+        || proposal.ai_reviews.required_owner_identities != expected.minimum_ai_independence_groups
+        || proposal.builds.required_builders != expected.minimum_builders
+        || proposal.builds.required_platforms != expected.minimum_builder_platforms
+        || proposal.data_availability.required_attestors
+            != expected.minimum_data_availability_providers
+    {
+        bail!("proposal declares gate minima that differ from its parameter-set profile");
+    }
+    let normal = acceptance_parameters(profile.normal);
+    let critical = acceptance_parameters(profile.critical);
+    let recomputed = evaluate_gates(risk, &normal, &critical, &evidence);
+    let participant_quorum_passed = proposal.pohw.distinct_participating_identities
+        >= expected.minimum_participating_identities;
+    let pohw_passed = recomputed.pohw.passed && participant_quorum_passed;
+    let availability_fresh = proposal.data_availability.required_valid_until_block > 0
+        && proposal.data_availability.valid_until_block
+            >= proposal.data_availability.required_valid_until_block;
     if proposal.pos.passed != recomputed.pos.passed
-        || proposal.pohw.passed != recomputed.pohw.passed
+        || proposal.pohw.passed != pohw_passed
         || proposal.ai_reviews.passed != recomputed.poaw.passed
         || proposal.builds.passed != recomputed.verification_work.passed
-        || proposal.data_availability.passed != recomputed.data_availability.passed
+        || proposal.data_availability.passed
+            != (recomputed.data_availability.passed && availability_fresh)
     {
         bail!("proposal gate result does not match its evidence");
     }
     if matches!(
         proposal.state.as_str(),
-        "AcceptedPendingChallenge" | "Challenged" | "AcceptedPendingExecution" | "Executed"
-    ) && !recomputed.accepted
+        "AcceptedPendingChallenge"
+            | "AcceptedPendingGrace"
+            | "Challenged"
+            | "AcceptedPendingExecution"
+            | "Executed"
+            | "Reverted"
+    ) && !(recomputed.accepted && participant_quorum_passed && availability_fresh)
     {
         bail!("accepted proposal state does not satisfy every gate");
     }
     Ok(())
+}
+
+fn acceptance_parameters(parameters: EpochGateParametersV1) -> GateParameterSet {
+    GateParameterSet {
+        turnout_quorum_bps: parameters.turnout_quorum_bps,
+        yes_threshold_bps: parameters.yes_threshold_bps,
+        minimum_yes_identities: parameters.minimum_yes_identities,
+        minimum_verified_or_human_yes: parameters.minimum_verified_or_human_yes,
+        minimum_agent_attestations: parameters.minimum_ai_attestations,
+        minimum_agent_families: parameters.minimum_ai_families,
+        minimum_agent_owners: parameters.minimum_ai_independence_groups,
+        minimum_builders: parameters.minimum_builders,
+        minimum_builder_platforms: parameters.minimum_builder_platforms,
+        minimum_data_availability_providers: parameters.minimum_data_availability_providers,
+    }
 }
 
 fn validate_object_cid(value: &str) -> Result<()> {
@@ -398,6 +740,19 @@ fn validate_object_cid(value: &str) -> Result<()> {
         || cid.to_string() != value
     {
         bail!("governance CID does not use canonical CIDv1/DAG-CBOR/SHA2-256");
+    }
+    Ok(())
+}
+
+fn validate_content_cid(value: &str) -> Result<()> {
+    let cid: Cid = value.parse().context("invalid governance content CID")?;
+    if cid.version() != Version::V1
+        || !matches!(cid.codec(), 0x55 | 0x71)
+        || cid.hash().code() != 0x12
+        || cid.hash().digest().len() != 32
+        || cid.to_string() != value
+    {
+        bail!("governance content CID does not use canonical CIDv1/SHA2-256");
     }
     Ok(())
 }
@@ -476,6 +831,19 @@ fn is_sorted_unique_labels(values: &[String]) -> bool {
     true
 }
 
+fn is_sorted_unique_sha256(values: &[String]) -> bool {
+    let mut previous = None;
+    for value in values {
+        if validate_sha256(value).is_err()
+            || previous.is_some_and(|item: &str| item >= value.as_str())
+        {
+            return false;
+        }
+        previous = Some(value.as_str());
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +851,10 @@ mod tests {
 
     fn cid(label: &str) -> String {
         cid_for(0x71, label.as_bytes()).to_string()
+    }
+
+    fn raw_cid(label: &str) -> String {
+        cid_for(0x55, label.as_bytes()).to_string()
     }
 
     fn certified_metrics() -> GovernanceIdentityMetricsCertificationV1 {
@@ -502,15 +874,21 @@ mod tests {
             proposal_id: "4".repeat(64),
             proposal_cid: cid("proposal"),
             candidate_ecosystem_cid: cid("candidate"),
+            parameter_set_cid: EXPECTED_GOVERNANCE_PARAMETER_SET_CID.to_string(),
             review_round_id: "5".repeat(64),
             review_round_state: "Claimed".to_string(),
             review_round_agent_attestations: 3,
-            review_round_build_attestations: 2,
-            review_round_availability_attestations: 2,
+            review_round_build_attestations: 3,
+            review_round_availability_attestations: 3,
             affected_repositories: vec!["P2poolBTC".to_string()],
+            changed_file_count: 1,
+            patch_bytes: 1_024,
+            source_package_bytes: 4_096,
+            description_bytes: 512,
+            migration_operation_count: 0,
             diff_summary: "governance fixture".to_string(),
             risk_class: "critical".to_string(),
-            bond_atoms: "10000000000000000000".to_string(),
+            bond_atoms: "25000000000000000000".to_string(),
             agent_review_root: "6".repeat(64),
             build_attestation_root: "7".repeat(64),
             data_availability_root: "8".repeat(64),
@@ -519,22 +897,24 @@ mod tests {
                 required_attestations: 3,
                 distinct_model_families: 2,
                 required_model_families: 2,
-                distinct_owner_identities: 2,
-                required_owner_identities: 2,
+                distinct_owner_identities: 3,
+                required_owner_identities: 3,
                 unresolved_critical_findings: 0,
                 passed: true,
             },
             builds: GovernanceBuildGateV1 {
-                independent_builders: 2,
-                required_builders: 2,
-                distinct_platforms: 1,
-                required_platforms: 1,
+                independent_builders: 3,
+                required_builders: 3,
+                distinct_platforms: 2,
+                required_platforms: 2,
                 matching_core_artifact_digests: true,
                 passed: true,
             },
             data_availability: GovernanceAvailabilityGateV1 {
-                independent_attestors: 2,
-                required_attestors: 2,
+                independent_attestors: 3,
+                required_attestors: 3,
+                valid_until_block: 1_000,
+                required_valid_until_block: 900,
                 passed: true,
             },
             pos: GovernancePosGateV1 {
@@ -542,20 +922,72 @@ mod tests {
                 no_weight: "0".to_string(),
                 abstain_weight: "0".to_string(),
                 snapshotted_registered_weight: "100".to_string(),
-                turnout_quorum_bps: 2_000,
-                yes_threshold_bps: 6_667,
+                turnout_quorum_bps: 3_000,
+                yes_threshold_bps: 7_500,
                 passed: true,
             },
             pohw: GovernancePohwGateV1 {
-                distinct_yes_identities: 7,
-                required_yes_identities: 7,
-                verified_or_human_yes_identities: 3,
-                required_verified_or_human_yes: 3,
+                distinct_participating_identities: 12,
+                required_participating_identities: 12,
+                distinct_yes_identities: 12,
+                required_yes_identities: 12,
+                verified_or_human_yes_identities: 5,
+                required_verified_or_human_yes: 5,
                 passed: true,
             },
             challenge_status: "closed".to_string(),
             execution_status: "executed".to_string(),
             state: "Executed".to_string(),
+        }
+    }
+
+    fn configured_dashboard() -> GovernanceDashboardResponseV1 {
+        let mut value = unconfigured();
+        value.status = "verified-local-snapshot".to_string();
+        value.governance_contract_address = Some(format!("0x{}", "1".repeat(40)));
+        value.current_canonical_ecosystem_cid = Some(cid("ecosystem"));
+        value.identity_metrics = Some(certified_metrics());
+        value.repositories.push(GovernanceRepositoryViewV1 {
+            name: "P2poolBTC".to_string(),
+            source_tree_cid: cid("source"),
+        });
+        value
+    }
+
+    #[test]
+    fn checked_in_governance_day_ui_fixture_passes_strict_snapshot_validation() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/governance/fixtures/governance-dashboard-v1.json");
+        let value = load_dashboard(Some(&fixture)).unwrap();
+        assert_eq!(value.status, "verified-local-snapshot");
+        assert_eq!(value.proposals.len(), 1);
+        assert_eq!(value.epoch_governance.unwrap().phase, "Grace");
+    }
+
+    fn epoch_view(proposal_id: String) -> GovernanceEpochViewV1 {
+        GovernanceEpochViewV1 {
+            governance_epoch: 421,
+            current_block: 90,
+            phase: "VotingCommit".to_string(),
+            schedule: GovernanceScheduleViewV1 {
+                epoch_anchor_block: 1,
+                proposal_cutoff_block: 40,
+                commit_start_block: 80,
+                commit_end_block: 100,
+                reveal_end_block: 120,
+            },
+            frozen_proposal_set_root: Some("9".repeat(64)),
+            ordered_proposal_ids: vec![proposal_id],
+            frozen_at_block: Some(40),
+            reviewed_proposals: 1,
+            unresolved_proposals: 0,
+            valid_agent_attestations: 3,
+            committed_ballots: 1,
+            revealed_ballots: 0,
+            voting_power_snapshot_ready: true,
+            grace_end_block: None,
+            open_challenges: 0,
+            execution_ready_proposals: 0,
         }
     }
 
@@ -612,8 +1044,60 @@ mod tests {
         assert!(validate_proposal_gates(&impossible_turnout).is_err());
 
         let mut inflated_diversity = proposal;
-        inflated_diversity.builds.distinct_platforms = 3;
+        inflated_diversity.builds.distinct_platforms = 4;
         assert!(validate_proposal_gates(&inflated_diversity).is_err());
+
+        let mut stale_availability = passing_proposal();
+        stale_availability.data_availability.valid_until_block = stale_availability
+            .data_availability
+            .required_valid_until_block
+            - 1;
+        assert!(validate_proposal_gates(&stale_availability).is_err());
+    }
+
+    #[test]
+    fn proposal_cannot_self_declare_weaker_gate_minima() {
+        let mut proposal = passing_proposal();
+        proposal.pos.turnout_quorum_bps = 1;
+        proposal.pos.yes_threshold_bps = 1;
+        proposal.pohw.required_participating_identities = 1;
+        proposal.pohw.required_yes_identities = 1;
+        proposal.pohw.required_verified_or_human_yes = 0;
+        proposal.ai_reviews.required_attestations = 1;
+        proposal.ai_reviews.required_model_families = 1;
+        proposal.ai_reviews.required_owner_identities = 1;
+        proposal.builds.required_builders = 1;
+        proposal.builds.required_platforms = 1;
+        proposal.data_availability.required_attestors = 1;
+        assert!(validate_proposal_gates(&proposal).is_err());
+    }
+
+    #[test]
+    fn dashboard_rejects_disabled_normal_risk_and_underfunded_critical_bonds() {
+        let mut value = configured_dashboard();
+        let mut proposal = passing_proposal();
+        proposal.risk_class = "normal".to_string();
+        value.proposals.push(proposal);
+        assert!(validate_dashboard(&value).is_err());
+
+        let mut value = configured_dashboard();
+        let mut proposal = passing_proposal();
+        proposal.bond_atoms = "10000000000000000000".to_string();
+        value.proposals.push(proposal);
+        assert!(validate_dashboard(&value).is_err());
+    }
+
+    #[test]
+    fn distinct_participation_is_independent_from_yes_breadth() {
+        let mut proposal = passing_proposal();
+        proposal.pohw.distinct_participating_identities = 11;
+        proposal.pohw.distinct_yes_identities = 11;
+        proposal.pohw.passed = false;
+        proposal.state = "Rejected".to_string();
+        assert!(validate_proposal_gates(&proposal).is_ok());
+
+        proposal.pohw.passed = true;
+        assert!(validate_proposal_gates(&proposal).is_err());
     }
 
     #[test]
@@ -637,6 +1121,83 @@ mod tests {
             .collect();
         value.repositories.truncate(1);
         value.proposals = vec![proposal];
+        assert!(validate_dashboard(&value).is_err());
+
+        let mut oversized_scope = passing_proposal();
+        oversized_scope.changed_file_count = 1_025;
+        value.proposals = vec![oversized_scope];
+        assert!(validate_dashboard(&value).is_err());
+    }
+
+    #[test]
+    fn epoch_snapshot_requires_a_frozen_sorted_proposal_set() {
+        let mut value = configured_dashboard();
+        let proposal = passing_proposal();
+        value.epoch_governance = Some(epoch_view(proposal.proposal_id.clone()));
+        value.proposals = vec![proposal];
+        assert!(validate_dashboard(&value).is_ok());
+
+        value
+            .epoch_governance
+            .as_mut()
+            .unwrap()
+            .ordered_proposal_ids
+            .push("3".repeat(64));
+        assert!(validate_dashboard(&value).is_err());
+    }
+
+    #[test]
+    fn canonical_history_is_continuous_and_reverts_only_prior_executions() {
+        let mut value = configured_dashboard();
+        let first_canonical = value.current_canonical_ecosystem_cid.clone().unwrap();
+        let second_canonical = cid("second-canonical");
+        value.current_canonical_ecosystem_cid = Some(second_canonical.clone());
+        value
+            .canonical_history
+            .push(GovernanceCanonicalExecutionViewV1 {
+                execution_id: "a".repeat(64),
+                previous_canonical_ecosystem_cid: first_canonical,
+                new_canonical_ecosystem_cid: second_canonical,
+                proposal_id: "4".repeat(64),
+                governance_epoch: 421,
+                decision_record_cid: raw_cid("decision"),
+                execution_block: 200,
+                rollback_manifest_cid: cid("rollback"),
+                release_rollback_instructions_cid: cid("instructions"),
+                observation_window_end_block: 800,
+                reverts_execution_id: None,
+            });
+        assert!(validate_dashboard(&value).is_ok());
+
+        value.canonical_history[0].previous_canonical_ecosystem_cid = raw_cid("not-a-manifest");
+        assert!(validate_dashboard(&value).is_err());
+        value.canonical_history[0].previous_canonical_ecosystem_cid = cid("ecosystem");
+
+        value.canonical_history[0].reverts_execution_id = Some("a".repeat(64));
+        assert!(validate_dashboard(&value).is_err());
+    }
+
+    #[test]
+    fn recovery_snapshot_never_authorizes_automatic_install_or_fake_on_chain_revert() {
+        let mut value = configured_dashboard();
+        value.recovery = Some(GovernanceRecoveryViewV1 {
+            chain_rpc_available: false,
+            local_last_known_good_staged: true,
+            staged_ecosystem_cid: Some(cid("last-known-good")),
+            recovery_manifest_cid: Some(cid("recovery")),
+            explicit_user_confirmation_required: true,
+            automatic_install_enabled: false,
+            automatic_rollback_enabled: false,
+            on_chain_revert_available: false,
+            warning: "Chain RPC is unavailable; only an explicitly confirmed local rollback is available."
+                .to_string(),
+        });
+        assert!(validate_dashboard(&value).is_ok());
+
+        value.recovery.as_mut().unwrap().automatic_install_enabled = true;
+        assert!(validate_dashboard(&value).is_err());
+        value.recovery.as_mut().unwrap().automatic_install_enabled = false;
+        value.recovery.as_mut().unwrap().on_chain_revert_available = true;
         assert!(validate_dashboard(&value).is_err());
     }
 }
