@@ -4,9 +4,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const FORK_ACTIVATION_SCHEMA_VERSION: u16 = 2;
+pub const FORK_TRANSACTION_UPGRADE_SCHEMA_VERSION: u16 = 1;
 pub const BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 2_016;
 pub const DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS: u64 = 1_000_000_000_000_000;
+pub const DEFAULT_FORK_COINBASE_MATURITY: u64 = 100;
+pub const DEFAULT_FORK_MAX_BLOCK_TRANSACTIONS: u32 = 1_000;
+pub const DEFAULT_FORK_MAX_TRANSACTION_WEIGHT_WU: u64 = 400_000;
 const FORK_ACTIVATION_HASH_TAG: &[u8] = b"POHW1_FORK_ACTIVATION";
+const FORK_TRANSACTION_UPGRADE_HASH_TAG: &[u8] = b"POHW1_FORK_TRANSACTION_UPGRADE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForkDifficultyAlgorithm {
@@ -18,6 +23,20 @@ impl ForkDifficultyAlgorithm {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BootstrapThenBitcoin2016V1 => "bootstrap_then_bitcoin_2016_v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkTransactionConsensus {
+    #[serde(rename = "pohw_segwit_keypath_v1")]
+    SegwitKeypathV1,
+}
+
+impl ForkTransactionConsensus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SegwitKeypathV1 => "pohw_segwit_keypath_v1",
         }
     }
 }
@@ -206,6 +225,129 @@ impl ForkActivationManifest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkTransactionUpgradeManifest {
+    pub schema_version: u16,
+    pub upgrade_id: String,
+    pub base_activation_id: String,
+    pub activation_height: u64,
+    pub transaction_consensus: ForkTransactionConsensus,
+    pub inherited_utxo_spending_enabled: bool,
+    pub coinbase_maturity: u64,
+    pub max_block_transactions: u32,
+    pub max_transaction_weight_wu: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkTransactionUpgradePayload<'a> {
+    schema_version: u16,
+    base_activation_id: &'a str,
+    activation_height: u64,
+    transaction_consensus: ForkTransactionConsensus,
+    inherited_utxo_spending_enabled: bool,
+    coinbase_maturity: u64,
+    max_block_transactions: u32,
+    max_transaction_weight_wu: u64,
+}
+
+impl ForkTransactionUpgradeManifest {
+    pub fn segwit_keypath_v1(
+        base_activation_id: impl AsRef<str>,
+        activation_height: u64,
+    ) -> Result<Self, ForkError> {
+        Self::new(
+            base_activation_id,
+            activation_height,
+            ForkTransactionConsensus::SegwitKeypathV1,
+            DEFAULT_FORK_COINBASE_MATURITY,
+            DEFAULT_FORK_MAX_BLOCK_TRANSACTIONS,
+            DEFAULT_FORK_MAX_TRANSACTION_WEIGHT_WU,
+        )
+    }
+
+    pub fn new(
+        base_activation_id: impl AsRef<str>,
+        activation_height: u64,
+        transaction_consensus: ForkTransactionConsensus,
+        coinbase_maturity: u64,
+        max_block_transactions: u32,
+        max_transaction_weight_wu: u64,
+    ) -> Result<Self, ForkError> {
+        let base_activation_id = normalize_hash_hex(
+            "transaction_upgrade.base_activation_id",
+            base_activation_id.as_ref(),
+        )?;
+        if activation_height == 0 {
+            return Err(ForkError::InvalidTransactionActivationHeight);
+        }
+        if coinbase_maturity == 0 || coinbase_maturity > 10_000 {
+            return Err(ForkError::InvalidCoinbaseMaturity);
+        }
+        if !(2..=100_000).contains(&max_block_transactions) {
+            return Err(ForkError::InvalidMaxBlockTransactions);
+        }
+        if !(400..=4_000_000).contains(&max_transaction_weight_wu) {
+            return Err(ForkError::InvalidMaxTransactionWeight);
+        }
+        let inherited_utxo_spending_enabled = false;
+        let payload = ForkTransactionUpgradePayload {
+            schema_version: FORK_TRANSACTION_UPGRADE_SCHEMA_VERSION,
+            base_activation_id: &base_activation_id,
+            activation_height,
+            transaction_consensus,
+            inherited_utxo_spending_enabled,
+            coinbase_maturity,
+            max_block_transactions,
+            max_transaction_weight_wu,
+        };
+        let upgrade_id = hash_hex(sha256_tagged(
+            FORK_TRANSACTION_UPGRADE_HASH_TAG,
+            &canonical_json(&payload),
+        ));
+        Ok(Self {
+            schema_version: FORK_TRANSACTION_UPGRADE_SCHEMA_VERSION,
+            upgrade_id,
+            base_activation_id,
+            activation_height,
+            transaction_consensus,
+            inherited_utxo_spending_enabled,
+            coinbase_maturity,
+            max_block_transactions,
+            max_transaction_weight_wu,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ForkError> {
+        let canonical = Self::new(
+            &self.base_activation_id,
+            self.activation_height,
+            self.transaction_consensus,
+            self.coinbase_maturity,
+            self.max_block_transactions,
+            self.max_transaction_weight_wu,
+        )?;
+        if canonical != *self {
+            return Err(ForkError::TransactionUpgradeIntegrityMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn validate_for(&self, activation: &ForkActivationManifest) -> Result<(), ForkError> {
+        self.validate()?;
+        activation.validate()?;
+        if self.base_activation_id != activation.activation_id {
+            return Err(ForkError::TransactionUpgradeBaseMismatch);
+        }
+        if self.activation_height <= activation.fork_point.first_fork_height {
+            return Err(ForkError::TransactionUpgradeDoesNotPreserveLaunchRules);
+        }
+        if self.inherited_utxo_spending_enabled {
+            return Err(ForkError::InheritedUtxoSpendingNotAllowed);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ForkError {
     #[error("no Bitcoin mainnet block at or after launch timestamp was provided")]
@@ -239,6 +381,22 @@ pub enum ForkError {
     NonCanonicalPostForkPowLimitBits,
     #[error("fork activation manifest fields or activation_id are not canonical")]
     ManifestIntegrityMismatch,
+    #[error("fork transaction activation height must be greater than zero")]
+    InvalidTransactionActivationHeight,
+    #[error("fork coinbase maturity must be between 1 and 10000 blocks")]
+    InvalidCoinbaseMaturity,
+    #[error("fork max block transaction count must be between 2 and 100000")]
+    InvalidMaxBlockTransactions,
+    #[error("fork max transaction weight must be between 400 and 4000000 weight units")]
+    InvalidMaxTransactionWeight,
+    #[error("fork transaction upgrade fields or upgrade_id are not canonical")]
+    TransactionUpgradeIntegrityMismatch,
+    #[error("fork transaction upgrade belongs to another base activation")]
+    TransactionUpgradeBaseMismatch,
+    #[error("fork transaction upgrade must activate after the first fork block")]
+    TransactionUpgradeDoesNotPreserveLaunchRules,
+    #[error("fork transaction upgrade must not enable inherited Bitcoin UTXO spending")]
+    InheritedUtxoSpendingNotAllowed,
     #[error("{field} must be 32 bytes encoded as 64 hex characters")]
     InvalidBlockHash { field: &'static str },
 }
@@ -456,6 +614,90 @@ mod tests {
         assert_eq!(
             manifest.validate().unwrap_err(),
             ForkError::ManifestIntegrityMismatch
+        );
+    }
+
+    #[test]
+    fn transaction_upgrade_is_deterministic_and_bound_to_base_activation() {
+        let launch_timestamp = Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap();
+        let activation = ForkActivationManifest::new(
+            ForkConfig::no_value_testnet("pohw-experiment-0", launch_timestamp),
+            ForkPoint {
+                inherited_tip_height: 100,
+                inherited_tip_hash: "aa".repeat(32),
+                first_fork_height: 101,
+                launch_timestamp_utc: launch_timestamp,
+            },
+            MainnetBlockRef {
+                height: 101,
+                block_hash: "bb".repeat(32),
+                timestamp: launch_timestamp,
+            },
+        )
+        .unwrap();
+
+        let first =
+            ForkTransactionUpgradeManifest::segwit_keypath_v1(&activation.activation_id, 110)
+                .unwrap();
+        let second =
+            ForkTransactionUpgradeManifest::segwit_keypath_v1(&activation.activation_id, 110)
+                .unwrap();
+        let later =
+            ForkTransactionUpgradeManifest::segwit_keypath_v1(&activation.activation_id, 111)
+                .unwrap();
+
+        first.validate_for(&activation).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first.upgrade_id, later.upgrade_id);
+        assert!(!first.inherited_utxo_spending_enabled);
+        assert_eq!(
+            first.transaction_consensus,
+            ForkTransactionConsensus::SegwitKeypathV1
+        );
+    }
+
+    #[test]
+    fn transaction_upgrade_rejects_tampering_wrong_base_and_launch_rewrite() {
+        let launch_timestamp = Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap();
+        let activation = ForkActivationManifest::new(
+            ForkConfig::no_value_testnet("pohw-experiment-0", launch_timestamp),
+            ForkPoint {
+                inherited_tip_height: 100,
+                inherited_tip_hash: "aa".repeat(32),
+                first_fork_height: 101,
+                launch_timestamp_utc: launch_timestamp,
+            },
+            MainnetBlockRef {
+                height: 101,
+                block_hash: "bb".repeat(32),
+                timestamp: launch_timestamp,
+            },
+        )
+        .unwrap();
+        let mut tampered =
+            ForkTransactionUpgradeManifest::segwit_keypath_v1(&activation.activation_id, 110)
+                .unwrap();
+        tampered.coinbase_maturity += 1;
+        assert_eq!(
+            tampered.validate().unwrap_err(),
+            ForkError::TransactionUpgradeIntegrityMismatch
+        );
+
+        let wrong_base =
+            ForkTransactionUpgradeManifest::segwit_keypath_v1("cc".repeat(32), 110).unwrap();
+        assert_eq!(
+            wrong_base.validate_for(&activation).unwrap_err(),
+            ForkError::TransactionUpgradeBaseMismatch
+        );
+
+        let launch_rewrite = ForkTransactionUpgradeManifest::segwit_keypath_v1(
+            &activation.activation_id,
+            activation.fork_point.first_fork_height,
+        )
+        .unwrap();
+        assert_eq!(
+            launch_rewrite.validate_for(&activation).unwrap_err(),
+            ForkError::TransactionUpgradeDoesNotPreserveLaunchRules
         );
     }
 

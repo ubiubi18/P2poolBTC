@@ -3,8 +3,10 @@ mod bitcoin_rpc;
 mod dashboard_api;
 mod explorer_api;
 mod fork_chain;
+mod fork_explorer;
 mod frost_signer_daemon;
 mod governance_api;
+mod idena_anchor_verifier;
 mod local_node;
 mod mining_adapter;
 mod p2p_node;
@@ -14,7 +16,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, SecretKey};
 use bitcoin_rpc::{BitcoinRpcClient, BlockchainInfoResponse};
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use pohw_core::commitment::PohwCommitment;
 use pohw_core::dkg_transport::{
     decrypt_round2_package, dkg_package_hash, encrypt_round2_package, DkgMessageBody,
@@ -22,9 +24,14 @@ use pohw_core::dkg_transport::{
 };
 use pohw_core::fork::{
     select_fork_point, ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
-    MainnetBlockRef, DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS,
+    ForkTransactionConsensus, ForkTransactionUpgradeManifest, MainnetBlockRef,
+    DEFAULT_BOOTSTRAP_HANDOFF_HASHRATE_HPS, DEFAULT_FORK_COINBASE_MATURITY,
+    DEFAULT_FORK_MAX_BLOCK_TRANSACTIONS, DEFAULT_FORK_MAX_TRANSACTION_WEIGHT_WU,
 };
 use pohw_core::gossip::GossipEnvelope;
+use pohw_core::idena_anchor::{
+    miner_registry_storage_key, MinerRegistryAnchorV1, SharechainCheckpointAnchorV1,
+};
 use pohw_core::payout::{ParticipantAccount, PayoutSchedule};
 use pohw_core::sharechain::{
     BitcoinWorkTemplate, MinerRegistration, Share, SharechainMessage, SnapshotVote,
@@ -51,8 +58,8 @@ use pohw_core::{DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -78,6 +85,19 @@ pub(crate) const MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS: u64 = 3_600;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Args)]
+struct IdenaAnchorCliArgs {
+    /// Enable the ownerless Idena miner-registry and block-anchor admission profile.
+    #[arg(long, env = "POHW_IDENA_ANCHOR_POLICY")]
+    idena_anchor_policy: Option<PathBuf>,
+    #[arg(long, default_value = "http://127.0.0.1:9009", env = "IDENA_RPC_URL")]
+    idena_rpc_url: String,
+    #[arg(long, env = "IDENA_API_KEY_FILE")]
+    idena_api_key_file: Option<PathBuf>,
+    #[arg(long)]
+    allow_remote_idena_rpc: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,6 +131,8 @@ enum Command {
         datadir: PathBuf,
         #[arg(long)]
         activation_manifest: PathBuf,
+        #[arg(long)]
+        transaction_upgrade_manifest: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:40408")]
         rpc_bind_addr: SocketAddr,
         #[arg(long)]
@@ -160,6 +182,20 @@ enum Command {
         #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
         rpc_cookie_file: Option<PathBuf>,
     },
+    PrepareForkTransactionUpgrade {
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long)]
+        activation_height: u64,
+        #[arg(long, default_value_t = DEFAULT_FORK_COINBASE_MATURITY)]
+        coinbase_maturity: u64,
+        #[arg(long, default_value_t = DEFAULT_FORK_MAX_BLOCK_TRANSACTIONS)]
+        max_block_transactions: u32,
+        #[arg(long, default_value_t = DEFAULT_FORK_MAX_TRANSACTION_WEIGHT_WU)]
+        max_transaction_weight_wu: u64,
+        #[arg(long)]
+        manifest_out: Option<PathBuf>,
+    },
     Index {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
@@ -174,6 +210,24 @@ enum Command {
         #[arg(long)]
         message_file: PathBuf,
     },
+    InitializeGossipNetwork {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        network_id: String,
+    },
+    MigrateGossipSeed {
+        #[arg(long)]
+        source_datadir: PathBuf,
+        #[arg(long)]
+        target_datadir: PathBuf,
+        #[arg(long)]
+        network_id: String,
+        #[arg(long)]
+        miner_id: String,
+        #[arg(long)]
+        node_secret_key_file: PathBuf,
+    },
     CreateGossipEnvelope {
         #[arg(long)]
         message_file: PathBuf,
@@ -183,6 +237,8 @@ enum Command {
         created_at_unix: Option<i64>,
         #[arg(long)]
         nonce_hex: Option<String>,
+        #[arg(long)]
+        network_id: Option<String>,
     },
     VerifyGossipEnvelope {
         #[arg(long)]
@@ -191,14 +247,22 @@ enum Command {
         max_future_skew_seconds: i64,
         #[arg(long, default_value_t = 86_400)]
         max_age_seconds: i64,
+        #[arg(long)]
+        network_id: Option<String>,
     },
     VerifyMinerRegistrationEnvelope {
         #[arg(long)]
         envelope_file: PathBuf,
+        #[arg(long)]
+        message_file: Option<PathBuf>,
+        #[arg(long)]
+        datadir: Option<PathBuf>,
         #[arg(long, default_value_t = 300)]
         max_future_skew_seconds: i64,
         #[arg(long, default_value_t = 86_400)]
         max_age_seconds: i64,
+        #[arg(long)]
+        durable: bool,
     },
     AppendGossipEnvelope {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -289,6 +353,8 @@ enum Command {
         explorer_fork_chain_rpc_addr: Option<SocketAddr>,
         #[arg(long, env = "POHW_FORK_ACTIVATION_MANIFEST")]
         explorer_fork_activation_manifest: Option<PathBuf>,
+        #[arg(long, env = "POHW_EXPLORER_POHW_CORE_MANIFEST")]
+        explorer_pohw_core_manifest: Option<PathBuf>,
         #[arg(long, env = "POHW_EXPLORER_BITCOIN_INDEX_URL")]
         explorer_bitcoin_index_url: Option<String>,
         #[arg(long, env = "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX")]
@@ -369,6 +435,8 @@ enum Command {
         allow_mutable_time: bool,
         #[arg(long, default_value_t = 7_200)]
         max_template_time_drift_seconds: u32,
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
     },
     SendGossipEnvelope {
         #[arg(long)]
@@ -416,9 +484,55 @@ enum Command {
         #[arg(long = "peer-addr")]
         peer_addrs: Vec<SocketAddr>,
     },
+    MiningSnapshotEvidence {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        snapshot_dir: PathBuf,
+        #[arg(long)]
+        miner_id: Option<String>,
+        #[arg(long)]
+        min_snapshot_voters: usize,
+    },
     DeriveXonlyPubkey {
         #[arg(long)]
         secret_key_file: PathBuf,
+    },
+    InspectIdenaAnchorPolicy {
+        #[arg(long)]
+        policy_file: PathBuf,
+    },
+    ReadMinerRegistryAnchor {
+        #[arg(long)]
+        contract_address: String,
+        #[arg(long)]
+        experiment_id: String,
+        #[arg(long)]
+        idena_address: String,
+        #[arg(long)]
+        miner_id: String,
+        #[arg(long)]
+        registration_sequence: u32,
+        #[arg(long, default_value = "http://127.0.0.1:9009", env = "IDENA_RPC_URL")]
+        idena_rpc_url: String,
+        #[arg(long, env = "IDENA_API_KEY_FILE")]
+        idena_api_key_file: PathBuf,
+        #[arg(long)]
+        allow_remote_idena_rpc: bool,
+    },
+    ReadSharechainCheckpoint {
+        #[arg(long)]
+        contract_address: String,
+        #[arg(long)]
+        experiment_id: String,
+        #[arg(long)]
+        round: u32,
+        #[arg(long, default_value = "http://127.0.0.1:9009", env = "IDENA_RPC_URL")]
+        idena_rpc_url: String,
+        #[arg(long, env = "IDENA_API_KEY_FILE")]
+        idena_api_key_file: PathBuf,
+        #[arg(long)]
+        allow_remote_idena_rpc: bool,
     },
     CreateMinerRegistration {
         #[arg(long)]
@@ -433,6 +547,8 @@ enum Command {
         mining_secret_key_file: PathBuf,
         #[arg(long, default_value = "00")]
         idena_signature_hex: String,
+        #[arg(long)]
+        registry_anchor_file: Option<PathBuf>,
     },
     PrepareMinerRegistration {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -453,6 +569,16 @@ enum Command {
         btc_payout_script_hex: Option<String>,
         #[arg(long)]
         idena_signature_hex: Option<String>,
+        #[arg(long)]
+        idena_signature_file: Option<PathBuf>,
+        #[arg(long)]
+        idena_signature_stdin: bool,
+        /// Emit the deterministic commitment for the ownerless Idena registry.
+        #[arg(long)]
+        registry_experiment_id: Option<String>,
+        /// Public receipt fields returned by the deployed Idena registry contract.
+        #[arg(long)]
+        registry_anchor_file: Option<PathBuf>,
         #[arg(long)]
         message_out: Option<PathBuf>,
         #[arg(long)]
@@ -505,6 +631,10 @@ enum Command {
         bitcoin_header_hex: String,
         #[arg(long)]
         mining_secret_key_file: PathBuf,
+        /// Bind the template hash to the exact share target. Omit only for
+        /// replaying legacy, unbound sharechain fixtures.
+        #[arg(long)]
+        share_target: Option<String>,
         #[arg(long)]
         created_at_unix: Option<i64>,
     },
@@ -539,6 +669,9 @@ enum Command {
         mining_secret_key_file: PathBuf,
         #[arg(long)]
         node_secret_key_file: PathBuf,
+        /// Exact target assigned to shares for this template.
+        #[arg(long)]
+        share_target: String,
         #[arg(long)]
         created_at_unix: Option<i64>,
         #[arg(long)]
@@ -662,6 +795,8 @@ enum Command {
         #[arg(long)]
         allow_mainnet_submit: bool,
         #[arg(long)]
+        expected_rpc_chain: Option<String>,
+        #[arg(long)]
         payout_schedule_file: Option<PathBuf>,
         #[arg(long)]
         pohw_commitment_file: Option<PathBuf>,
@@ -683,6 +818,8 @@ enum Command {
         rpc_cookie_file: Option<PathBuf>,
         #[arg(long = "no-append", action = clap::ArgAction::SetFalse, default_value_t = true)]
         append: bool,
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
     },
     BuildStratumJobRpc {
         #[arg(long)]
@@ -806,6 +943,16 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:40408")]
         rpc_addr: SocketAddr,
     },
+    SubmitForkTransaction {
+        #[arg(long, conflicts_with = "transaction_file")]
+        transaction_hex: Option<String>,
+        #[arg(long, conflicts_with = "transaction_hex")]
+        transaction_file: Option<PathBuf>,
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:40408")]
+        rpc_addr: SocketAddr,
+    },
     CreateWithdrawalRequest {
         #[arg(long, default_value = ".pohw-p2pool")]
         datadir: PathBuf,
@@ -901,6 +1048,8 @@ enum Command {
         max_future_skew_seconds: i64,
         #[arg(long, default_value_t = 86_400)]
         max_age_seconds: i64,
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
     },
     ShareScore {
         #[arg(long)]
@@ -1563,6 +1712,7 @@ async fn main() -> Result<()> {
         Command::RunForkChainNode {
             datadir,
             activation_manifest,
+            transaction_upgrade_manifest,
             rpc_bind_addr,
             p2p_bind_addr,
             allow_non_loopback_fork_p2p,
@@ -1572,6 +1722,7 @@ async fn main() -> Result<()> {
             fork_chain::run_fork_chain_node(fork_chain::ForkChainNodeConfig {
                 datadir,
                 activation_manifest,
+                transaction_upgrade_manifest,
                 rpc_bind_addr,
                 p2p_bind_addr,
                 allow_non_loopback_p2p: allow_non_loopback_fork_p2p,
@@ -1639,6 +1790,29 @@ async fn main() -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
+        Command::PrepareForkTransactionUpgrade {
+            activation_manifest,
+            activation_height,
+            coinbase_maturity,
+            max_block_transactions,
+            max_transaction_weight_wu,
+            manifest_out,
+        } => {
+            let activation = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let manifest = ForkTransactionUpgradeManifest::new(
+                &activation.activation_id,
+                activation_height,
+                ForkTransactionConsensus::SegwitKeypathV1,
+                coinbase_maturity,
+                max_block_transactions,
+                max_transaction_weight_wu,
+            )?;
+            manifest.validate_for(&activation)?;
+            if let Some(path) = manifest_out {
+                write_json_file(&path, &manifest)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
         Command::Index { datadir } => {
             let index = local_node::sharechain_index(&datadir)?;
             println!("{}", serde_json::to_string_pretty(&index)?);
@@ -1654,22 +1828,61 @@ async fn main() -> Result<()> {
             let result = local_node::append_message_file(&datadir, &message_file)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Command::InitializeGossipNetwork {
+            datadir,
+            network_id,
+        } => {
+            let network_id = local_node::initialize_gossip_network(&datadir, &network_id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "initialized": true,
+                    "network_id": network_id,
+                }))?
+            );
+        }
+        Command::MigrateGossipSeed {
+            source_datadir,
+            target_datadir,
+            network_id,
+            miner_id,
+            node_secret_key_file,
+        } => {
+            let summary = migrate_gossip_seed(
+                &source_datadir,
+                &target_datadir,
+                &network_id,
+                &miner_id,
+                &node_secret_key_file,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
         Command::CreateGossipEnvelope {
             message_file,
             node_secret_key_file,
             created_at_unix,
             nonce_hex,
+            network_id,
         } => {
             let node_keypair = read_keypair_from_file(&node_secret_key_file)?;
             let message = read_sharechain_message_file(&message_file)?;
             let created_at_unix = created_at_unix.unwrap_or(current_unix_timestamp()?);
             let nonce_hex = nonce_hex.unwrap_or_else(random_nonce_hex);
-            let mut envelope = GossipEnvelope::unsigned(
-                node_keypair.x_only_public_key().0.to_string(),
-                created_at_unix,
-                nonce_hex,
-                message,
-            )?;
+            let mut envelope = match network_id {
+                Some(network_id) => GossipEnvelope::unsigned_for_network(
+                    network_id,
+                    node_keypair.x_only_public_key().0.to_string(),
+                    created_at_unix,
+                    nonce_hex,
+                    message,
+                )?,
+                None => GossipEnvelope::unsigned(
+                    node_keypair.x_only_public_key().0.to_string(),
+                    created_at_unix,
+                    nonce_hex,
+                    message,
+                )?,
+            };
             envelope.sign(&node_keypair)?;
             println!("{}", serde_json::to_string_pretty(&envelope)?);
         }
@@ -1677,6 +1890,7 @@ async fn main() -> Result<()> {
             envelope_file,
             max_future_skew_seconds,
             max_age_seconds,
+            network_id,
         } => {
             let envelope = read_gossip_envelope_file(&envelope_file)?;
             envelope.verify_at(
@@ -1684,10 +1898,14 @@ async fn main() -> Result<()> {
                 max_future_skew_seconds,
                 max_age_seconds,
             )?;
+            if let Some(network_id) = network_id.as_deref() {
+                envelope.verify_network(network_id)?;
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "valid": true,
+                    "network_id": envelope.network_id,
                     "envelope_hash": envelope.envelope_hash(),
                     "peer_pubkey_xonly_hex": envelope.peer_pubkey_xonly_hex,
                     "message_hash": envelope.message.message_hash(),
@@ -1696,15 +1914,35 @@ async fn main() -> Result<()> {
         }
         Command::VerifyMinerRegistrationEnvelope {
             envelope_file,
+            message_file,
+            datadir,
             max_future_skew_seconds,
             max_age_seconds,
+            durable,
         } => {
             let envelope = read_gossip_envelope_file(&envelope_file)?;
+            if let Some(message_file) = message_file {
+                let message = read_sharechain_message_file(&message_file)?;
+                if message != envelope.message {
+                    bail!("registration message file does not match the signed envelope");
+                }
+            }
             let registration = verified_miner_registration_from_envelope(
                 &envelope,
                 max_future_skew_seconds,
                 max_age_seconds,
+                durable,
             )?;
+            if let Some(datadir) = datadir {
+                let state = local_node::replay_state(&datadir)?;
+                let replayed = state
+                    .registrations()
+                    .get(&registration.miner_id.to_ascii_lowercase())
+                    .context("verified registration is absent from local sharechain replay")?;
+                if replayed != registration {
+                    bail!("local sharechain registration does not match the signed envelope");
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -1713,6 +1951,7 @@ async fn main() -> Result<()> {
                     "envelope_hash": envelope.envelope_hash(),
                     "peer_pubkey_xonly_hex": envelope.peer_pubkey_xonly_hex,
                     "message_hash": envelope.message.message_hash(),
+                    "registration_binding_hash": hex::encode(registration.signing_hash()),
                     "miner_registration": {
                         "miner_id": registration.miner_id,
                         "idena_address": registration.idena_address,
@@ -1800,6 +2039,7 @@ async fn main() -> Result<()> {
             public_explorer,
             explorer_fork_chain_rpc_addr,
             explorer_fork_activation_manifest,
+            explorer_pohw_core_manifest,
             explorer_bitcoin_index_url,
             explorer_allow_remote_bitcoin_index,
             governance_dashboard_state_file,
@@ -1822,7 +2062,7 @@ async fn main() -> Result<()> {
                 dashboard_api_token_file,
                 "dashboard API token",
             )?;
-            let fork_chain_client = match (
+            let legacy_fork_client = match (
                 explorer_fork_chain_rpc_addr,
                 explorer_fork_activation_manifest,
             ) {
@@ -1839,6 +2079,40 @@ async fn main() -> Result<()> {
                     "--explorer-fork-chain-rpc-addr and --explorer-fork-activation-manifest must be supplied together"
                 ),
             };
+            if legacy_fork_client.is_some() && explorer_pohw_core_manifest.is_some() {
+                bail!(
+                    "legacy fork RPC and the Experiment 1 Bitcoin Core explorer cannot be enabled together"
+                );
+            }
+            let fork_explorer_client = if let Some(manifest_path) = explorer_pohw_core_manifest {
+                if !bitcoin_rpc_configured {
+                    bail!(
+                        "--explorer-pohw-core-manifest requires --enable-bitcoin-rpc and RPC authentication"
+                    );
+                }
+                let rpc = BitcoinRpcClient::new_with_remote_policy(
+                    &bitcoin_rpc_url,
+                    bitcoin_rpc_auth.clone(),
+                    allow_remote_rpc,
+                )?;
+                Some(fork_explorer::ExplorerForkClient::PohwCore(Box::new(
+                    fork_explorer::PohwCoreExplorerClient::from_manifest(rpc, &manifest_path)?,
+                )))
+            } else {
+                legacy_fork_client.map(fork_explorer::ExplorerForkClient::Legacy)
+            };
+            if matches!(
+                fork_explorer_client.as_ref(),
+                Some(fork_explorer::ExplorerForkClient::PohwCore(_))
+            ) {
+                let client = fork_explorer_client
+                    .as_ref()
+                    .expect("matched Experiment 1 explorer client");
+                client
+                    .status()
+                    .await
+                    .context("fork explorer backend failed its startup binding check")?;
+            }
             let bitcoin_index_client = explorer_bitcoin_index_url
                 .as_deref()
                 .map(|url| {
@@ -1871,7 +2145,7 @@ async fn main() -> Result<()> {
                 idena_rpc_url: idena_api_key_file.as_ref().map(|_| idena_rpc_url),
                 idena_api_key_file,
                 public_explorer,
-                fork_chain_client,
+                fork_explorer_client,
                 bitcoin_index_client,
                 governance_state_file: governance_dashboard_state_file,
             })
@@ -1914,6 +2188,7 @@ async fn main() -> Result<()> {
             allow_unverified_merkle_root,
             allow_mutable_time,
             max_template_time_drift_seconds,
+            idena_anchor,
         } => {
             if expected_header_merkle_root_hex.is_some() && allow_unverified_merkle_root {
                 anyhow::bail!(
@@ -1932,6 +2207,7 @@ async fn main() -> Result<()> {
                 bail!("Bitcoin template-policy flags cannot be used with fork-chain admission");
             }
             let work_template_admission = if admit_peer_work_templates {
+                let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
                 let bitcoin_rpc_client = if fork_chain_client.is_none() {
                     Some(bitcoin_rpc_client(
                         rpc_url,
@@ -1943,6 +2219,11 @@ async fn main() -> Result<()> {
                 } else {
                     None
                 };
+                let allow_pohw_time_dependent_bits = detect_pohw_time_dependent_bits_admission(
+                    bitcoin_rpc_client.as_ref(),
+                    allow_mutable_time,
+                )
+                .await?;
                 Some(p2p_node::WorkTemplateAdmissionConfig {
                     bitcoin_rpc_client,
                     fork_chain_client,
@@ -1952,10 +2233,15 @@ async fn main() -> Result<()> {
                         expected_header_merkle_root_hex,
                         allow_unverified_merkle_root,
                     },
+                    allow_pohw_time_dependent_bits,
+                    idena_anchor_verifier,
                 })
             } else {
                 if fork_chain_client.is_some() {
                     bail!("fork-chain admission options require --admit-peer-work-templates");
+                }
+                if idena_anchor.idena_anchor_policy.is_some() {
+                    bail!("--idena-anchor-policy requires --admit-peer-work-templates");
                 }
                 None
             };
@@ -2046,9 +2332,114 @@ async fn main() -> Result<()> {
             let report = multinode_preflight(datadir, snapshot_dir, miner_id, peer_addrs).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::MiningSnapshotEvidence {
+            datadir,
+            snapshot_dir,
+            miner_id,
+            min_snapshot_voters,
+        } => {
+            let evidence = mining_snapshot_evidence(
+                &datadir,
+                &snapshot_dir,
+                miner_id.as_deref(),
+                min_snapshot_voters,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&evidence)?);
+        }
         Command::DeriveXonlyPubkey { secret_key_file } => {
             let keypair = read_keypair_from_file(&secret_key_file)?;
             println!("{}", keypair.x_only_public_key().0);
+        }
+        Command::InspectIdenaAnchorPolicy { policy_file } => {
+            let policy = idena_anchor_verifier::read_idena_anchor_policy(&policy_file)?;
+            let policy_commitment = policy.commitment_hash()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "policy": policy,
+                    "policy_commitment": policy_commitment,
+                }))?
+            );
+        }
+        Command::ReadMinerRegistryAnchor {
+            contract_address,
+            experiment_id,
+            idena_address,
+            miner_id,
+            registration_sequence,
+            idena_rpc_url,
+            idena_api_key_file,
+            allow_remote_idena_rpc,
+        } => {
+            let client =
+                idena_lite_indexer::rpc::IdenaRpcClient::from_api_key_file_with_remote_policy(
+                    idena_rpc_url,
+                    idena_api_key_file,
+                    allow_remote_idena_rpc,
+                )?;
+            let key = miner_registry_storage_key(&idena_address, registration_sequence)?;
+            let record = client
+                .contract_read_string(&contract_address, &key)
+                .await
+                .context("failed to read miner registration from local Idena contract state")?;
+            let (record_miner_id, anchor) = MinerRegistryAnchorV1::from_canonical_record_line(
+                contract_address,
+                experiment_id,
+                &record,
+            )?;
+            if anchor.registration_sequence != registration_sequence
+                || !record_miner_id.eq_ignore_ascii_case(&miner_id)
+            {
+                bail!("miner registry returned a different miner or registration sequence");
+            }
+            println!("{}", serde_json::to_string_pretty(&anchor)?);
+        }
+        Command::ReadSharechainCheckpoint {
+            contract_address,
+            experiment_id,
+            round,
+            idena_rpc_url,
+            idena_api_key_file,
+            allow_remote_idena_rpc,
+        } => {
+            if round == 0 {
+                bail!("checkpoint round must be nonzero");
+            }
+            let client =
+                idena_lite_indexer::rpc::IdenaRpcClient::from_api_key_file_with_remote_policy(
+                    idena_rpc_url,
+                    idena_api_key_file,
+                    allow_remote_idena_rpc,
+                )?;
+            let key = format!("checkpoint:final:{round}");
+            let record = client
+                .contract_read_string(&contract_address, &key)
+                .await
+                .context("failed to read finalized checkpoint from local Idena contract state")?;
+            let finalization_block = record
+                .split('|')
+                .nth(6)
+                .context("checkpoint contract record has no finalization block")?
+                .parse::<u64>()
+                .context("checkpoint finalization block is invalid")?;
+            let block = client
+                .block_at(finalization_block)
+                .await
+                .context("failed to read checkpoint finalization block")?
+                .context("checkpoint finalization block is unavailable")?;
+            let checkpoint = SharechainCheckpointAnchorV1::from_canonical_record_line(
+                contract_address,
+                experiment_id,
+                block.hash,
+                &record,
+            )?;
+            if checkpoint.round != round || checkpoint.finalization_block != finalization_block {
+                bail!("checkpoint contract returned a different round or finalization block");
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&SharechainMessage::SharechainCheckpoint(checkpoint))?
+            );
         }
         Command::CreateMinerRegistration {
             miner_id,
@@ -2057,16 +2448,23 @@ async fn main() -> Result<()> {
             claim_owner_pubkey_hex,
             mining_secret_key_file,
             idena_signature_hex,
+            registry_anchor_file,
         } => {
             let mining_keypair = read_keypair_from_file(&mining_secret_key_file)?;
-            let mut registration = MinerRegistration {
+            let registration = MinerRegistration {
+                version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
                 miner_id,
                 idena_address,
                 btc_payout_script_hex,
                 claim_owner_pubkey_hex,
                 mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+                registry_anchor: None,
                 idena_signature_hex,
                 mining_signature_hex: String::new(),
+            };
+            let mut registration = match registry_anchor_file {
+                Some(path) => registration.attach_registry_anchor(read_json_file(&path)?)?,
+                None => registration,
             };
             registration.mining_signature_hex =
                 sign_hash_hex(registration.signing_hash(), &mining_keypair);
@@ -2087,11 +2485,21 @@ async fn main() -> Result<()> {
             node_secret_key_file,
             btc_payout_script_hex,
             idena_signature_hex,
+            idena_signature_file,
+            idena_signature_stdin,
+            registry_experiment_id,
+            registry_anchor_file,
             message_out,
             envelope_out,
             append,
             peer_addrs,
         } => {
+            let idena_signature_hex = read_optional_secret_with_stdin(
+                idena_signature_hex,
+                idena_signature_file,
+                idena_signature_stdin,
+                "Idena signature",
+            )?;
             let result = prepare_miner_registration(PrepareMinerRegistrationInput {
                 datadir,
                 miner_id,
@@ -2102,6 +2510,8 @@ async fn main() -> Result<()> {
                 node_secret_key_file,
                 btc_payout_script_hex,
                 idena_signature_hex,
+                registry_experiment_id,
+                registry_anchor_file,
                 message_out,
                 envelope_out,
                 append,
@@ -2118,11 +2528,13 @@ async fn main() -> Result<()> {
             mining_pubkey_hex,
         } => {
             let registration = MinerRegistration {
+                version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
                 miner_id,
                 idena_address,
                 btc_payout_script_hex,
                 claim_owner_pubkey_hex,
                 mining_pubkey_hex,
+                registry_anchor: None,
                 idena_signature_hex: String::new(),
                 mining_signature_hex: String::new(),
             };
@@ -2183,14 +2595,24 @@ async fn main() -> Result<()> {
             miner_id,
             bitcoin_header_hex,
             mining_secret_key_file,
+            share_target,
             created_at_unix,
         } => {
             let mining_keypair = read_keypair_from_file(&mining_secret_key_file)?;
-            let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex(
-                miner_id,
-                bitcoin_header_hex,
-                created_at_unix.unwrap_or(current_unix_timestamp()?),
-            )?;
+            let created_at_unix = created_at_unix.unwrap_or(current_unix_timestamp()?);
+            let mut template = match share_target {
+                Some(target) => BitcoinWorkTemplate::from_bitcoin_header_hex_with_share_target(
+                    miner_id,
+                    bitcoin_header_hex,
+                    target,
+                    created_at_unix,
+                )?,
+                None => BitcoinWorkTemplate::from_bitcoin_header_hex(
+                    miner_id,
+                    bitcoin_header_hex,
+                    created_at_unix,
+                )?,
+            };
             template.mining_signature_hex = sign_hash_hex(template.signing_hash(), &mining_keypair);
             let mining_pubkey = mining_keypair.x_only_public_key().0.to_string();
             template.verify_mining_signature(&mining_pubkey)?;
@@ -2240,6 +2662,7 @@ async fn main() -> Result<()> {
             bitcoin_header_hex,
             mining_secret_key_file,
             node_secret_key_file,
+            share_target,
             created_at_unix,
             message_out,
             envelope_out,
@@ -2268,9 +2691,10 @@ async fn main() -> Result<()> {
                 allow_mutable_time,
             })?;
             let mining_keypair = read_keypair_from_file(&mining_secret_key_file)?;
-            let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex(
+            let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex_with_share_target(
                 miner_id,
                 bitcoin_header_hex,
+                share_target,
                 created_at_unix.unwrap_or(current_unix_timestamp()?),
             )?;
             template.mining_signature_hex = sign_hash_hex(template.signing_hash(), &mining_keypair);
@@ -2372,7 +2796,12 @@ async fn main() -> Result<()> {
                 mining_signature_hex: String::new(),
             };
             if share.bitcoin_template_hash.is_empty() {
-                share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash()?;
+                share.bitcoin_template_hash = if local_node::gossip_network_id(&datadir)?.is_some()
+                {
+                    share.recomputed_target_bound_bitcoin_template_hash()?
+                } else {
+                    share.recomputed_bitcoin_template_hash()?
+                };
             }
             if share.nonce_hex.is_empty() {
                 share.nonce_hex = share.recomputed_nonce_hex()?;
@@ -2425,6 +2854,7 @@ async fn main() -> Result<()> {
             job_refresh_interval_seconds,
             auto_submit_blocks,
             allow_mainnet_submit,
+            expected_rpc_chain,
             payout_schedule_file,
             pohw_commitment_file,
             derive_pohw_payouts_from_state,
@@ -2436,7 +2866,9 @@ async fn main() -> Result<()> {
             rpc_password,
             rpc_cookie_file,
             append,
+            idena_anchor,
         } => {
+            let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
             let fork_chain_client = match (
                 fork_chain_rpc_addr,
                 fork_chain_activation_manifest,
@@ -2470,15 +2902,21 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            if auto_submit_blocks {
+            let (enforce_mainnet_snapshot_quorum, derive_share_target_from_block) =
                 if let Some(client) = bitcoin_rpc_client.as_ref() {
                     let chain_info = client.get_blockchain_info().await?;
-                    ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
-                    if chain_info.chain.eq_ignore_ascii_case("main") {
-                        ensure_bitcoin_mining_ready(&chain_info)?;
+                    ensure_expected_rpc_chain(&chain_info, expected_rpc_chain.as_deref())?;
+                    ensure_bitcoin_mining_ready(&chain_info)?;
+                    if auto_submit_blocks {
+                        ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
                     }
-                }
-            }
+                    (
+                        chain_info.chain.eq_ignore_ascii_case("main"),
+                        chain_info.chain.eq_ignore_ascii_case("pohw"),
+                    )
+                } else {
+                    (false, false)
+                };
             let (payout_schedule, pohw_commitment, dynamic_pohw_payout) =
                 if derive_pohw_payouts_from_state {
                     if payout_schedule_file.is_some() {
@@ -2486,14 +2924,6 @@ async fn main() -> Result<()> {
                     }
                     if !refresh_job_from_rpc && fork_chain_client.is_none() {
                         bail!("--derive-pohw-payouts-from-state requires --refresh-job-from-rpc or --fork-chain-rpc-addr");
-                    }
-                    if fork_chain_client.is_none()
-                        && derive_pohw_min_snapshot_voters < MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
-                    {
-                        bail!(
-                            "Bitcoin RPC dynamic payouts require at least {} snapshot voters",
-                            MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS
-                        );
                     }
                     let commitment_path = pohw_commitment_file.context(
                         "--derive-pohw-payouts-from-state requires --pohw-commitment-file",
@@ -2555,6 +2985,9 @@ async fn main() -> Result<()> {
                 payout_schedule,
                 pohw_commitment,
                 dynamic_pohw_payout,
+                enforce_mainnet_snapshot_quorum,
+                derive_share_target_from_block,
+                idena_anchor_verifier,
             })
             .await?;
         }
@@ -2842,6 +3275,24 @@ async fn main() -> Result<()> {
                 }))?
             );
         }
+        Command::SubmitForkTransaction {
+            transaction_hex,
+            transaction_file,
+            activation_manifest,
+            rpc_addr,
+        } => {
+            let transaction_hex = match (transaction_hex, transaction_file.as_deref()) {
+                (Some(transaction_hex), None) => transaction_hex,
+                (None, Some(path)) => read_signed_transaction_hex(path)?,
+                _ => {
+                    bail!("provide exactly one of --transaction-hex or --transaction-file")
+                }
+            };
+            let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let client = fork_chain::ForkChainClient::new(rpc_addr, manifest.activation_id, false)?;
+            let outcome = client.submit_transaction(&transaction_hex).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
         Command::CreateWithdrawalRequest {
             datadir,
             request_id,
@@ -2958,6 +3409,7 @@ async fn main() -> Result<()> {
             max_template_time_drift_seconds,
             max_future_skew_seconds,
             max_age_seconds,
+            idena_anchor,
         } => {
             if expected_header_merkle_root_hex.is_some() && allow_unverified_merkle_root {
                 anyhow::bail!(
@@ -2986,6 +3438,12 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            let allow_pohw_time_dependent_bits = detect_pohw_time_dependent_bits_admission(
+                bitcoin_rpc_client.as_ref(),
+                allow_mutable_time,
+            )
+            .await?;
+            let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
             let admission = p2p_node::WorkTemplateAdmissionConfig {
                 bitcoin_rpc_client,
                 fork_chain_client,
@@ -2995,6 +3453,8 @@ async fn main() -> Result<()> {
                     expected_header_merkle_root_hex,
                     allow_unverified_merkle_root,
                 },
+                allow_pohw_time_dependent_bits,
+                idena_anchor_verifier,
             };
             let report = p2p_node::sync_gossip_from_peer_with_work_template_admission(
                 &datadir,
@@ -4457,6 +4917,147 @@ fn demo_vault_input(input_sats: u64, frost_group_key_xonly: &str) -> Result<Vaul
     })
 }
 
+#[derive(Debug, Serialize)]
+struct GossipSeedMigrationSummary {
+    migrated: bool,
+    registered_miner_count: usize,
+    snapshot_vote_root_count: usize,
+    stored_share_count: usize,
+}
+
+fn migrate_gossip_seed(
+    source_datadir: &Path,
+    target_datadir: &Path,
+    network_id: &str,
+    miner_id: &str,
+    node_secret_key_file: &Path,
+) -> Result<GossipSeedMigrationSummary> {
+    if source_datadir == target_datadir {
+        bail!("source and target gossip datadirs must differ");
+    }
+    let source_metadata = std::fs::symlink_metadata(source_datadir)
+        .context("failed to inspect source gossip datadir")?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        bail!("source gossip datadir must be an existing non-symlink directory");
+    }
+    if source_datadir.exists() && target_datadir.exists() {
+        let source = std::fs::canonicalize(source_datadir)
+            .context("failed to resolve source gossip datadir")?;
+        let target = std::fs::canonicalize(target_datadir)
+            .context("failed to resolve target gossip datadir")?;
+        if source == target {
+            bail!("source and target gossip datadirs resolve to the same directory");
+        }
+    }
+
+    let source_messages = local_node::recent_gossip_envelopes(source_datadir, usize::MAX)?
+        .into_iter()
+        .map(|stored| stored.envelope.message)
+        .collect::<Vec<_>>();
+    let (registration, snapshot_vote) = select_gossip_seed(&source_messages, miner_id)?;
+    let network_id = local_node::initialize_gossip_network(target_datadir, network_id)?;
+    let before = local_node::replay_state(target_datadir)?;
+    let before_summary = before.summary();
+    if before_summary.applied_message_count != before_summary.registered_miner_count
+        || before_summary.registered_miner_count > 1
+        || before_summary.accepted_bitcoin_work_template_count != 0
+        || before_summary.bitcoin_work_template_count != 0
+        || before_summary.stored_share_count != 0
+        || before_summary.snapshot_vote_root_count != 0
+        || before_summary.proposed_payout_schedule_count != 0
+        || before_summary.withdrawal_request_count != 0
+        || before_summary.withdrawal_batch_count != 0
+    {
+        bail!("target gossip datadir is not empty or a recoverable registration-only seed");
+    }
+    if let Some(existing) = before
+        .registrations()
+        .get(&registration.miner_id.to_ascii_lowercase())
+    {
+        if existing != &registration {
+            bail!("target gossip datadir contains a conflicting miner registration");
+        }
+    } else if before_summary.registered_miner_count != 0 {
+        bail!("target gossip datadir contains a different miner registration");
+    }
+
+    let node_keypair = read_keypair_from_file(node_secret_key_file)?;
+    for message in [
+        SharechainMessage::MinerRegistration(registration),
+        SharechainMessage::SnapshotVote(snapshot_vote),
+    ] {
+        let mut envelope = GossipEnvelope::unsigned_for_network(
+            &network_id,
+            node_keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp()?,
+            random_nonce_hex(),
+            message,
+        )?;
+        envelope.sign(&node_keypair)?;
+        local_node::append_gossip_envelope(target_datadir, envelope, 300, 86_400)?;
+    }
+
+    let after = local_node::replay_state(target_datadir)?.summary();
+    if after.applied_message_count != 2
+        || after.registered_miner_count != 1
+        || after.snapshot_vote_root_count != 1
+        || after.stored_share_count != 0
+        || after.accepted_bitcoin_work_template_count != 0
+    {
+        bail!("migrated gossip seed did not produce the required registration-only state");
+    }
+    Ok(GossipSeedMigrationSummary {
+        migrated: true,
+        registered_miner_count: after.registered_miner_count,
+        snapshot_vote_root_count: after.snapshot_vote_root_count,
+        stored_share_count: after.stored_share_count,
+    })
+}
+
+fn select_gossip_seed(
+    messages: &[SharechainMessage],
+    miner_id: &str,
+) -> Result<(MinerRegistration, SnapshotVote)> {
+    let miner_id = miner_id.to_ascii_lowercase();
+    let mut registrations = BTreeMap::new();
+    let mut snapshot_votes = Vec::new();
+    for message in messages {
+        match message {
+            SharechainMessage::MinerRegistration(registration)
+                if registration.miner_id.to_ascii_lowercase() == miner_id =>
+            {
+                registrations.insert(serde_json::to_vec(registration)?, registration.clone());
+            }
+            SharechainMessage::SnapshotVote(vote)
+                if vote.voter_miner_id.to_ascii_lowercase() == miner_id =>
+            {
+                snapshot_votes.push(vote.clone());
+            }
+            _ => {}
+        }
+    }
+    if registrations.len() != 1 {
+        bail!(
+            "source gossip history must contain exactly one distinct registration for the selected miner"
+        );
+    }
+    let registration = registrations
+        .into_values()
+        .next()
+        .expect("registration count checked");
+    snapshot_votes.sort_by(|left, right| {
+        left.idena_height
+            .cmp(&right.idena_height)
+            .then_with(|| left.snapshot_day.cmp(&right.snapshot_day))
+            .then_with(|| left.score_root.cmp(&right.score_root))
+            .then_with(|| left.signature_hex.cmp(&right.signature_hex))
+    });
+    let snapshot_vote = snapshot_votes
+        .pop()
+        .context("source gossip history has no snapshot vote for the selected miner")?;
+    Ok((registration, snapshot_vote))
+}
+
 #[derive(Debug)]
 pub(crate) struct PublishSharechainMessageInput {
     pub(crate) datadir: PathBuf,
@@ -4478,12 +5079,22 @@ pub(crate) async fn publish_sharechain_message(
         write_json_file(path, &input.message)?;
     }
 
-    let mut envelope = GossipEnvelope::unsigned(
-        node_keypair.x_only_public_key().0.to_string(),
-        current_unix_timestamp()?,
-        random_nonce_hex(),
-        input.message,
-    )?;
+    let network_id = local_node::gossip_network_id(&input.datadir)?;
+    let mut envelope = match network_id {
+        Some(network_id) => GossipEnvelope::unsigned_for_network(
+            network_id,
+            node_keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp()?,
+            random_nonce_hex(),
+            input.message,
+        )?,
+        None => GossipEnvelope::unsigned(
+            node_keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp()?,
+            random_nonce_hex(),
+            input.message,
+        )?,
+    };
     envelope.sign(&node_keypair)?;
     let envelope_hash = envelope.envelope_hash();
     if let Some(path) = input.envelope_out.as_ref() {
@@ -4681,6 +5292,94 @@ async fn multinode_preflight(
     }))
 }
 
+fn mining_snapshot_evidence(
+    datadir: &Path,
+    snapshot_dir: &Path,
+    miner_id: Option<&str>,
+    min_snapshot_voters: usize,
+) -> Result<serde_json::Value> {
+    if min_snapshot_voters == 0 {
+        bail!("--min-snapshot-voters must be greater than zero");
+    }
+    let snapshot_status = local_node::latest_verified_snapshot(snapshot_dir)?;
+    if snapshot_status.invalid_file_count != 0 || snapshot_status.skipped_file_count != 0 {
+        bail!(
+            "snapshot directory is ambiguous: {} invalid and {} unscanned JSON files",
+            snapshot_status.invalid_file_count,
+            snapshot_status.skipped_file_count
+        );
+    }
+    let verified = snapshot_status
+        .latest
+        .context("no verified Idena snapshot is available for mining")?;
+    let snapshot = verified.snapshot;
+    let age_days = (Utc::now().date_naive() - snapshot.snapshot_day).num_days();
+    if age_days < 0 {
+        bail!("latest verified Idena snapshot is dated in the future");
+    }
+    if u64::try_from(age_days).unwrap_or(u64::MAX) > MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS {
+        bail!("latest verified Idena snapshot is too old for mining");
+    }
+
+    let state = local_node::replay_state(datadir)?;
+    let snapshot_id = snapshot.snapshot_day.to_string();
+    let voter_count = state.unique_snapshot_voter_idena_count(
+        &snapshot_id,
+        snapshot.idena_height,
+        &snapshot.score_root,
+    );
+    if voter_count < min_snapshot_voters {
+        bail!(
+            "verified Idena snapshot has {voter_count} distinct identity voters; {min_snapshot_voters} required"
+        );
+    }
+    let voter_count = u32::try_from(voter_count).context("snapshot voter count exceeds u32")?;
+
+    let (normalized_miner_id, miner_eligible, identity_status) = match miner_id {
+        Some(miner_id) => {
+            let normalized = miner_id.to_ascii_lowercase();
+            let registration = state
+                .registrations()
+                .get(&normalized)
+                .with_context(|| format!("miner {normalized} is not registered"))?;
+            registration
+                .verify_mining_signature()
+                .context("mining snapshot registration has an invalid mining signature")?;
+            registration
+                .verify_idena_ownership_signature()
+                .context("mining snapshot registration has an invalid Idena ownership proof")?;
+            let leaf = snapshot
+                .leaves
+                .iter()
+                .find(|leaf| {
+                    leaf.idena_address
+                        .eq_ignore_ascii_case(&registration.idena_address)
+                })
+                .context("registered miner identity is absent from the verified snapshot")?;
+            if !leaf.is_block_eligible() {
+                bail!("registered miner identity is not eligible in the verified snapshot");
+            }
+            (
+                Some(normalized),
+                Some(true),
+                Some(format!("{:?}", leaf.status)),
+            )
+        }
+        None => (None, None, None),
+    };
+
+    Ok(serde_json::json!({
+        "schema_version": "pohw-mining-snapshot-evidence/v1",
+        "snapshot_id": snapshot_id,
+        "proof_root": snapshot.score_root,
+        "source_height": snapshot.idena_height,
+        "distinct_voter_count": voter_count,
+        "miner_id": normalized_miner_id,
+        "miner_eligible": miner_eligible,
+        "identity_status": identity_status,
+    }))
+}
+
 #[derive(Debug)]
 struct PrepareMinerRegistrationInput {
     datadir: PathBuf,
@@ -4692,6 +5391,8 @@ struct PrepareMinerRegistrationInput {
     node_secret_key_file: Option<PathBuf>,
     btc_payout_script_hex: Option<String>,
     idena_signature_hex: Option<String>,
+    registry_experiment_id: Option<String>,
+    registry_anchor_file: Option<PathBuf>,
     message_out: Option<PathBuf>,
     envelope_out: Option<PathBuf>,
     append: bool,
@@ -4715,6 +5416,14 @@ struct LocalSecretKeyMaterial {
 async fn prepare_miner_registration(
     input: PrepareMinerRegistrationInput,
 ) -> Result<serde_json::Value> {
+    if input.registry_experiment_id.is_some()
+        && input.registry_anchor_file.is_none()
+        && (input.append || input.message_out.is_some() || input.envelope_out.is_some())
+    {
+        bail!(
+            "registry commitment preparation cannot append or write a registration before --registry-anchor-file is available"
+        );
+    }
     let key_paths = registration_key_paths(
         &input.datadir,
         input.key_dir,
@@ -4734,15 +5443,46 @@ async fn prepare_miner_registration(
         None => p2tr_script_pubkey_hex_from_xonly(&claim_owner_pubkey_hex)?,
     };
 
-    let mut registration = MinerRegistration {
+    let registration = MinerRegistration {
+        version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
         miner_id: input.miner_id,
         idena_address: input.idena_address,
         btc_payout_script_hex,
         claim_owner_pubkey_hex,
         mining_pubkey_hex: mining_key.keypair.x_only_public_key().0.to_string(),
+        registry_anchor: None,
         idena_signature_hex: input.idena_signature_hex.unwrap_or_default(),
         mining_signature_hex: String::new(),
     };
+    let mut registration = match input.registry_anchor_file.as_deref() {
+        Some(path) => {
+            let anchor: MinerRegistryAnchorV1 = read_json_file(path)?;
+            if let Some(experiment_id) = input.registry_experiment_id.as_deref() {
+                if !anchor.experiment_id.eq_ignore_ascii_case(experiment_id) {
+                    bail!("registry anchor experiment does not match --registry-experiment-id");
+                }
+            }
+            registration.attach_registry_anchor(anchor)?
+        }
+        None => registration,
+    };
+    if registration.registry_anchor.is_none() {
+        if let Some(experiment_id) = input.registry_experiment_id.as_deref() {
+            return Ok(serde_json::json!({
+                "status": "needs_registry_transaction",
+                "schema_version": "pohw-miner-registry-commitment/v1",
+                "miner_id": registration.miner_id,
+                "idena_address": registration.idena_address,
+                "experiment_id": experiment_id.to_ascii_lowercase(),
+                "registration_commitment": registration.registry_commitment_hash(experiment_id)?,
+                "mining_pubkey_hex": registration.mining_pubkey_hex,
+                "claim_owner_pubkey_hex": registration.claim_owner_pubkey_hex,
+                "btc_payout_script_hex": registration.btc_payout_script_hex,
+                "key_files": key_material_summary(&mining_key, &claim_owner_key, &node_key),
+                "next_step": "Call registerMiner(miner_id, registration_commitment) on the deployed Idena registry, wait for finality, save the public receipt as MinerRegistryAnchorV1 JSON, then rerun with --registry-anchor-file and sign the new ownership challenge."
+            }));
+        }
+    }
     let idena_ownership_challenge = registration.idena_ownership_challenge();
     let registration_binding_hash = hex::encode(registration.signing_hash());
 
@@ -4759,6 +5499,8 @@ async fn prepare_miner_registration(
             "idena_ownership_challenge": idena_ownership_challenge,
             "registration_binding_hash": registration_binding_hash,
             "signature_field": "idena_signature_hex",
+            "registration_version": registration.version,
+            "registry_anchor": registration.registry_anchor,
             "mining_pubkey_hex": registration.mining_pubkey_hex,
             "claim_owner_pubkey_hex": registration.claim_owner_pubkey_hex,
             "btc_payout_script_hex": registration.btc_payout_script_hex,
@@ -4777,12 +5519,22 @@ async fn prepare_miner_registration(
         write_json_file(path, &message)?;
     }
 
-    let mut envelope = GossipEnvelope::unsigned(
-        node_key.keypair.x_only_public_key().0.to_string(),
-        current_unix_timestamp()?,
-        random_nonce_hex(),
-        message,
-    )?;
+    let network_id = local_node::gossip_network_id(&input.datadir)?;
+    let mut envelope = match network_id {
+        Some(network_id) => GossipEnvelope::unsigned_for_network(
+            network_id,
+            node_key.keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp()?,
+            random_nonce_hex(),
+            message,
+        )?,
+        None => GossipEnvelope::unsigned(
+            node_key.keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp()?,
+            random_nonce_hex(),
+            message,
+        )?,
+    };
     envelope.sign(&node_key.keypair)?;
     let envelope_hash = envelope.envelope_hash();
     if let Some(path) = input.envelope_out.as_ref() {
@@ -4819,6 +5571,8 @@ async fn prepare_miner_registration(
         "envelope_hash": envelope_hash,
         "idena_ownership_challenge": idena_ownership_challenge,
         "registration_binding_hash": registration_binding_hash,
+        "registration_version": registration.version,
+        "registry_anchor": registration.registry_anchor,
         "mining_pubkey_hex": registration.mining_pubkey_hex,
         "claim_owner_pubkey_hex": registration.claim_owner_pubkey_hex,
         "btc_payout_script_hex": registration.btc_payout_script_hex,
@@ -5421,6 +6175,27 @@ fn bitcoin_rpc_client(
     }
 }
 
+fn idena_anchor_verifier_from_options(
+    options: &IdenaAnchorCliArgs,
+) -> Result<Option<idena_anchor_verifier::IdenaAnchorVerifier>> {
+    let Some(policy_path) = options.idena_anchor_policy.as_deref() else {
+        return Ok(None);
+    };
+    let api_key_file = options
+        .idena_api_key_file
+        .as_deref()
+        .context("--idena-anchor-policy requires --idena-api-key-file")?;
+    let policy = idena_anchor_verifier::read_idena_anchor_policy(policy_path)?;
+    let client = idena_lite_indexer::rpc::IdenaRpcClient::from_api_key_file_with_remote_policy(
+        &options.idena_rpc_url,
+        api_key_file,
+        options.allow_remote_idena_rpc,
+    )?;
+    Ok(Some(idena_anchor_verifier::IdenaAnchorVerifier::new(
+        client, policy,
+    )?))
+}
+
 fn fork_chain_client_from_options(
     rpc_addr: Option<SocketAddr>,
     activation_manifest: Option<PathBuf>,
@@ -5463,28 +6238,101 @@ fn ensure_candidate_submit_chain_allowed(
     Ok(())
 }
 
-fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
-    if !chain_info.chain.eq_ignore_ascii_case("main") {
+fn ensure_expected_rpc_chain(
+    chain_info: &BlockchainInfoResponse,
+    expected_rpc_chain: Option<&str>,
+) -> Result<()> {
+    let expected = expected_rpc_chain.context(
+        "Bitcoin RPC mining requires --expected-rpc-chain (use 'pohw' for Experiment 1 or 'main' only for an explicitly armed mainnet handoff)",
+    )?;
+    if expected != "pohw" && expected != "main" {
+        bail!("--expected-rpc-chain must be 'pohw' or 'main'");
+    }
+    if !chain_info.chain.eq_ignore_ascii_case(expected) {
         bail!(
-            "Bitcoin mining handoff requires mainnet RPC; got chain '{}'",
+            "Bitcoin RPC chain mismatch: expected '{}', got '{}'",
+            expected,
+            chain_info.chain
+        );
+    }
+    Ok(())
+}
+
+async fn detect_pohw_time_dependent_bits_admission(
+    client: Option<&BitcoinRpcClient>,
+    allow_mutable_time: bool,
+) -> Result<bool> {
+    if !allow_mutable_time {
+        return Ok(false);
+    }
+    let Some(client) = client else {
+        return Ok(false);
+    };
+    let chain_info = client.get_blockchain_info().await?;
+    if !chain_info.chain.eq_ignore_ascii_case("pohw") {
+        return Ok(false);
+    }
+    ensure_bitcoin_mining_ready(&chain_info)?;
+    Ok(true)
+}
+
+fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
+    if !chain_info.chain.eq_ignore_ascii_case("main")
+        && !chain_info.chain.eq_ignore_ascii_case("pohw")
+    {
+        bail!(
+            "Bitcoin mining requires the explicit main or pohw RPC chain; got '{}'",
             chain_info.chain
         );
     }
     if chain_info.initial_block_download {
-        bail!("Bitcoin mainnet RPC is still in initial block download");
+        bail!("Bitcoin RPC is still in initial block download");
     }
     if chain_info.headers != chain_info.blocks {
         bail!(
-            "Bitcoin mainnet RPC is not at its reported header tip: blocks={} headers={}",
+            "Bitcoin RPC is not at its reported header tip: blocks={} headers={}",
             chain_info.blocks,
             chain_info.headers
         );
     }
-    if !chain_info.verificationprogress.is_finite() || chain_info.verificationprogress < 0.999_999 {
+    if !chain_info.verificationprogress.is_finite()
+        || !(0.0..=1.0).contains(&chain_info.verificationprogress)
+    {
+        bail!("Bitcoin RPC returned invalid verification progress");
+    }
+    if chain_info.chain.eq_ignore_ascii_case("main") && chain_info.verificationprogress < 0.999_999
+    {
         bail!(
-            "Bitcoin mainnet verification progress is not ready: {:.8}",
+            "Bitcoin RPC verification progress is not ready: {:.8}",
             chain_info.verificationprogress
         );
+    }
+    if chain_info.chain.eq_ignore_ascii_case("pohw") {
+        let profile = chain_info
+            .pohw_experiment
+            .as_ref()
+            .context("pohw RPC is missing Experiment 1 consensus metadata")?;
+        if chain_info.blocks < profile.fork_height {
+            bail!("pohw RPC has not reached its inherited fork point");
+        }
+        if profile.replay_marker_activation_height != profile.fork_height.saturating_add(2)
+            || !profile.inherited_utxo_spending
+            || profile.replay_protection != "inherited-input-requires-fork-only-marker-v2"
+            || profile.bootstrap_handoff_hashrate_hps == 0
+        {
+            bail!("pohw RPC consensus metadata does not match the required mining profile");
+        }
+        for (label, value) in [
+            ("fork hash", profile.fork_hash.as_str()),
+            ("first fork hash", profile.first_fork_hash.as_str()),
+        ] {
+            if value.len() != 64
+                || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+                || value != value.to_ascii_lowercase()
+            {
+                bail!("pohw RPC {label} is not canonical");
+            }
+        }
     }
     Ok(())
 }
@@ -5687,6 +6535,34 @@ fn read_optional_secret(
         }
         (None, None) => Ok(None),
     }
+}
+
+fn read_optional_secret_with_stdin(
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+    secret_stdin: bool,
+    label: &str,
+) -> Result<Option<String>> {
+    if !secret_stdin {
+        return read_optional_secret(secret, secret_file, label);
+    }
+    if secret.is_some() || secret_file.is_some() {
+        bail!("{label}, {label} file, and stdin cannot be supplied together");
+    }
+    read_secret_from_reader(std::io::stdin(), label).map(Some)
+}
+
+fn read_secret_from_reader(reader: impl Read, label: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_OPTIONAL_SECRET_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label} from stdin"))?;
+    if bytes.len() as u64 > MAX_OPTIONAL_SECRET_FILE_BYTES {
+        bail!("{label} from stdin exceeds the safety limit");
+    }
+    let secret = String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))?;
+    validate_secret(secret, label)
 }
 
 fn validate_secret(secret: String, label: &str) -> Result<String> {
@@ -6140,6 +7016,26 @@ fn read_spend_plan_file(path: &Path) -> Result<VaultSpendPlan> {
         .with_context(|| format!("failed to parse plan field from {}", path.display()))
 }
 
+fn read_signed_transaction_hex(path: &Path) -> Result<String> {
+    let raw =
+        read_bounded_regular_text_file(path, "signed fork transaction", MAX_JSON_INPUT_FILE_BYTES)?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(trimmed).with_context(|| {
+            format!("failed to parse signed transaction file {}", path.display())
+        })?;
+        return value
+            .get("signed_tx_hex")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("signed transaction JSON must contain signed_tx_hex"));
+    }
+    if trimmed.is_empty() {
+        bail!("signed transaction file is empty");
+    }
+    Ok(trimmed.to_string())
+}
+
 struct RealFrostSigningPolicyContext<'a> {
     bitcoin_client: &'a BitcoinRpcClient,
     min_confirmations: u32,
@@ -6301,6 +7197,7 @@ fn sharechain_message_type(message: &SharechainMessage) -> &'static str {
         SharechainMessage::MinerRegistration(_) => "MinerRegistration",
         SharechainMessage::BitcoinWorkTemplate(_) => "BitcoinWorkTemplate",
         SharechainMessage::Share(_) => "Share",
+        SharechainMessage::SharechainCheckpoint(_) => "SharechainCheckpoint",
         SharechainMessage::SnapshotVote(_) => "SnapshotVote",
         SharechainMessage::PayoutSchedule(_) => "PayoutSchedule",
         SharechainMessage::WithdrawalRequest(_) => "WithdrawalRequest",
@@ -6320,12 +7217,14 @@ fn verified_miner_registration_from_envelope(
     envelope: &GossipEnvelope,
     max_future_skew_seconds: i64,
     max_age_seconds: i64,
+    durable: bool,
 ) -> Result<&MinerRegistration> {
-    envelope.verify_at(
-        current_unix_timestamp()?,
-        max_future_skew_seconds,
-        max_age_seconds,
-    )?;
+    let now = current_unix_timestamp()?;
+    if durable {
+        envelope.verify_durable_at(now, max_future_skew_seconds)?;
+    } else {
+        envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    }
     match &envelope.message {
         SharechainMessage::MinerRegistration(registration) => {
             registration.verify_mining_signature()?;
@@ -6464,12 +7363,154 @@ mod tests {
     fn test_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("{label}-{}", random_nonce_hex()));
         std::fs::create_dir_all(&path).expect("create test dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("secure test dir");
+        }
         path
+    }
+
+    #[tokio::test]
+    async fn registry_commitment_preparation_is_two_phase_and_side_effect_limited() {
+        let base = test_dir("pohw-registry-commitment");
+        let datadir = base.join("state");
+        let key_dir = base.join("keys");
+        let result = prepare_miner_registration(PrepareMinerRegistrationInput {
+            datadir: datadir.clone(),
+            miner_id: "Miner-1".to_string(),
+            idena_address: format!("0x{}", "11".repeat(20)),
+            key_dir: Some(key_dir.clone()),
+            mining_secret_key_file: None,
+            claim_owner_secret_key_file: None,
+            node_secret_key_file: None,
+            btc_payout_script_hex: None,
+            idena_signature_hex: None,
+            registry_experiment_id: Some("p2poolbtc-experiment-1".to_string()),
+            registry_anchor_file: None,
+            message_out: None,
+            envelope_out: None,
+            append: false,
+            peer_addrs: Vec::new(),
+        })
+        .await
+        .expect("prepare registry commitment");
+
+        assert_eq!(result["status"], "needs_registry_transaction");
+        assert_eq!(result["miner_id"], "Miner-1");
+        assert_eq!(result["experiment_id"], "p2poolbtc-experiment-1");
+        assert_eq!(
+            result["registration_commitment"]
+                .as_str()
+                .expect("commitment")
+                .len(),
+            64
+        );
+        assert!(key_dir.is_dir());
+        assert!(
+            !datadir.exists(),
+            "commitment preparation must not publish state"
+        );
+
+        let rejected_base = test_dir("pohw-registry-premature-publish");
+        let rejected_keys = rejected_base.join("keys");
+        let err = prepare_miner_registration(PrepareMinerRegistrationInput {
+            datadir: rejected_base.join("state"),
+            miner_id: "miner-2".to_string(),
+            idena_address: format!("0x{}", "22".repeat(20)),
+            key_dir: Some(rejected_keys.clone()),
+            mining_secret_key_file: None,
+            claim_owner_secret_key_file: None,
+            node_secret_key_file: None,
+            btc_payout_script_hex: None,
+            idena_signature_hex: None,
+            registry_experiment_id: Some("p2poolbtc-experiment-1".to_string()),
+            registry_anchor_file: None,
+            message_out: None,
+            envelope_out: None,
+            append: true,
+            peer_addrs: Vec::new(),
+        })
+        .await
+        .expect_err("publishing before contract receipt must fail");
+        assert!(err.to_string().contains("before --registry-anchor-file"));
+        assert!(
+            !rejected_keys.exists(),
+            "invalid publish request must not create key material"
+        );
+
+        std::fs::remove_dir_all(base).expect("cleanup commitment test");
+        std::fs::remove_dir_all(rejected_base).expect("cleanup rejected test");
+    }
+
+    #[test]
+    fn gossip_seed_selection_is_deterministic_and_rejects_conflicts() {
+        let registration = MinerRegistration {
+            version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
+            miner_id: "Miner-A".to_string(),
+            idena_address: "0x1111111111111111111111111111111111111111".to_string(),
+            btc_payout_script_hex: "00141111111111111111111111111111111111111111".to_string(),
+            claim_owner_pubkey_hex: "22".repeat(32),
+            mining_pubkey_hex: "33".repeat(32),
+            registry_anchor: None,
+            idena_signature_hex: "44".repeat(65),
+            mining_signature_hex: "55".repeat(64),
+        };
+        let older = SnapshotVote {
+            voter_miner_id: "miner-a".to_string(),
+            snapshot_day: "2026-07-01".to_string(),
+            idena_height: 10,
+            score_root: "66".repeat(32),
+            signature_hex: "77".repeat(64),
+        };
+        let newer = SnapshotVote {
+            snapshot_day: "2026-07-02".to_string(),
+            idena_height: 11,
+            score_root: "88".repeat(32),
+            signature_hex: "99".repeat(64),
+            ..older.clone()
+        };
+        let messages = vec![
+            SharechainMessage::SnapshotVote(newer.clone()),
+            SharechainMessage::MinerRegistration(registration.clone()),
+            SharechainMessage::SnapshotVote(older),
+        ];
+
+        let (selected_registration, selected_vote) =
+            select_gossip_seed(&messages, "MINER-A").unwrap();
+
+        assert_eq!(selected_registration, registration);
+        assert_eq!(selected_vote, newer);
+
+        let mut conflicting = registration;
+        conflicting.btc_payout_script_hex =
+            "00142222222222222222222222222222222222222222".to_string();
+        let mut conflicting_messages = messages;
+        conflicting_messages.push(SharechainMessage::MinerRegistration(conflicting));
+        assert!(select_gossip_seed(&conflicting_messages, "miner-a")
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one distinct registration"));
     }
 
     fn test_keypair(byte: u8) -> Keypair {
         let secret_key = SecretKey::from_slice(&[byte; 32]).expect("valid test key");
         Keypair::from_secret_key(&bitcoin::key::Secp256k1::new(), &secret_key)
+    }
+
+    #[test]
+    fn stdin_secret_reader_is_bounded_and_conflict_checked() {
+        let secret = read_secret_from_reader(std::io::Cursor::new(b"0x1234\n"), "fixture")
+            .expect("read bounded secret");
+        assert_eq!(secret, "0x1234");
+        assert!(
+            read_optional_secret_with_stdin(Some("0x1234".to_string()), None, true, "fixture")
+                .is_err()
+        );
+
+        let oversized = vec![b'a'; (MAX_OPTIONAL_SECRET_FILE_BYTES + 1) as usize];
+        assert!(read_secret_from_reader(std::io::Cursor::new(oversized), "fixture").is_err());
     }
 
     fn signed_test_withdrawal_request(
@@ -6700,6 +7741,7 @@ mod tests {
             transaction_hashes: Vec::new(),
             transactions: Vec::new(),
             default_witness_commitment: None,
+            pohw_replay_marker: None,
         };
         mining_adapter::build_stratum_job_from_template(&material, 4)
             .expect("build test Stratum job")
@@ -6771,6 +7813,7 @@ mod tests {
             initial_block_download: false,
             verificationprogress: 1.0,
             pruned: false,
+            pohw_experiment: None,
         };
 
         let err = ensure_candidate_submit_chain_allowed(&chain_info, false).unwrap_err();
@@ -6783,7 +7826,34 @@ mod tests {
     }
 
     #[test]
-    fn bitcoin_mining_readiness_requires_fully_verified_mainnet() {
+    fn bitcoin_rpc_mining_requires_exact_chain_binding() {
+        let pohw = BlockchainInfoResponse {
+            chain: "pohw".to_string(),
+            blocks: 958_016,
+            headers: 958_016,
+            initial_block_download: false,
+            verificationprogress: 1.0,
+            pruned: false,
+            pohw_experiment: None,
+        };
+
+        assert!(ensure_expected_rpc_chain(&pohw, Some("pohw")).is_ok());
+        assert!(ensure_expected_rpc_chain(&pohw, None)
+            .unwrap_err()
+            .to_string()
+            .contains("--expected-rpc-chain"));
+        assert!(ensure_expected_rpc_chain(&pohw, Some("main"))
+            .unwrap_err()
+            .to_string()
+            .contains("chain mismatch"));
+        assert!(ensure_expected_rpc_chain(&pohw, Some("regtest"))
+            .unwrap_err()
+            .to_string()
+            .contains("must be 'pohw' or 'main'"));
+    }
+
+    #[test]
+    fn bitcoin_mining_readiness_requires_a_fully_verified_supported_chain() {
         let ready = BlockchainInfoResponse {
             chain: "main".to_string(),
             blocks: 900_000,
@@ -6791,6 +7861,7 @@ mod tests {
             initial_block_download: false,
             verificationprogress: 1.0,
             pruned: false,
+            pohw_experiment: None,
         };
         assert!(ensure_bitcoin_mining_ready(&ready).is_ok());
 
@@ -6813,7 +7884,60 @@ mod tests {
         assert!(ensure_bitcoin_mining_ready(&wrong_network)
             .unwrap_err()
             .to_string()
-            .contains("requires mainnet"));
+            .contains("explicit main or pohw RPC chain"));
+    }
+
+    #[test]
+    fn pohw_mining_readiness_uses_fork_metadata_not_mainnet_progress_estimation() {
+        let ready = BlockchainInfoResponse {
+            chain: "pohw".to_string(),
+            blocks: 958_020,
+            headers: 958_020,
+            initial_block_download: false,
+            verificationprogress: 0.999_9,
+            pruned: false,
+            pohw_experiment: Some(bitcoin_rpc::PohwExperimentInfoResponse {
+                fork_height: 958_016,
+                fork_hash: "11".repeat(32),
+                first_fork_hash: "22".repeat(32),
+                inherited_utxo_spending: true,
+                replay_protection: "inherited-input-requires-fork-only-marker-v2".to_string(),
+                replay_marker_activation_height: 958_018,
+                bootstrap_handoff_hashrate_hps: 1_000_000_000_000_000,
+                handoff_active: false,
+            }),
+        };
+
+        assert!(ensure_bitcoin_mining_ready(&ready).is_ok());
+
+        let mut missing_profile = ready.clone();
+        missing_profile.pohw_experiment = None;
+        assert!(ensure_bitcoin_mining_ready(&missing_profile)
+            .unwrap_err()
+            .to_string()
+            .contains("missing Experiment 1"));
+
+        let mut wrong_replay = ready.clone();
+        wrong_replay
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .inherited_utxo_spending = false;
+        assert!(ensure_bitcoin_mining_ready(&wrong_replay)
+            .unwrap_err()
+            .to_string()
+            .contains("consensus metadata"));
+
+        let mut noncanonical_hash = ready;
+        noncanonical_hash
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .first_fork_hash = "AA".repeat(32);
+        assert!(ensure_bitcoin_mining_ready(&noncanonical_hash)
+            .unwrap_err()
+            .to_string()
+            .contains("not canonical"));
     }
 
     #[test]
@@ -7281,13 +8405,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_file_writer_rejects_symlink_ancestor_directory() {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{symlink, PermissionsExt};
 
         let dir = test_dir("pohw-private-writer-symlink-ancestor");
         let real = dir.join("real");
         let child = real.join("child");
         let link = dir.join("link");
         std::fs::create_dir_all(&child).expect("create child");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))
+            .expect("secure child");
         symlink(&real, &link).expect("create symlink");
         let key_path = link.join("child").join("node.key");
         let secret_key = SecretKey::from_slice(&[5; 32]).expect("valid test key");
@@ -7312,6 +8438,8 @@ mod tests {
         let child = real.join("child");
         let link = dir.join("link");
         std::fs::create_dir_all(&child).expect("create child");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))
+            .expect("secure child");
         symlink(&real, &link).expect("create symlink");
         let real_key_path = child.join("node.key");
         let secret_key = SecretKey::from_slice(&[6; 32]).expect("valid test key");

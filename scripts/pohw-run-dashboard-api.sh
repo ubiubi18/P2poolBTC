@@ -47,6 +47,10 @@ if [[ -n "${POHW_EXPLORER_FORK_CHAIN_RPC_ADDR:-}" || -n "${POHW_FORK_ACTIVATION_
   )
 fi
 
+if [[ -n "${POHW_EXPLORER_POHW_CORE_MANIFEST:-}" ]]; then
+  args+=(--explorer-pohw-core-manifest "$POHW_EXPLORER_POHW_CORE_MANIFEST")
+fi
+
 if [[ -n "${POHW_EXPLORER_BITCOIN_INDEX_URL:-}" ]]; then
   args+=(--explorer-bitcoin-index-url "$POHW_EXPLORER_BITCOIN_INDEX_URL")
 fi

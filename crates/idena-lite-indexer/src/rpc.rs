@@ -68,8 +68,29 @@ impl IdenaRpcClient {
         self.call("bcn_blockAt", json!([height])).await
     }
 
+    pub async fn block(&self, hash: &str) -> Result<Option<BlockResponse>> {
+        self.call("bcn_block", json!([hash])).await
+    }
+
+    pub async fn transaction(&self, hash: &str) -> Result<Option<TransactionResponse>> {
+        self.call("bcn_transaction", json!([hash])).await
+    }
+
+    pub async fn transaction_receipt(&self, hash: &str) -> Result<Option<TxReceiptResponse>> {
+        self.call("bcn_txReceipt", json!([hash])).await
+    }
+
     pub async fn identities(&self) -> Result<Vec<IdentityResponse>> {
         self.call("dna_identities", json!([])).await
+    }
+
+    pub async fn identity(&self, address: &str) -> Result<IdentityResponse> {
+        self.call("dna_identity", json!([address])).await
+    }
+
+    pub async fn contract_read_string(&self, contract: &str, key: &str) -> Result<String> {
+        self.call("contract_readData", json!([contract, key, "string"]))
+            .await
     }
 
     pub async fn call<T: DeserializeOwned>(
@@ -357,6 +378,28 @@ pub struct BlockResponse {
     pub identity_root: String,
     pub transactions: Option<Vec<String>>,
     pub is_empty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionResponse {
+    pub hash: String,
+    #[serde(rename = "type")]
+    pub transaction_type: String,
+    pub to: Option<String>,
+    pub payload: String,
+    pub block_hash: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxReceiptResponse {
+    pub contract: String,
+    pub success: bool,
+    pub tx_hash: Option<String>,
+    #[serde(default)]
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

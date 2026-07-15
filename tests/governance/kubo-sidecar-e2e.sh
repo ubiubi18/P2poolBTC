@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly REPOSITORY_ROOT
 readonly KUBO_IMAGE="${POHW_KUBO_TEST_IMAGE:-ipfs/kubo:v0.42.0}"
 readonly RUN_ID="${PPID}-$$"
 readonly NODE_ONE="pohw-governance-kubo-a-${RUN_ID}"
@@ -43,7 +44,8 @@ readonly GOVERNANCE_CLI="$REPOSITORY_ROOT/target/debug/pohw-governance"
   --output-dir "$package_dir" >/dev/null
 
 readonly SOURCE_CAR="$package_dir/kubo-fixture.source.car"
-readonly SOURCE_CID="$(tr -d '\r\n' <"$package_dir/kubo-fixture.source.cid")"
+SOURCE_CID="$(tr -d '\r\n' <"$package_dir/kubo-fixture.source.cid")"
+readonly SOURCE_CID
 [[ "$SOURCE_CID" == bafy* ]] || {
   printf 'packager emitted an unexpected source CID\n' >&2
   exit 1
@@ -70,7 +72,7 @@ mapped_port() {
 wait_for_api() {
   local port="$1"
   local attempt
-  for attempt in $(seq 1 90); do
+  for ((attempt = 1; attempt <= 90; attempt++)); do
     if curl --fail --silent --show-error --max-time 2 \
       --request POST "http://127.0.0.1:${port}/api/v0/version" >/dev/null 2>&1; then
       return 0

@@ -1,0 +1,35 @@
+[Unit]
+Description=PoHW fail-closed host firewall
+Documentation=https://github.com/ubiubi18/P2poolBTC/blob/master/SECURITY.md
+Wants=network-pre.target
+Before=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/pohw-host-firewall.py --config /etc/pohw/host-firewall.json --apply I_UNDERSTAND_THIS_REPLACES_THE_POHW_FIREWALL_TABLE
+ExecReload=/usr/bin/python3 -I /usr/local/libexec/pohw-host-firewall.py --config /etc/pohw/host-firewall.json --apply I_UNDERSTAND_THIS_REPLACES_THE_POHW_FIREWALL_TABLE
+RemainAfterExit=yes
+UMask=0077
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=network-pre.target

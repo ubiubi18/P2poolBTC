@@ -73,8 +73,8 @@ const exports = new Set(WebAssembly.Module.exports(module).map((item) => item.na
 for (const name of requiredExports) {
   if (!exports.has(name)) throw new Error(`required WASM export is missing: ${name}`);
 }
-for (const forbidden of ["owner", "admin", "upgrade", "replaceCanonical", "emergencyExecute"] ) {
-  if (exports.has(forbidden)) throw new Error(`privileged export is forbidden: ${forbidden}`);
+for (const name of exports) {
+  if (!requiredExports.has(name)) throw new Error(`unexpected WASM export: ${name}`);
 }
 
 console.log(`ABI check passed: ${allowedImports.size} allowlisted imports, ${exports.size} exports`);

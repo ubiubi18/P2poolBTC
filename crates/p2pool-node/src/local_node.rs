@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use pohw_core::commitment::{
     validate_pohw_commitment, PohwCommitment, PohwCommitmentValidationContext,
 };
-use pohw_core::gossip::GossipEnvelope;
+use pohw_core::gossip::{normalize_gossip_network_id, GossipEnvelope, GOSSIP_PROTOCOL_VERSION};
+use pohw_core::idena_anchor::IdenaAnchorPolicyV2;
 use pohw_core::ledger::ClaimLedger;
 use pohw_core::payout::{ParticipantAccount, PayoutSchedule};
 use pohw_core::sharechain::{BitcoinWorkTemplate, MinerRegistration, SharechainMessage};
@@ -27,7 +28,9 @@ const SHARECHAIN_INDEX_FILE: &str = "sharechain-index.json";
 const ACCEPTED_BITCOIN_WORK_TEMPLATES_LOG: &str = "accepted-bitcoin-work-templates.ndjson";
 const CONFIRMED_PAYOUT_LOG: &str = "confirmed-payouts.ndjson";
 const GOSSIP_ENVELOPE_LOG: &str = "gossip-envelopes.ndjson";
+const GOSSIP_NETWORK_ID_FILE: &str = "gossip-network-id";
 const GOSSIP_PEERS_FILE: &str = "gossip-peers.json";
+const IDENA_ANCHOR_POLICY_FILE: &str = "idena-anchor-policy-v2.json";
 const APPEND_LOCK: &str = "sharechain.append.lock";
 const GOSSIP_PEERS_LOCK: &str = "gossip-peers.lock";
 const CORRUPT_LOG_DIR: &str = "corrupt-log-lines";
@@ -37,6 +40,14 @@ const MAX_GOSSIP_PEERS: usize = 512;
 const MAX_SNAPSHOT_FILES: usize = 512;
 const MAX_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SHARECHAIN_INPUT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GOSSIP_NETWORK_ID_FILE_BYTES: u64 = 65;
+const MAX_PERSISTED_GOSSIP_RECORD_BYTES: u64 = 1024 * 1024;
+const MAX_PERSISTED_GOSSIP_ENVELOPES: usize = 262_144;
+const MAX_PERSISTED_GOSSIP_ENVELOPES_PER_PEER: usize = 65_536;
+const MAX_PERSISTED_GOSSIP_LOG_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PERSISTED_SHARECHAIN_LOG_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PERSISTED_ACCEPTED_TEMPLATE_LOG_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IDENA_ANCHOR_POLICY_BYTES: u64 = 64 * 1024;
 
 static GOSSIP_ENVELOPE_CACHE: OnceLock<StdMutex<BTreeMap<PathBuf, GossipEnvelopeCacheEntry>>> =
     OnceLock::new();
@@ -53,6 +64,7 @@ enum TruncatedTailRepair {
 struct GossipEnvelopeLogStamp {
     len: u64,
     modified: Option<SystemTime>,
+    network_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +97,18 @@ pub enum LocalAppendError {
     LockBusy { label: String, path: PathBuf },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum GossipPersistenceError {
+    #[error("{label} exceeds the per-record persistence limit of {limit} bytes")]
+    RecordTooLarge { label: String, limit: u64 },
+    #[error("gossip persistence reached the global envelope limit of {limit}")]
+    EnvelopeLimit { limit: usize },
+    #[error("gossip signing key reached the per-key envelope limit of {limit}")]
+    PeerEnvelopeLimit { limit: usize },
+    #[error("{label} would exceed the persistence limit of {limit} bytes")]
+    ByteLimit { label: String, limit: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharechainIndex {
     pub schema_version: u32,
@@ -92,6 +116,7 @@ pub struct SharechainIndex {
     pub sharechain_log: PathBuf,
     pub log_stamp: Option<SharechainLogStamp>,
     pub accepted_bitcoin_work_templates_log_stamp: Option<SharechainLogStamp>,
+    pub idena_anchor_policy_hash: Option<String>,
     pub message_count: usize,
     pub replay: SharechainReplaySummary,
     pub registrations_by_miner: BTreeMap<String, MinerRegistration>,
@@ -309,6 +334,77 @@ pub struct GossipPeerEntry {
     pub failure_count: u32,
 }
 
+pub fn initialize_gossip_network(datadir: &Path, network_id: &str) -> Result<String> {
+    ensure_datadir(datadir)?;
+    let network_id = normalize_gossip_network_id(network_id)?;
+    let _lock = acquire_append_lock(datadir)?;
+    if let Some(existing) = gossip_network_id(datadir)? {
+        if existing != network_id {
+            anyhow::bail!(
+                "gossip datadir is already bound to a different network; use a fresh datadir"
+            );
+        }
+        return Ok(existing);
+    }
+    for (path, label) in [
+        (log_path(datadir), "sharechain log"),
+        (gossip_envelope_log_path(datadir), "gossip envelope log"),
+        (
+            accepted_bitcoin_work_templates_log_path(datadir),
+            "accepted Bitcoin work template log",
+        ),
+        (confirmed_payout_log_path(datadir), "confirmed payout log"),
+        (sharechain_index_path(datadir), "sharechain index"),
+    ] {
+        if validate_datadir_file(&path, label)?.is_some_and(|metadata| metadata.len() > 0) {
+            anyhow::bail!(
+                "cannot bind non-empty gossip datadir {} to a network; preserve it and use a fresh datadir",
+                datadir.display()
+            );
+        }
+    }
+
+    let path = gossip_network_id_path(datadir);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("failed to create gossip network id file {}", path.display()))?;
+    file.write_all(network_id.as_bytes())
+        .context("failed to write gossip network id")?;
+    file.write_all(b"\n")
+        .context("failed to terminate gossip network id")?;
+    file.flush().context("failed to flush gossip network id")?;
+    file.sync_all()
+        .context("failed to sync gossip network id")?;
+    sync_dir(datadir)?;
+    Ok(network_id)
+}
+
+pub fn gossip_network_id(datadir: &Path) -> Result<Option<String>> {
+    ensure_datadir(datadir)?;
+    let path = gossip_network_id_path(datadir);
+    let Some(metadata) = validate_datadir_file(&path, "gossip network id")? else {
+        return Ok(None);
+    };
+    if metadata.len() > MAX_GOSSIP_NETWORK_ID_FILE_BYTES {
+        anyhow::bail!("gossip network id file exceeds the maximum size");
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read gossip network id file {}", path.display()))?;
+    let value = contents.strip_suffix('\n').unwrap_or(&contents);
+    let network_id = normalize_gossip_network_id(value)?;
+    if contents != format!("{network_id}\n") {
+        anyhow::bail!("gossip network id file is not in canonical format");
+    }
+    Ok(Some(network_id))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct GossipPeerBook {
     peers: Vec<GossipPeerEntry>,
@@ -324,6 +420,100 @@ pub fn run_local_node(datadir: &Path, status_interval_seconds: u64, once: bool) 
         }
         thread::sleep(Duration::from_secs(status_interval_seconds.max(1)));
     }
+}
+
+pub fn bind_idena_anchor_policy(datadir: &Path, policy: &IdenaAnchorPolicyV2) -> Result<String> {
+    ensure_datadir(datadir)?;
+    let policy = policy.clone().normalized();
+    policy.validate().context("invalid Idena anchor policy")?;
+    let commitment = policy.commitment_hash()?;
+    let _lock = acquire_append_lock(datadir)?;
+
+    if let Some(existing) = read_bound_idena_anchor_policy(datadir)? {
+        let existing_commitment = existing.commitment_hash()?;
+        if existing_commitment != commitment {
+            anyhow::bail!(
+                "node datadir is already bound to Idena anchor policy {existing_commitment}; refusing replacement with {commitment}"
+            );
+        }
+    }
+
+    audit_sharechain_with_idena_anchor_policy(datadir, &policy)?;
+    if read_bound_idena_anchor_policy(datadir)?.is_none() {
+        write_bound_idena_anchor_policy(datadir, &policy)?;
+    }
+    if let Some(cache) = SHARECHAIN_REPLAY_CACHE.get() {
+        cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?
+            .remove(&replay_cache_key(datadir));
+    }
+    Ok(commitment)
+}
+
+pub fn read_bound_idena_anchor_policy(datadir: &Path) -> Result<Option<IdenaAnchorPolicyV2>> {
+    let path = idena_anchor_policy_path(datadir);
+    let Some(metadata) = validate_datadir_file(&path, "Idena anchor policy")? else {
+        return Ok(None);
+    };
+    if metadata.len() > MAX_IDENA_ANCHOR_POLICY_BYTES {
+        anyhow::bail!(
+            "Idena anchor policy {} exceeds {MAX_IDENA_ANCHOR_POLICY_BYTES} bytes",
+            path.display()
+        );
+    }
+    let payload = fs::read(&path)
+        .with_context(|| format!("failed to read Idena anchor policy {}", path.display()))?;
+    let policy: IdenaAnchorPolicyV2 = serde_json::from_slice(&payload)
+        .with_context(|| format!("Idena anchor policy {} is not strict JSON", path.display()))?;
+    let policy = policy.normalized();
+    policy
+        .validate()
+        .with_context(|| format!("invalid Idena anchor policy {}", path.display()))?;
+    Ok(Some(policy))
+}
+
+fn audit_sharechain_with_idena_anchor_policy(
+    datadir: &Path,
+    policy: &IdenaAnchorPolicyV2,
+) -> Result<SharechainReplayState> {
+    let mut state = replay_state_with_accepted_bitcoin_work_templates(
+        datadir,
+        TruncatedTailRepair::Conservative,
+    )?;
+    for message in read_messages_with_repair(datadir, TruncatedTailRepair::Conservative)? {
+        state
+            .validate_idena_anchor_policy(&message, policy)
+            .context("existing sharechain history violates the Idena anchor policy")?;
+        state.apply_message(&message)?;
+    }
+    Ok(state)
+}
+
+fn write_bound_idena_anchor_policy(datadir: &Path, policy: &IdenaAnchorPolicyV2) -> Result<()> {
+    let path = idena_anchor_policy_path(datadir);
+    let (tmp_path, mut file) = create_random_temp_file(datadir, IDENA_ANCHOR_POLICY_FILE)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    serde_json::to_writer_pretty(&mut file, policy)
+        .context("failed to encode bound Idena anchor policy")?;
+    file.write_all(b"\n")
+        .context("failed to terminate bound Idena anchor policy")?;
+    file.flush()
+        .context("failed to flush bound Idena anchor policy")?;
+    file.sync_all()
+        .context("failed to sync bound Idena anchor policy")?;
+    fs::rename(&tmp_path, &path).with_context(|| {
+        format!(
+            "failed to install bound Idena anchor policy {} from {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
+    sync_dir(datadir)
 }
 
 pub fn append_message_file(datadir: &Path, message_file: &Path) -> Result<AppendMessageResult> {
@@ -356,6 +546,9 @@ pub fn accept_bitcoin_work_template(
     let template = template.normalized();
     let template_hash = template.template_hash.clone();
     let _lock = acquire_append_lock(datadir)?;
+    if gossip_network_id(datadir)?.is_some() {
+        template.require_target_bound()?;
+    }
     let existing_templates =
         read_accepted_bitcoin_work_templates_with_repair(datadir, TruncatedTailRepair::Force)?;
     for existing in &existing_templates {
@@ -370,6 +563,20 @@ pub fn accept_bitcoin_work_template(
             });
         }
     }
+
+    let encoded_template =
+        serde_json::to_vec(&template).context("failed to encode accepted Bitcoin work template")?;
+    ensure_record_size(
+        "accepted Bitcoin work template",
+        encoded_template.len(),
+        MAX_PERSISTED_GOSSIP_RECORD_BYTES,
+    )?;
+    ensure_file_capacity(
+        &accepted_bitcoin_work_templates_log_path(datadir),
+        "accepted Bitcoin work template log",
+        encoded_template.len().saturating_add(1),
+        MAX_PERSISTED_ACCEPTED_TEMPLATE_LOG_BYTES,
+    )?;
 
     let mut file = open_append_datadir_file(
         &accepted_bitcoin_work_templates_log_path(datadir),
@@ -390,11 +597,7 @@ pub fn accept_bitcoin_work_template(
             .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?;
         let cache_key = replay_cache_key(datadir);
         if let Some(entry) = cache.get_mut(&cache_key) {
-            if entry
-                .state
-                .accept_bitcoin_work_template_prefix(&template.header_prefix_hex)
-                .is_ok()
-            {
+            if entry.state.accept_bitcoin_work_template(&template).is_ok() {
                 entry.accepted_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
             } else {
                 cache.remove(&cache_key);
@@ -471,8 +674,14 @@ fn append_gossip_envelope_with_freshness(
         envelope,
     })?;
     let _lock = acquire_append_lock(datadir)?;
-    let mut message_result = append_message_locked(datadir, message)?;
-    if !stored_gossip_envelope_exists_locked(datadir, &message_hash)? {
+    let network_id = gossip_network_id(datadir)?;
+    verify_gossip_network_binding(&stored.envelope, network_id.as_deref())?;
+    let envelope_exists = stored_gossip_envelope_exists_locked(datadir, &message_hash)?;
+    if !envelope_exists {
+        validate_gossip_persistence_limits(datadir, &stored, &message)?;
+    }
+    let mut message_result = append_message_locked(datadir, message, network_id.is_some())?;
+    if !envelope_exists {
         append_stored_gossip_envelope_locked(datadir, stored)?;
         message_result.status.gossip_envelope_count =
             read_gossip_envelopes_with_repair(datadir, TruncatedTailRepair::Force)?.len();
@@ -487,13 +696,16 @@ fn append_gossip_envelope_with_freshness(
 pub fn append_message(datadir: &Path, message: SharechainMessage) -> Result<AppendMessageResult> {
     ensure_datadir(datadir)?;
     let _lock = acquire_append_lock(datadir)?;
-    append_message_locked(datadir, message)
+    let require_target_bound = gossip_network_id(datadir)?.is_some();
+    append_message_locked(datadir, message, require_target_bound)
 }
 
 fn append_message_locked(
     datadir: &Path,
     message: SharechainMessage,
+    require_target_bound: bool,
 ) -> Result<AppendMessageResult> {
+    let bound_policy = read_bound_idena_anchor_policy(datadir)?;
     let cache_key = replay_cache_key(datadir);
     let cache = SHARECHAIN_REPLAY_CACHE.get_or_init(|| StdMutex::new(BTreeMap::new()));
     let mut cache = cache
@@ -501,12 +713,18 @@ fn append_message_locked(
         .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?;
     let mut entry = match cache.remove(&cache_key) {
         Some(mut entry) => {
-            refresh_replay_cache_entry(datadir, &mut entry)?;
+            refresh_replay_cache_entry(datadir, &mut entry, bound_policy.as_ref())?;
             entry
         }
-        None => build_replay_cache_entry(datadir)?,
+        None => build_replay_cache_entry_with_policy(datadir, bound_policy.as_ref())?,
     };
     let message_hash = message.message_hash();
+    if require_target_bound {
+        entry.state.validate_target_bound_message(&message)?;
+    }
+    if let Some(policy) = bound_policy.as_ref() {
+        entry.state.validate_idena_anchor_policy(&message, policy)?;
+    }
     let outcome = entry.state.apply_message(&message)?;
     if outcome == ApplyOutcome::Applied {
         let mut file = open_append_datadir_file(&log_path(datadir), "sharechain log")?;
@@ -525,6 +743,10 @@ fn append_message_locked(
         datadir,
         entry.log_stamp.clone(),
         entry.accepted_template_stamp.clone(),
+        bound_policy
+            .as_ref()
+            .map(IdenaAnchorPolicyV2::commitment_hash)
+            .transpose()?,
         entry.message_count,
         &entry.state,
     )?;
@@ -547,6 +769,106 @@ fn append_message_locked(
         outcome,
         status,
     })
+}
+
+fn validate_gossip_persistence_limits(
+    datadir: &Path,
+    stored: &StoredGossipEnvelope,
+    message: &SharechainMessage,
+) -> Result<()> {
+    let existing = read_gossip_envelopes_with_repair(datadir, TruncatedTailRepair::Force)?;
+    let peer_envelope_count = existing
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .peer_pubkey_xonly_hex
+                .eq_ignore_ascii_case(&stored.peer_pubkey_xonly_hex)
+        })
+        .count();
+    ensure_gossip_count_capacity(
+        existing.len(),
+        peer_envelope_count,
+        MAX_PERSISTED_GOSSIP_ENVELOPES,
+        MAX_PERSISTED_GOSSIP_ENVELOPES_PER_PEER,
+    )?;
+
+    let encoded_message =
+        serde_json::to_vec(message).context("failed to encode sharechain message")?;
+    let encoded_envelope =
+        serde_json::to_vec(stored).context("failed to encode stored gossip envelope")?;
+    ensure_record_size(
+        "sharechain message",
+        encoded_message.len(),
+        MAX_PERSISTED_GOSSIP_RECORD_BYTES,
+    )?;
+    ensure_record_size(
+        "stored gossip envelope",
+        encoded_envelope.len(),
+        MAX_PERSISTED_GOSSIP_RECORD_BYTES,
+    )?;
+    ensure_file_capacity(
+        &log_path(datadir),
+        "sharechain log",
+        encoded_message.len().saturating_add(1),
+        MAX_PERSISTED_SHARECHAIN_LOG_BYTES,
+    )?;
+    ensure_file_capacity(
+        &gossip_envelope_log_path(datadir),
+        "gossip envelope log",
+        encoded_envelope.len().saturating_add(1),
+        MAX_PERSISTED_GOSSIP_LOG_BYTES,
+    )
+}
+
+fn ensure_gossip_count_capacity(
+    envelope_count: usize,
+    peer_envelope_count: usize,
+    envelope_limit: usize,
+    peer_envelope_limit: usize,
+) -> Result<()> {
+    if envelope_count >= envelope_limit {
+        return Err(GossipPersistenceError::EnvelopeLimit {
+            limit: envelope_limit,
+        }
+        .into());
+    }
+    if peer_envelope_count >= peer_envelope_limit {
+        return Err(GossipPersistenceError::PeerEnvelopeLimit {
+            limit: peer_envelope_limit,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_record_size(label: &str, size: usize, limit: u64) -> Result<()> {
+    let size = u64::try_from(size).unwrap_or(u64::MAX);
+    if size > limit {
+        return Err(GossipPersistenceError::RecordTooLarge {
+            label: label.to_string(),
+            limit,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_file_capacity(
+    path: &Path,
+    label: &str,
+    additional_bytes: usize,
+    limit: u64,
+) -> Result<()> {
+    let current = validate_datadir_file(path, label)?.map_or(0, |metadata| metadata.len());
+    let additional = u64::try_from(additional_bytes).unwrap_or(u64::MAX);
+    if !matches!(current.checked_add(additional), Some(total) if total <= limit) {
+        return Err(GossipPersistenceError::ByteLimit {
+            label: label.to_string(),
+            limit,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 pub fn local_node_status(datadir: &Path) -> Result<LocalNodeStatus> {
@@ -580,11 +902,15 @@ pub fn rebuild_sharechain_index(datadir: &Path) -> Result<SharechainIndex> {
 
 pub fn replay_state(datadir: &Path) -> Result<SharechainReplayState> {
     ensure_datadir(datadir)?;
+    let bound_policy = read_bound_idena_anchor_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(
         datadir,
         TruncatedTailRepair::Conservative,
     )?;
     for message in read_messages(datadir)? {
+        if let Some(policy) = bound_policy.as_ref() {
+            state.validate_idena_anchor_policy(&message, policy)?;
+        }
         state.apply_message(&message)?;
     }
     Ok(state)
@@ -1011,12 +1337,18 @@ fn replay_cache_key(datadir: &Path) -> PathBuf {
     fs::canonicalize(datadir).unwrap_or_else(|_| datadir.to_path_buf())
 }
 
-fn build_replay_cache_entry(datadir: &Path) -> Result<ReplayCacheEntry> {
+fn build_replay_cache_entry_with_policy(
+    datadir: &Path,
+    bound_policy: Option<&IdenaAnchorPolicyV2>,
+) -> Result<ReplayCacheEntry> {
     ensure_datadir(datadir)?;
     let mut state =
         replay_state_with_accepted_bitcoin_work_templates(datadir, TruncatedTailRepair::Force)?;
     let messages = read_messages_with_repair(datadir, TruncatedTailRepair::Force)?;
     for message in &messages {
+        if let Some(policy) = bound_policy {
+            state.validate_idena_anchor_policy(message, policy)?;
+        }
         state.apply_message(message)?;
     }
     Ok(ReplayCacheEntry {
@@ -1027,7 +1359,11 @@ fn build_replay_cache_entry(datadir: &Path) -> Result<ReplayCacheEntry> {
     })
 }
 
-fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> Result<()> {
+fn refresh_replay_cache_entry(
+    datadir: &Path,
+    entry: &mut ReplayCacheEntry,
+    bound_policy: Option<&IdenaAnchorPolicyV2>,
+) -> Result<()> {
     let current_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     let cached_template_len = entry
         .accepted_template_stamp
@@ -1038,7 +1374,7 @@ fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> R
         || (current_template_len == cached_template_len
             && current_template_stamp != entry.accepted_template_stamp)
     {
-        *entry = build_replay_cache_entry(datadir)?;
+        *entry = build_replay_cache_entry_with_policy(datadir, bound_policy)?;
         return Ok(());
     }
     if current_template_len > cached_template_len {
@@ -1047,9 +1383,7 @@ fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> R
             "accepted Bitcoin work template log",
             cached_template_len,
         )? {
-            entry
-                .state
-                .accept_bitcoin_work_template_prefix(&template.header_prefix_hex)?;
+            entry.state.accept_bitcoin_work_template(&template)?;
         }
         entry.accepted_template_stamp = current_template_stamp;
     }
@@ -1060,7 +1394,7 @@ fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> R
     if current_log_len < cached_log_len
         || (current_log_len == cached_log_len && current_log_stamp != entry.log_stamp)
     {
-        *entry = build_replay_cache_entry(datadir)?;
+        *entry = build_replay_cache_entry_with_policy(datadir, bound_policy)?;
         return Ok(());
     }
     if current_log_len > cached_log_len {
@@ -1070,6 +1404,9 @@ fn refresh_replay_cache_entry(datadir: &Path, entry: &mut ReplayCacheEntry) -> R
             cached_log_len,
         )?;
         for message in &messages {
+            if let Some(policy) = bound_policy {
+                entry.state.validate_idena_anchor_policy(message, policy)?;
+            }
             entry.state.apply_message(message)?;
         }
         entry.message_count = entry.message_count.saturating_add(messages.len());
@@ -1128,7 +1465,7 @@ fn replay_state_with_accepted_bitcoin_work_templates(
 ) -> Result<SharechainReplayState> {
     let mut state = SharechainReplayState::default();
     for template in read_accepted_bitcoin_work_templates_with_repair(datadir, repair)? {
-        state.accept_bitcoin_work_template_prefix(&template.header_prefix_hex)?;
+        state.accept_bitcoin_work_template(&template)?;
     }
     Ok(state)
 }
@@ -1281,6 +1618,9 @@ fn validate_confirmed_payout_pohw_binding(
     full_sharechain_state: &SharechainReplayState,
 ) -> Result<()> {
     let commitment = &record.pohw_commitment;
+    let identity_proof_root = snapshot
+        .identity_proof_root_hex()
+        .context("confirmed payout snapshot has an invalid identity proof root")?;
     let miner_idena_address = commitment.miner_idena_address.to_ascii_lowercase();
     let miner_leaf = snapshot
         .leaves
@@ -1302,7 +1642,7 @@ fn validate_confirmed_payout_pohw_binding(
             idena_snapshot_id: &record.idena_snapshot_day,
             idena_score_root: &record.idena_score_root,
             miner_leaf,
-            identity_proof_root: &snapshot.identity_root,
+            identity_proof_root: &identity_proof_root,
             sharechain_tip: &commitment.sharechain_tip,
             sharechain_state_root: Some(&tip_state.accounting_state_root()),
             payout_schedule_root: &record.payout_schedule.payout_root,
@@ -1396,12 +1736,20 @@ fn sharechain_index_with_repair(
     repair: TruncatedTailRepair,
 ) -> Result<SharechainIndex> {
     ensure_datadir(datadir)?;
+    let bound_policy = read_bound_idena_anchor_policy(datadir)?;
+    let bound_policy_hash = bound_policy
+        .as_ref()
+        .map(IdenaAnchorPolicyV2::commitment_hash)
+        .transpose()?;
     let before_stamp = sharechain_log_stamp(datadir)?;
     let before_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     if repair == TruncatedTailRepair::Conservative {
-        if let Some(index) =
-            read_fresh_sharechain_index(datadir, &before_stamp, &before_template_stamp)?
-        {
+        if let Some(index) = read_fresh_sharechain_index(
+            datadir,
+            &before_stamp,
+            &before_template_stamp,
+            bound_policy_hash.as_deref(),
+        )? {
             return Ok(index);
         }
     }
@@ -1411,12 +1759,16 @@ fn sharechain_index_with_repair(
     let after_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in &messages {
+        if let Some(policy) = bound_policy.as_ref() {
+            state.validate_idena_anchor_policy(message, policy)?;
+        }
         state.apply_message(message)?;
     }
     let index = build_sharechain_index(
         datadir,
         after_stamp,
         after_template_stamp,
+        bound_policy_hash,
         messages.len(),
         &state,
     )?;
@@ -1428,15 +1780,17 @@ fn build_sharechain_index(
     datadir: &Path,
     log_stamp: Option<SharechainLogStamp>,
     accepted_bitcoin_work_templates_log_stamp: Option<SharechainLogStamp>,
+    idena_anchor_policy_hash: Option<String>,
     message_count: usize,
     state: &SharechainReplayState,
 ) -> Result<SharechainIndex> {
     Ok(SharechainIndex {
-        schema_version: 2,
+        schema_version: 3,
         generated_at_unix: current_unix_timestamp()?,
         sharechain_log: log_path(datadir),
         log_stamp,
         accepted_bitcoin_work_templates_log_stamp,
+        idena_anchor_policy_hash,
         message_count,
         replay: state.summary(),
         registrations_by_miner: state.registrations().clone(),
@@ -1450,6 +1804,7 @@ fn read_fresh_sharechain_index(
     datadir: &Path,
     log_stamp: &Option<SharechainLogStamp>,
     accepted_bitcoin_work_templates_log_stamp: &Option<SharechainLogStamp>,
+    idena_anchor_policy_hash: Option<&str>,
 ) -> Result<Option<SharechainIndex>> {
     let path = sharechain_index_path(datadir);
     let Some(json) = read_optional_datadir_file_to_string(&path, "sharechain index")? else {
@@ -1459,10 +1814,11 @@ fn read_fresh_sharechain_index(
         Ok(index) => index,
         Err(_) => return Ok(None),
     };
-    if index.schema_version != 2
+    if index.schema_version != 3
         || &index.log_stamp != log_stamp
         || &index.accepted_bitcoin_work_templates_log_stamp
             != accepted_bitcoin_work_templates_log_stamp
+        || index.idena_anchor_policy_hash.as_deref() != idena_anchor_policy_hash
     {
         return Ok(None);
     }
@@ -1635,6 +1991,7 @@ fn sharechain_message_type(message: &SharechainMessage) -> &'static str {
         SharechainMessage::MinerRegistration(_) => "MinerRegistration",
         SharechainMessage::BitcoinWorkTemplate(_) => "BitcoinWorkTemplate",
         SharechainMessage::Share(_) => "Share",
+        SharechainMessage::SharechainCheckpoint(_) => "SharechainCheckpoint",
         SharechainMessage::SnapshotVote(_) => "SnapshotVote",
         SharechainMessage::PayoutSchedule(_) => "PayoutSchedule",
         SharechainMessage::WithdrawalRequest(_) => "WithdrawalRequest",
@@ -1825,6 +2182,7 @@ fn read_gossip_envelopes_uncached(
     repair: TruncatedTailRepair,
 ) -> Result<Vec<StoredGossipEnvelope>> {
     let path = gossip_envelope_log_path(datadir);
+    let network_id = gossip_network_id(datadir)?;
     let Some(content) = read_optional_datadir_file_to_string(&path, "gossip envelope log")? else {
         return Ok(Vec::new());
     };
@@ -1873,6 +2231,15 @@ fn read_gossip_envelopes_uncached(
                 idx + 1
             )
         })?;
+        verify_gossip_network_binding(&stored.envelope, network_id.as_deref()).with_context(
+            || {
+                format!(
+                    "gossip network binding failed at {} line {}",
+                    path.display(),
+                    idx + 1
+                )
+            },
+        )?;
         if seen_message_hashes.insert(stored.message_hash.clone()) {
             envelopes.push(stored);
         }
@@ -1883,12 +2250,29 @@ fn read_gossip_envelopes_uncached(
 
 fn gossip_envelope_log_stamp(datadir: &Path) -> Result<Option<GossipEnvelopeLogStamp>> {
     let path = gossip_envelope_log_path(datadir);
+    let network_id = gossip_network_id(datadir)?;
     match validate_datadir_file(&path, "gossip envelope log stamp")? {
         Some(metadata) => Ok(Some(GossipEnvelopeLogStamp {
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            network_id,
         })),
         None => Ok(None),
+    }
+}
+
+fn verify_gossip_network_binding(
+    envelope: &GossipEnvelope,
+    expected_network_id: Option<&str>,
+) -> Result<()> {
+    match expected_network_id {
+        Some(network_id) => envelope
+            .verify_network(network_id)
+            .context("gossip envelope is not bound to the datadir network"),
+        None if envelope.protocol_version == GOSSIP_PROTOCOL_VERSION => Ok(()),
+        None => anyhow::bail!(
+            "network-bound gossip envelope requires an initialized gossip network datadir"
+        ),
     }
 }
 
@@ -2349,8 +2733,16 @@ fn gossip_envelope_log_path(datadir: &Path) -> PathBuf {
     datadir.join(GOSSIP_ENVELOPE_LOG)
 }
 
+fn gossip_network_id_path(datadir: &Path) -> PathBuf {
+    datadir.join(GOSSIP_NETWORK_ID_FILE)
+}
+
 fn gossip_peers_path(datadir: &Path) -> PathBuf {
     datadir.join(GOSSIP_PEERS_FILE)
+}
+
+fn idena_anchor_policy_path(datadir: &Path) -> PathBuf {
+    datadir.join(IDENA_ANCHOR_POLICY_FILE)
 }
 
 fn lock_path(datadir: &Path) -> PathBuf {
@@ -2785,11 +3177,13 @@ mod tests {
         let idena_secret = SecretKey::from_slice(&[idena_key_byte; 32]).unwrap();
         let claim_xonly = claim_keypair.x_only_public_key().0.to_string();
         let mut registration = MinerRegistration {
+            version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
             miner_id: miner_id.to_string(),
             idena_address: idena_address_from_secret(&idena_secret),
             btc_payout_script_hex: format!("5120{claim_xonly}"),
             claim_owner_pubkey_hex: claim_xonly,
             mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            registry_anchor: None,
             idena_signature_hex: String::new(),
             mining_signature_hex: String::new(),
         };
@@ -2798,6 +3192,25 @@ mod tests {
         registration.mining_signature_hex =
             sign_schnorr(registration.signing_hash(), &mining_keypair);
         registration
+    }
+
+    fn idena_anchor_policy() -> IdenaAnchorPolicyV2 {
+        IdenaAnchorPolicyV2 {
+            schema_version: 2,
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            registry_contract_address: format!("0x{}", "21".repeat(20)),
+            registry_deployment_tx_hash: format!("0x{}", "22".repeat(32)),
+            registry_deployment_payload_sha256: "23".repeat(32),
+            registry_contract_code_hash: "25".repeat(32),
+            registry_contract_wasm_sha256: "24".repeat(32),
+            registry_ecosystem_cid: "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm"
+                .to_string(),
+            minimum_registration_burn_atoms: "1000".to_string(),
+            activation_idena_height: 100,
+            finality_confirmations: 6,
+            max_anchor_age_blocks: 12,
+            handoff_version_bit: 27,
+        }
     }
 
     fn test_message() -> SharechainMessage {
@@ -2821,6 +3234,69 @@ mod tests {
             keypair.x_only_public_key().0.to_string(),
             current_unix_timestamp().unwrap(),
             "66".repeat(32),
+            test_message(),
+        )
+        .unwrap();
+        envelope.sign(&keypair).unwrap();
+        envelope
+    }
+
+    #[test]
+    fn bound_idena_anchor_policy_is_immutable_and_enforced_inside_append_lock() {
+        let datadir = temp_dir("bound-idena-anchor-policy");
+        let policy = idena_anchor_policy();
+        let commitment = bind_idena_anchor_policy(&datadir, &policy).unwrap();
+
+        assert_eq!(commitment, policy.commitment_hash().unwrap());
+        assert_eq!(
+            read_bound_idena_anchor_policy(&datadir).unwrap(),
+            Some(policy.clone())
+        );
+        let err = append_message(
+            &datadir,
+            SharechainMessage::MinerRegistration(signed_registration("legacy", 1, 2, 3)),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no contract-anchored registration"),
+            "unexpected error: {err:#}"
+        );
+
+        let mut replacement = policy;
+        replacement.max_anchor_age_blocks += 1;
+        let err = bind_idena_anchor_policy(&datadir, &replacement).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing replacement"),
+            "unexpected error: {err:#}"
+        );
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn policy_binding_audits_existing_history_before_writing_policy() {
+        let datadir = temp_dir("idena-anchor-policy-audit");
+        append_message(
+            &datadir,
+            SharechainMessage::MinerRegistration(signed_registration("legacy", 4, 5, 6)),
+        )
+        .unwrap();
+
+        let err = bind_idena_anchor_policy(&datadir, &idena_anchor_policy()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("existing sharechain history violates"),
+            "unexpected error: {err:#}"
+        );
+        assert!(read_bound_idena_anchor_policy(&datadir).unwrap().is_none());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    fn test_network_gossip_envelope(network_id: &str, nonce_byte: u8) -> GossipEnvelope {
+        let keypair = keypair(7);
+        let mut envelope = GossipEnvelope::unsigned_for_network(
+            network_id,
+            keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp().unwrap(),
+            format!("{nonce_byte:02x}{}", "00".repeat(31)),
             test_message(),
         )
         .unwrap();
@@ -2889,6 +3365,21 @@ mod tests {
         let mut template = BitcoinWorkTemplate::new_unsigned(
             &share.miner_id,
             share.bitcoin_header_prefix_hex().unwrap(),
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign_schnorr(template.signing_hash(), mining_keypair);
+        template
+    }
+
+    fn signed_target_bound_work_template(
+        share: &pohw_core::sharechain::Share,
+        mining_keypair: &Keypair,
+    ) -> BitcoinWorkTemplate {
+        let mut template = BitcoinWorkTemplate::new_target_bound_unsigned(
+            &share.miner_id,
+            share.bitcoin_header_prefix_hex().unwrap(),
+            &share.target,
             1,
         )
         .unwrap();
@@ -3334,6 +3825,144 @@ mod tests {
             "unexpected error: {err:#}"
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "do-not-touch");
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn gossip_network_initialization_is_idempotent_but_not_rebindable() {
+        let datadir = temp_dir("gossip-network-init");
+        let network_id = "ab".repeat(32);
+
+        assert_eq!(
+            initialize_gossip_network(&datadir, &network_id).unwrap(),
+            network_id
+        );
+        assert_eq!(
+            initialize_gossip_network(&datadir, &network_id.to_ascii_uppercase()).unwrap(),
+            network_id
+        );
+        let err = initialize_gossip_network(&datadir, &"cd".repeat(32)).unwrap_err();
+        assert!(err.to_string().contains("different network"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn persistence_limits_reject_at_exact_count_and_byte_boundaries() {
+        let global = ensure_gossip_count_capacity(2, 0, 2, 2).unwrap_err();
+        assert!(matches!(
+            global.downcast_ref::<GossipPersistenceError>(),
+            Some(GossipPersistenceError::EnvelopeLimit { limit: 2 })
+        ));
+        let peer = ensure_gossip_count_capacity(1, 2, 3, 2).unwrap_err();
+        assert!(matches!(
+            peer.downcast_ref::<GossipPersistenceError>(),
+            Some(GossipPersistenceError::PeerEnvelopeLimit { limit: 2 })
+        ));
+
+        let datadir = temp_dir("gossip-byte-limit");
+        let path = datadir.join("bounded.log");
+        fs::write(&path, b"1234").unwrap();
+        ensure_file_capacity(&path, "bounded log", 3, 7).unwrap();
+        let err = ensure_file_capacity(&path, "bounded log", 4, 7).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<GossipPersistenceError>(),
+            Some(GossipPersistenceError::ByteLimit { limit: 7, .. })
+        ));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn network_bound_datadir_requires_target_bound_templates_for_new_appends() {
+        let datadir = temp_dir("target-bound-network");
+        initialize_gossip_network(&datadir, &"ab".repeat(32)).unwrap();
+        let mining_keypair = keypair(9);
+        let registration = signed_registration("miner-a", 9, 10, 13);
+        append_message(&datadir, SharechainMessage::MinerRegistration(registration)).unwrap();
+        let mut share = signed_share("miner-a", &mining_keypair);
+        let legacy = signed_work_template(&share, &mining_keypair);
+
+        let err = accept_bitcoin_work_template(&datadir, legacy).unwrap_err();
+        assert!(format!("{err:#}").contains("target-bound version"));
+
+        share.bitcoin_template_hash = share
+            .recomputed_target_bound_bitcoin_template_hash()
+            .unwrap();
+        share.mining_signature_hex = sign_schnorr(share.signing_hash(), &mining_keypair);
+        let target_bound = signed_target_bound_work_template(&share, &mining_keypair);
+        accept_bitcoin_work_template(&datadir, target_bound.clone()).unwrap();
+        append_message(
+            &datadir,
+            SharechainMessage::BitcoinWorkTemplate(target_bound),
+        )
+        .unwrap();
+        append_message(&datadir, SharechainMessage::Share(share)).unwrap();
+        assert_eq!(
+            local_node_status(&datadir)
+                .unwrap()
+                .replay
+                .active_share_count,
+            1
+        );
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn gossip_network_initialization_refuses_existing_sharechain_history() {
+        let datadir = temp_dir("gossip-network-existing-history");
+        append_message(&datadir, test_message()).unwrap();
+
+        let err = initialize_gossip_network(&datadir, &"ab".repeat(32)).unwrap_err();
+
+        assert!(err.to_string().contains("non-empty gossip datadir"));
+        assert_eq!(gossip_network_id(&datadir).unwrap(), None);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn network_bound_datadir_accepts_only_matching_network_envelopes() {
+        let datadir = temp_dir("gossip-network-admission");
+        let network_id = "ab".repeat(32);
+        initialize_gossip_network(&datadir, &network_id).unwrap();
+
+        let legacy_err =
+            append_gossip_envelope(&datadir, test_gossip_envelope(), 300, 86_400).unwrap_err();
+        assert!(legacy_err.to_string().contains("not bound"));
+
+        let wrong = test_network_gossip_envelope(&"cd".repeat(32), 0x67);
+        let wrong_err = append_gossip_envelope(&datadir, wrong, 300, 86_400).unwrap_err();
+        assert!(format!("{wrong_err:#}").contains("does not match expected network"));
+
+        let matching = test_network_gossip_envelope(&network_id, 0x68);
+        let result = append_gossip_envelope(&datadir, matching, 300, 86_400).unwrap();
+        assert_eq!(result.message_result.outcome, ApplyOutcome::Applied);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn legacy_datadir_rejects_network_bound_envelopes_until_initialized() {
+        let datadir = temp_dir("gossip-network-uninitialized");
+        let envelope = test_network_gossip_envelope(&"ab".repeat(32), 0x69);
+
+        let err = append_gossip_envelope(&datadir, envelope, 300, 86_400).unwrap_err();
+
+        assert!(err.to_string().contains("requires an initialized"));
+        assert!(gossip_inventory(&datadir).unwrap().is_empty());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gossip_network_id_refuses_symlink_file() {
+        use std::os::unix::fs::symlink;
+
+        let datadir = temp_dir("gossip-network-symlink");
+        let target = datadir.join("target");
+        fs::write(&target, format!("{}\n", "ab".repeat(32))).unwrap();
+        symlink(&target, gossip_network_id_path(&datadir)).unwrap();
+
+        let err = gossip_network_id(&datadir).unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
         fs::remove_dir_all(datadir).unwrap();
     }
 

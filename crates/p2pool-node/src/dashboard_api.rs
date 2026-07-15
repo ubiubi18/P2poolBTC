@@ -1,7 +1,7 @@
 use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
 use crate::bitcoin_rpc::{BitcoinRpcAuth, BitcoinRpcClient};
 use crate::explorer_api;
-use crate::fork_chain::ForkChainClient;
+use crate::fork_explorer::ExplorerForkClient;
 use crate::governance_api;
 use crate::local_node;
 use anyhow::{bail, Context, Result};
@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout, Duration};
 
 const DEFAULT_BLOCK_SUBSIDY_BTC: f64 = 3.125;
@@ -31,6 +32,7 @@ const MAX_API_TOKEN_BYTES: usize = 512;
 const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DASHBOARD_CONNECTIONS: usize = 128;
 const MAX_DASHBOARD_CONNECTIONS_PER_IP: usize = 16;
+const MAX_PUBLIC_EXPLORER_REQUESTS: usize = 8;
 const DASHBOARD_HEADER_TIMEOUT_SECONDS: u64 = 5;
 const DASHBOARD_READ_IDLE_TIMEOUT_SECONDS: u64 = 5;
 const DASHBOARD_WRITE_TIMEOUT_SECONDS: u64 = 5;
@@ -44,6 +46,8 @@ const DEFAULT_ALLOWED_ORIGINS: &[&str] = &[
     "http://127.0.0.1:4173",
     "http://localhost:4173",
 ];
+
+static PUBLIC_EXPLORER_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct DashboardApiConfig {
@@ -61,7 +65,7 @@ pub struct DashboardApiConfig {
     pub idena_rpc_url: Option<String>,
     pub idena_api_key_file: Option<PathBuf>,
     pub public_explorer: bool,
-    pub fork_chain_client: Option<ForkChainClient>,
+    pub fork_explorer_client: Option<ExplorerForkClient>,
     pub bitcoin_index_client: Option<BitcoinExplorerIndexClient>,
     pub governance_state_file: Option<PathBuf>,
 }
@@ -1006,6 +1010,23 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             cors_origin.as_deref(),
         ));
     }
+    let _public_explorer_permit = if public_explorer_request {
+        let limiter = PUBLIC_EXPLORER_LIMITER
+            .get_or_init(|| Arc::new(Semaphore::new(MAX_PUBLIC_EXPLORER_REQUESTS)));
+        match try_acquire_public_explorer_permit(limiter) {
+            Some(permit) => Some(permit),
+            None => {
+                return Ok(http_response(
+                    "429 Too Many Requests",
+                    "application/json",
+                    br#"{"error":"public explorer is busy"}"#,
+                    cors_origin.as_deref(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     match (method, target.path.as_str()) {
         ("OPTIONS", _) => Ok(http_response(
             "204 No Content",
@@ -1057,7 +1078,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             let overview = match explorer_api::build_overview(
                 &config.datadir,
                 config.snapshot_dir.as_deref(),
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 config.bitcoin_index_client.as_ref(),
             )
             .await
@@ -1088,7 +1109,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
             };
             let page = match explorer_api::fork_block_page(
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 cursor,
                 limit,
             )
@@ -1115,7 +1136,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
             };
             let page = match explorer_api::fork_block_transactions(
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 block_hash,
                 cursor,
                 limit,
@@ -1142,7 +1163,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 return Ok(bad_explorer_request(cors_origin.as_deref()));
             }
             let transaction = match explorer_api::fork_transaction_detail(
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 txid,
             )
             .await
@@ -1161,6 +1182,13 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             }
         }
         ("GET", path) if path.starts_with("/api/v1/fork/addresses/") => {
+            if config
+                .fork_explorer_client
+                .as_ref()
+                .is_some_and(|client| !client.supports_address_index())
+            {
+                return Ok(explorer_not_implemented(cors_origin.as_deref()));
+            }
             let address_path = &path["/api/v1/fork/addresses/".len()..];
             let (address, resource) =
                 if let Some(address) = address_path.strip_suffix("/transactions") {
@@ -1179,7 +1207,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                         return Ok(bad_explorer_request(cors_origin.as_deref()));
                     }
                     match explorer_api::fork_address_summary(
-                        config.fork_chain_client.as_ref(),
+                        config.fork_explorer_client.as_ref(),
                         address,
                     )
                     .await
@@ -1202,7 +1230,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                         Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
                     };
                     match explorer_api::fork_address_transactions(
-                        config.fork_chain_client.as_ref(),
+                        config.fork_explorer_client.as_ref(),
                         address,
                         cursor,
                         limit,
@@ -1227,7 +1255,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                         Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
                     };
                     match explorer_api::fork_address_utxos(
-                        config.fork_chain_client.as_ref(),
+                        config.fork_explorer_client.as_ref(),
                         address,
                         cursor,
                         limit,
@@ -1533,7 +1561,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             let overview = match explorer_api::build_overview(
                 &config.datadir,
                 config.snapshot_dir.as_deref(),
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 config.bitcoin_index_client.as_ref(),
             )
             .await
@@ -1554,16 +1582,18 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 Ok(height) => height,
                 Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
             };
-            let block =
-                match explorer_api::fork_block_at_height(config.fork_chain_client.as_ref(), height)
-                    .await
-                {
-                    Ok(block) => block,
-                    Err(err) => {
-                        eprintln!("warning: failed to build public fork height detail: {err:#}");
-                        return Ok(explorer_unavailable(cors_origin.as_deref()));
-                    }
-                };
+            let block = match explorer_api::fork_block_at_height(
+                config.fork_explorer_client.as_ref(),
+                height,
+            )
+            .await
+            {
+                Ok(block) => block,
+                Err(err) => {
+                    eprintln!("warning: failed to build public fork height detail: {err:#}");
+                    return Ok(explorer_unavailable(cors_origin.as_deref()));
+                }
+            };
             match block {
                 Some(block) => json_http_response("200 OK", &block, cors_origin.as_deref()),
                 None => Ok(explorer_not_found(cors_origin.as_deref())),
@@ -1578,7 +1608,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
                 return Ok(bad_explorer_request(cors_origin.as_deref()));
             }
             let block = match explorer_api::fork_block_summary(
-                config.fork_chain_client.as_ref(),
+                config.fork_explorer_client.as_ref(),
                 block_hash,
             )
             .await
@@ -1743,7 +1773,7 @@ fn bitcoin_block_transaction_cursor(query: &BTreeMap<String, String>) -> Result<
 }
 
 async fn explorer_inherited_tip(config: &DashboardApiConfig) -> Option<u64> {
-    let client = config.fork_chain_client.as_ref()?;
+    let client = config.fork_explorer_client.as_ref()?;
     client
         .status()
         .await
@@ -1779,6 +1809,15 @@ fn explorer_not_found(cors_origin: Option<&str>) -> Vec<u8> {
         "404 Not Found",
         "application/json",
         br#"{"error":"explorer object not found"}"#,
+        cors_origin,
+    )
+}
+
+fn explorer_not_implemented(cors_origin: Option<&str>) -> Vec<u8> {
+    http_response(
+        "501 Not Implemented",
+        "application/json",
+        br#"{"error":"fork address index not configured"}"#,
         cors_origin,
     )
 }
@@ -2083,6 +2122,10 @@ fn current_unix_timestamp() -> Result<i64> {
     i64::try_from(duration.as_secs()).context("system timestamp does not fit in i64")
 }
 
+fn try_acquire_public_explorer_permit(limiter: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    Arc::clone(limiter).try_acquire_owned().ok()
+}
+
 #[derive(Debug, Clone)]
 struct ConnectionLimiter {
     max_connections: usize,
@@ -2342,6 +2385,17 @@ mod tests {
         let replacement = limiter.try_acquire(first_ip).unwrap();
         drop(second);
         drop(replacement);
+    }
+
+    #[test]
+    fn public_explorer_limiter_fails_fast_when_capacity_is_exhausted() {
+        let limiter = Arc::new(Semaphore::new(2));
+        let first = try_acquire_public_explorer_permit(&limiter).unwrap();
+        let second = try_acquire_public_explorer_permit(&limiter).unwrap();
+        assert!(try_acquire_public_explorer_permit(&limiter).is_none());
+        drop(first);
+        assert!(try_acquire_public_explorer_permit(&limiter).is_some());
+        drop(second);
     }
 
     #[test]
@@ -2879,12 +2933,14 @@ mod tests {
         claim_owner_id: &str,
     ) -> MinerRegistration {
         MinerRegistration {
+            version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
             miner_id: miner_id.to_string(),
             idena_address: idena_address.to_string(),
             btc_payout_script_hex:
                 "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
             claim_owner_pubkey_hex: claim_owner_id.to_string(),
             mining_pubkey_hex: "02".repeat(33),
+            registry_anchor: None,
             idena_signature_hex: "00".repeat(65),
             mining_signature_hex: "00".repeat(64),
         }
@@ -2906,7 +2962,7 @@ mod tests {
             idena_rpc_url: None,
             idena_api_key_file: None,
             public_explorer: false,
-            fork_chain_client: None,
+            fork_explorer_client: None,
             bitcoin_index_client: None,
             governance_state_file: None,
         }

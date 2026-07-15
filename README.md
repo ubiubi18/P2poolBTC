@@ -3,7 +3,9 @@
 P2poolBTC is a no-value Bitcoin P2Pool-style experiment with Idena proof-of-human-work accounting.
 It explores a voluntary mining layer where every node can replay the same sharechain, Idena snapshots, reward scores, payout schedules, and vault claims locally.
 
-Bitcoin and Idena stay unchanged. This repo builds the experimental coordination layer between them.
+Bitcoin mainnet and Idena consensus stay unchanged. This repo builds the
+experimental coordination layer and a separately identified no-value Bitcoin
+Core fork used by Experiment 1.
 
 `compatibility/stack-lock.json` pins the reviewed Idena candidate consumed by
 PoHW. Run `python3 scripts/pohw-idena-compatibility-lock.py` before deployment;
@@ -20,7 +22,23 @@ The idea is simple:
 
 This repo is not a production Bitcoin node, not a token bridge, and not ready for real funds.
 
-> **Experiment 0 has a one-way mainnet handoff.** On nodes that explicitly
+> **Experiment 1 is the current full-consensus successor.** It uses a pinned
+> Bitcoin Core v31.1 patch, supports all upstream transaction and script paths,
+> and explicitly permits inherited-mainnet UTXO spending under a mixed-input
+> replay rule. Experiment 0 remains immutable and coinbase-only. Read
+> [Experiment 1](EXPERIMENT-1.md) before building or connecting a miner.
+
+> **Bitcoin and Idena risk remain real.** Fork coins have no promised value,
+> but inherited Bitcoin scripts use mainnet keys; exposing one can lose real
+> BTC. A participant saying that an address is empty does not make key reuse
+> safe: verify the mainnet history independently and use a fork-only wallet for
+> ordinary testing. Idena is not a disposable testnet: signatures are public
+> and delegation, stake, validation, transactions, and contracts can change
+> real IDNA balances or identity state. Never give this software a Bitcoin or
+> Idena private key.
+
+> **Archived Experiment 0 only: one-way mainnet handoff.** This mechanism is
+> not part of Experiment 1. On Experiment 0 nodes that explicitly
 > install and arm the handoff controller, reaching 20 distinct verified Idena
 > identities with accepted work on the active sharechain stops the no-value
 > fork, starts payout-aware mining against Bitcoin mainnet, and deletes that
@@ -30,41 +48,87 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 
 ## Live Preview
 
-These screenshots were captured from the live no-value Experiment 0 seed on
-2026-07-14. They contain public test data, not a payout or value claim. The
-first bootstrap smoke block remains an immutable zero-value coinbase. Later
-blocks use the live fork subsidy, deterministic payout schedule, and `POHW1`
-commitment. These are experimental fork coins, not Bitcoin mainnet funds.
+These are the intended sanitized Experiment 1 dashboard views. They contain
+aggregate public experiment data only and must not contain identities, wallet
+addresses, peer addresses, RPC credentials, signatures, or block hashes. A
+screenshot proves only what the UI rendered at capture time; it is not proof
+of consensus, ownership, payout, or value. Verify the local Core and
+sharechain state as described in the
+[Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md).
+
+Experiment 1 fork coins and inherited fork balances have no promised value.
+Inherited outputs remain controlled by Bitcoin-mainnet keys, and the
+mixed-input replay rule does not make key reuse safe. Use fresh fork-only keys
+for ordinary testing.
 
 ### Network overview
 
-![Live P2poolBTC Bitcoin fork, sharechain, and Idena overview](docs/assets/p2poolbtc-live-overview.jpg)
+![Sanitized P2poolBTC Experiment 1 network overview](docs/assets/experiment-1-overview.png)
 
 ### Active fork blocks
 
-![Live Experiment 0 fork blocks and PoHW commitments](docs/assets/p2poolbtc-live-fork-blocks.jpg)
-
-### Payout-aware fork block
-
-![Payout-aware Experiment 0 fork block with a 3.125 BTC subsidy and PoHW commitment](docs/assets/p2poolbtc-payout-aware-fork-block.jpg)
+![Sanitized Experiment 1 fork-block view](docs/assets/experiment-1-fork-blocks.png)
 
 ### Live sharechain
 
-![Live P2poolBTC Experiment 0 sharechain](docs/assets/p2poolbtc-live-sharechain.jpg)
+![Sanitized P2poolBTC Experiment 1 sharechain](docs/assets/experiment-1-sharechain.png)
+
+Live acceptance on 2026-07-15 used bounded, low-priority loopback mining
+attempts on the dedicated host. Each accepted submission advanced both the
+Experiment 1 Core height and the sharechain stored-share count by one. The
+bootstrap timer performs at most one ten-second attempt every ten minutes under
+a 5% CPU quota and skips all hashing after Core reports the normal-difficulty
+handoff. The adapter otherwise waits idle when no miner is connected. The
+SD-only Pi remained observer-only throughout the check.
 
 ![PoHW pool flow: solve flips, join p2pool, mine Bitcoin, decentralize Bitcoin mining](docs/assets/pohw-flow.png)
 
 ## Start Here
 
-If you want to help test, start with the
-[Community Experiment 0 Guide](COMMUNITY-README.md). It gives the explicit
-five-step path to reproduce the build, join the existing experiment, connect an
-Idena identity, produce a readiness report, and report problems safely.
+For new full transaction, inherited UTXO, wallet, and FROST testing, use the
+[Experiment 1 runbook](EXPERIMENT-1.md). It builds the fork from exact Bitcoin
+Core source and keeps the heavy chainstate on the dedicated host, not the Pi.
+
+If you want to join the current network, use the
+[Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md). It builds both Core
+and P2poolBTC from exact source, supports a pruned miner node without an
+explorer index, registers an Idena identity by message signature, and verifies
+Core, sharechain, and block progress locally. No coordinator-signed installer
+or lead-developer release key is trusted.
+
+Experiment 1 runs in its own source-built Bitcoin Core profile. Always pass
+`-chain=pohw` and use the dedicated fork datadir; never point the experiment at
+a Bitcoin-mainnet wallet or datadir. Its fork height and fork-only wallet
+balance are visible through that Core instance. A wallet shows only outputs
+controlled by its descriptors, so a dashboard or explorer balance is not
+automatically a Core wallet balance.
+
+The current SD-only Pi is an observer-only, low-load endpoint. It does not run
+Experiment 1 Core, gossip, Stratum, or mining. Those services run on the
+dedicated Hetzner host. The Stratum adapter waits idle for miners and is not a
+continuous CPU miner. A separately gated Hetzner-only bootstrap timer runs one
+bounded attempt every ten minutes, refuses Raspberry Pi hardware, and stops
+attempting after the consensus handoff. See the
+[Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) for its exact limits
+and disable command.
+
+The old Experiment 0 fork was implemented outside Bitcoin Core and therefore
+does not appear in Bitcoin Core Qt or `bitcoin-cli getbalance`. This historical
+limitation does not describe Experiment 1.
+
+The old [Community Experiment 0 Guide](COMMUNITY-README.md) is retained only
+for reproducing the frozen coinbase-only predecessor. Do not use its launcher
+or activation values for Experiment 1.
+
+The detailed trust boundary and current limitations are in
+[Source-First Onboarding](docs/source-first-onboarding.md).
 
 [Beta Testing P2poolBTC](BETA-TESTING.md) explains the tester roles and safety
 boundaries in more detail.
 
-Use [Experiment 0](EXPERIMENT-0.md) as the detailed operator runbook once you are ready to run a multi-node test.
+[Experiment 0](EXPERIMENT-0.md) documents the frozen predecessor for historical
+reproduction only. Do not use its activation, launcher, or handoff instructions
+to join the current Experiment 1 network.
 
 ## Status
 
@@ -75,6 +139,9 @@ Working prototype pieces:
 - complete Experiment 0 coinbase-only fork consensus with durable replay,
   cumulative-work fork choice, bootstrap difficulty, irreversible Bitcoin-2016
   difficulty handoff, peer synchronization, and a loopback control RPC,
+- pinned Experiment 1 Bitcoin Core v31.1 full-consensus fork with all upstream
+  script paths, wallet/PSBT support, inherited UTXO spending, mixed-input replay
+  isolation, fork-specific network identity, and a permanent difficulty-handoff marker,
 - live fork templates and fork-only block submission wired into the Stratum adapter,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
@@ -97,8 +164,8 @@ Working prototype pieces:
 
 Not done yet:
 
-- general post-fork transaction/script and UTXO consensus,
-- inherited UTXO replay protection and spending,
+- independent external review and multi-node soak testing of Experiment 1,
+- a public hash-verified fast-sync snapshot for later Experiment 1 participants,
 - production P2Pool fork-choice and anti-eclipse logic,
 - long-running networked ChillDKG/FROST signer daemon,
 - complete idena-go reward extraction for every reward source,
@@ -110,6 +177,7 @@ Not done yet:
 crates/pohw-core          consensus/accounting/vault primitives
 crates/p2pool-node        local node, gossip, dashboard API, Bitcoin RPC checks
 crates/idena-lite-indexer local idena-go snapshot builder
+crates/pohw-agent        source verifier and loopback community join wizard
 ui/pohw-dashboard         React dashboard
 contracts/                Idena WASM snapshot registry
 deploy/systemd            Raspberry Pi service templates
@@ -122,16 +190,18 @@ docs/                     design artifacts
 | Component | Default | Purpose |
 | --- | --- | --- |
 | Gossip mesh | `127.0.0.1:40406` | Signed sharechain envelope exchange |
-| Fork control RPC | `127.0.0.1:40408` | Activation-bound templates and block submission |
-| Fork P2P | disabled | Validated fork-block synchronization |
+| Experiment 1 Core P2P | `127.0.0.1:40412` | Full-consensus fork synchronization |
+| Experiment 1 Core RPC | `127.0.0.1:40414` | Loopback-only fork templates, submission, and wallet RPC |
+| Legacy Experiment 0 fork control RPC | `127.0.0.1:40408` | Archived custom-fork templates and submission |
+| Legacy Experiment 0 fork P2P | disabled | Archived custom-fork synchronization |
 | Mining adapter | `127.0.0.1:3333` | Local Stratum v1 frontend |
 | Dashboard UI | `127.0.0.1:5176` | Browser UI, tunnel from a workstation |
 | Dashboard API | `127.0.0.1:40407` | Read-only local status |
 | Bitcoin history index | `127.0.0.1:3002` | Optional host-only Esplora HTTP source |
 | Dashboard dev server | Vite | Local frontend development |
 | Idena RPC | `http://127.0.0.1:9009` | Local `idena-go` source |
-| Bitcoin RPC | `http://127.0.0.1:8332` | Local Bitcoin Core source |
-| Sharechain data | `.pohw-p2pool/` or `/mnt/ssd/pohw-p2pool` | Local replay logs |
+| Bitcoin mainnet RPC | `http://127.0.0.1:8332` | Local mainnet source for explicitly separate tools |
+| Sharechain data | `.pohw-p2pool/` or `/srv/sharechain/...` | Local replay logs |
 | Snapshots | `./snapshots/` or `/mnt/ssd/pohw-p2pool/snapshots` | Verified Idena snapshot JSON |
 
 Keep Bitcoin and Idena RPC on loopback. Expose gossip, dashboard, or Stratum only to trusted peers, with firewall rules. Non-loopback dashboard needs a token; non-loopback Stratum needs a protected password file.
@@ -147,12 +217,14 @@ from the history index.
 
 ## Community Experiment
 
-Start with the [Community Experiment 0 Guide](COMMUNITY-README.md) when
-multiple people help. It gives the reproducible five-step join path and the
-safe issue-reporting workflow. [Beta Testing P2poolBTC](BETA-TESTING.md)
-describes the available tester roles.
+Start with the [Community Experiment 1 Guide](COMMUNITY-EXPERIMENT-1.md) when
+joining the current network. It gives the reproducible source-first join path,
+pruned-node option, local success ladder, and safe issue-reporting workflow.
+[Beta Testing P2poolBTC](BETA-TESTING.md) describes the available tester roles.
 
-Use [Experiment 0](EXPERIMENT-0.md) for the complete no-value scope, env template, preflight, miner registration, snapshot voting, report bundles, deterministic report comparison, success criteria, and stop conditions for a decentralized dry run.
+[Experiment 0](EXPERIMENT-0.md) retains the frozen predecessor's scope,
+preflight, report, and stop procedures for historical reproduction. Its
+activation and services are not the current community join path.
 
 Build a participant source package:
 
@@ -191,8 +263,8 @@ Set one local account selector (`--dashboard-idena-address`, `--dashboard-miner-
 Run the UI:
 
 ```sh
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard install
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard install
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard dev
 ```
 
 When both dashboard services run on the Pi, keep them bound to Pi loopback and open an SSH tunnel from your workstation:
@@ -203,22 +275,16 @@ scripts/pohw-dashboard-tunnel.sh <pi-ssh-host>
 
 Then open `http://127.0.0.1:5176/` locally. The tunnel forwards workstation `127.0.0.1:5176` to the Pi UI and workstation `127.0.0.1:40407` to the Pi dashboard API, without exposing either service to the WLAN or Internet.
 
-If you deliberately run only the UI on your workstation while the dashboard API runs on the Pi over your WLAN, point the local UI at the Pi API and pass the dashboard token:
-
-```sh
-PI_POHW_API=http://<pi-wlan-ip>:40407/dashboard.json
-
-VITE_POHW_DASHBOARD_API_URL="$PI_POHW_API" \
-VITE_POHW_DASHBOARD_API_TOKEN='<dashboard-token-from-your-local-secret-file>' \
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
-```
-
-Keep the Vite UI bound to loopback. `VITE_POHW_DASHBOARD_API_TOKEN` is visible to that browser session.
+Do not put the dashboard bearer token in a Vite environment variable or a
+compiled UI bundle. The production wrapper reads it from the configured token
+file and writes a short-lived runtime browser configuration only while both the
+UI and API are bound to loopback. Use the SSH tunnel above for remote access;
+do not send the token over an unencrypted WLAN connection.
 
 The dashboard intentionally shows an offline state if the local API is unavailable. Demo data is opt-in:
 
 ```sh
-VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@10.13.1 --dir ui/pohw-dashboard dev
+VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@11.11.0 --dir ui/pohw-dashboard dev
 ```
 
 ## Core Commands
@@ -431,6 +497,15 @@ cargo run -p p2pool-node -- prepare-miner-registration \
 
 The first run creates protected local keys, derives a default Taproot payout script, and prints the Idena ownership challenge. After signing that challenge in Idena, rerun with `--idena-signature-hex`, plus `--append` or `--peer-addr` when ready to publish the registration.
 
+An experimental ownerless Idena miner-registry profile is also implemented but
+not deployed or activated. It replaces developer-signed admission packets with
+a public contract timestamp, binds the complete anchor policy into version-3
+work templates, and uses a two-phase challenge so the signed registration
+includes the finalized contract receipt. Build, threat limits, registration,
+activation, and rollback are documented in
+[docs/idena-miner-registry.md](docs/idena-miner-registry.md). Do not use the
+one-step command above after that policy is activated.
+
 For Experiment 0, prefer the env-file wrapper:
 
 ```sh
@@ -506,6 +581,7 @@ cargo run -p p2pool-node -- publish-bitcoin-work-template \
   --datadir .pohw-p2pool \
   --miner-id alice \
   --bitcoin-header-hex <80-byte-header-hex> \
+  --share-target <32-byte-target-hex> \
   --mining-secret-key-file .pohw-p2pool/keys/alice/mining.key \
   --node-secret-key-file .pohw-p2pool/keys/alice/gossip-node.key \
   --validate-with-bitcoin-rpc \
@@ -772,7 +848,8 @@ cargo run -p p2pool-node -- propose-payout-schedule \
   --direct-limit 50
 ```
 
-Confirm a mined fork block payout with Bitcoin Core:
+Confirm a mined Bitcoin-mainnet block payout after an explicitly armed
+mainnet handoff:
 
 ```sh
 cargo run -p p2pool-node -- confirm-payout-from-block \
@@ -781,7 +858,7 @@ cargo run -p p2pool-node -- confirm-payout-from-block \
   --payout-schedule-file ./payout-schedule.json \
   --pohw-commitment-file ./pohw-commitment.json \
   --rpc-cookie-file ~/.bitcoin/.cookie \
-  --block-hash <fork-block-hash>
+  --block-hash <bitcoin-mainnet-block-hash>
 ```
 
 This verifies the coinbase outputs and `POHW1` commitment, then credits the replay log from the confirmed output total. Supplying `--reward-sats` is optional and must match the verified total.
@@ -792,7 +869,7 @@ Run the automatic confirmer:
 mkdir -p .pohw-p2pool/payout-candidates
 cat > .pohw-p2pool/payout-candidates/block-000001.json <<'JSON'
 {
-  "block_hash": "<fork-block-hash>",
+  "block_hash": "<bitcoin-mainnet-block-hash>",
   "snapshot_file": "../../snapshot.json",
   "payout_schedule_file": "../../payout-schedule.json",
   "pohw_commitment_file": "../../pohw-commitment.json",
@@ -806,7 +883,13 @@ cargo run -p p2pool-node -- run-payout-confirmer \
   --rpc-cookie-file ~/.bitcoin/.cookie
 ```
 
-Use `--once` for a single scan. The confirmer does not trust the candidate file: it verifies Bitcoin Core block confirmations, coinbase outputs, the `POHW1` commitment, and local replay before appending `confirmed-payouts.ndjson`. Relative paths in a candidate are resolved from the candidate file directory.
+Use `--once` for a single scan. This command is not an Experiment 0 fork
+viewer: it queries Bitcoin Core for a Bitcoin-mainnet block produced only
+after the separately armed mainnet handoff. The confirmer does not trust the
+candidate file: it verifies Bitcoin Core block confirmations, coinbase
+outputs, the `POHW1` commitment, and local replay before appending
+`confirmed-payouts.ndjson`. Relative paths in a candidate are resolved from
+the candidate file directory.
 
 Validate a vault input with Bitcoin Core:
 
@@ -906,8 +989,8 @@ Install gossip mesh, dashboard API, and optional mining adapter:
 
 ```sh
 cargo build --release -p p2pool-node
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard install
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard install
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 sudo install -d -m 755 -o root -g root /etc/pohw
 sudo install -m 600 -o root -g root deploy/pohw-experiment.env.example /etc/pohw/p2pool.env
 sudoedit /etc/pohw/p2pool.env
@@ -1280,6 +1363,12 @@ Important boundaries:
 - Do not use size-only verified Bitcoin chainstate snapshots. If using AssumeUTXO, import through Bitcoin Core so the built-in snapshot metadata/hash is validated.
 - The project intentionally has no transferable iBTC token, no user BTC deposits, and no secondary-market claim object.
 - Replay protection is required before inherited Bitcoin UTXO spending can be meaningful on a fork.
+- Experiment 1 implements that replay protection and permits inherited spends;
+  it does not protect a reused or disclosed private key. Treat every inherited
+  script as a possible real-Bitcoin key boundary.
+- Idena eligibility is read from the live Idena chain. Registration should sign
+  only the displayed domain-separated ownership challenge; never import an
+  Idena node key, identity backup, password, or API key into P2poolBTC.
 
 ## Checks
 
@@ -1289,7 +1378,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m unittest discover -s pohw_idena_rpc/tests -p 'test_*.py' -v
-corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 corepack pnpm@10.13.1 --dir contracts/idena-snapshot-registry test
 bash -n scripts/*.sh
 gitleaks git . --redact

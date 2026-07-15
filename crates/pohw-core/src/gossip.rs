@@ -6,10 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 pub const GOSSIP_PROTOCOL_VERSION: &str = "POHW_GOSSIP_1";
+pub const NETWORK_BOUND_GOSSIP_PROTOCOL_VERSION: &str = "POHW_GOSSIP_2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GossipEnvelope {
     pub protocol_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
     pub peer_pubkey_xonly_hex: String,
     pub created_at_unix: i64,
     pub nonce_hex: String,
@@ -26,10 +29,28 @@ struct GossipSigningPayload {
     message_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct NetworkBoundGossipSigningPayload {
+    protocol_version: String,
+    network_id: String,
+    peer_pubkey_xonly_hex: String,
+    created_at_unix: i64,
+    nonce_hex: String,
+    message_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GossipError {
     #[error("unsupported gossip protocol version {0}")]
     UnsupportedProtocol(String),
+    #[error("legacy gossip protocol must not carry a network id")]
+    UnexpectedNetworkId,
+    #[error("network-bound gossip protocol requires a network id")]
+    MissingNetworkId,
+    #[error("invalid gossip network id: {0}")]
+    InvalidNetworkId(String),
+    #[error("gossip envelope network {actual} does not match expected network {expected}")]
+    NetworkMismatch { expected: String, actual: String },
     #[error("invalid gossip peer pubkey: {0}")]
     InvalidPeerPubkey(String),
     #[error("invalid gossip nonce: {0}")]
@@ -55,6 +76,27 @@ impl GossipEnvelope {
     ) -> Result<Self, GossipError> {
         let mut envelope = Self {
             protocol_version: GOSSIP_PROTOCOL_VERSION.to_string(),
+            network_id: None,
+            peer_pubkey_xonly_hex: peer_pubkey_xonly_hex.into().to_ascii_lowercase(),
+            created_at_unix,
+            nonce_hex: nonce_hex.into().to_ascii_lowercase(),
+            message,
+            signature_hex: None,
+        };
+        envelope.normalize_and_validate_static()?;
+        Ok(envelope)
+    }
+
+    pub fn unsigned_for_network(
+        network_id: impl Into<String>,
+        peer_pubkey_xonly_hex: impl Into<String>,
+        created_at_unix: i64,
+        nonce_hex: impl Into<String>,
+        message: SharechainMessage,
+    ) -> Result<Self, GossipError> {
+        let mut envelope = Self {
+            protocol_version: NETWORK_BOUND_GOSSIP_PROTOCOL_VERSION.to_string(),
+            network_id: Some(network_id.into()),
             peer_pubkey_xonly_hex: peer_pubkey_xonly_hex.into().to_ascii_lowercase(),
             created_at_unix,
             nonce_hex: nonce_hex.into().to_ascii_lowercase(),
@@ -76,16 +118,29 @@ impl GossipEnvelope {
     }
 
     pub fn signing_hash(&self) -> [u8; 32] {
-        sha256_tagged(
-            b"POHW1_GOSSIP_SIGNATURE",
-            &canonical_json(&GossipSigningPayload {
+        let payload = if self.protocol_version == NETWORK_BOUND_GOSSIP_PROTOCOL_VERSION {
+            canonical_json(&NetworkBoundGossipSigningPayload {
+                protocol_version: self.protocol_version.clone(),
+                network_id: self
+                    .network_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+                peer_pubkey_xonly_hex: self.peer_pubkey_xonly_hex.to_ascii_lowercase(),
+                created_at_unix: self.created_at_unix,
+                nonce_hex: self.nonce_hex.to_ascii_lowercase(),
+                message_hash: self.message.message_hash(),
+            })
+        } else {
+            canonical_json(&GossipSigningPayload {
                 protocol_version: self.protocol_version.clone(),
                 peer_pubkey_xonly_hex: self.peer_pubkey_xonly_hex.to_ascii_lowercase(),
                 created_at_unix: self.created_at_unix,
                 nonce_hex: self.nonce_hex.to_ascii_lowercase(),
                 message_hash: self.message.message_hash(),
-            }),
-        )
+            })
+        };
+        sha256_tagged(b"POHW1_GOSSIP_SIGNATURE", &payload)
     }
 
     pub fn sign(&mut self, keypair: &Keypair) -> Result<(), GossipError> {
@@ -154,11 +209,36 @@ impl GossipEnvelope {
         Ok(())
     }
 
+    pub fn verify_network(&self, expected_network_id: &str) -> Result<(), GossipError> {
+        let expected = normalize_gossip_network_id(expected_network_id)?;
+        let mut envelope = self.clone();
+        envelope.normalize_and_validate_static()?;
+        let actual = envelope.network_id.ok_or(GossipError::MissingNetworkId)?;
+        if actual != expected {
+            return Err(GossipError::NetworkMismatch { expected, actual });
+        }
+        Ok(())
+    }
+
     fn normalize_and_validate_static(&mut self) -> Result<(), GossipError> {
-        if self.protocol_version != GOSSIP_PROTOCOL_VERSION {
-            return Err(GossipError::UnsupportedProtocol(
-                self.protocol_version.clone(),
-            ));
+        match self.protocol_version.as_str() {
+            GOSSIP_PROTOCOL_VERSION => {
+                if self.network_id.is_some() {
+                    return Err(GossipError::UnexpectedNetworkId);
+                }
+            }
+            NETWORK_BOUND_GOSSIP_PROTOCOL_VERSION => {
+                let network_id = self
+                    .network_id
+                    .as_deref()
+                    .ok_or(GossipError::MissingNetworkId)?;
+                self.network_id = Some(normalize_gossip_network_id(network_id)?);
+            }
+            _ => {
+                return Err(GossipError::UnsupportedProtocol(
+                    self.protocol_version.clone(),
+                ));
+            }
         }
         self.peer_pubkey_xonly_hex =
             normalize_hex_32(&self.peer_pubkey_xonly_hex, GossipError::InvalidPeerPubkey)?;
@@ -170,6 +250,19 @@ impl GossipEnvelope {
         }
         Ok(())
     }
+}
+
+pub fn normalize_gossip_network_id(value: &str) -> Result<String, GossipError> {
+    let value = value
+        .strip_prefix("0x")
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if value.len() != 64 || !value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GossipError::InvalidNetworkId(
+            "value must be 32 bytes encoded as 64 hex characters".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn normalize_hex_32<F>(value: &str, err: F) -> Result<String, GossipError>
@@ -225,6 +318,73 @@ mod tests {
         envelope
             .verify_at(1_782_800_001, 60, 3_600)
             .expect("fresh signed envelope must verify");
+    }
+
+    #[test]
+    fn signed_network_bound_gossip_envelope_verifies_only_for_its_network() {
+        let keypair = keypair(42);
+        let network_id = "ab".repeat(32);
+        let mut envelope = GossipEnvelope::unsigned_for_network(
+            &network_id,
+            keypair.x_only_public_key().0.to_string(),
+            1_782_800_000,
+            "24".repeat(32),
+            message(),
+        )
+        .unwrap();
+        envelope.sign(&keypair).unwrap();
+
+        envelope
+            .verify_at(1_782_800_001, 60, 3_600)
+            .expect("fresh signed network-bound envelope must verify");
+        envelope
+            .verify_network(&network_id.to_ascii_uppercase())
+            .expect("network id comparison is normalized");
+        assert!(matches!(
+            envelope.verify_network(&"cd".repeat(32)),
+            Err(GossipError::NetworkMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn network_id_is_covered_by_the_gossip_signature() {
+        let keypair = keypair(43);
+        let mut envelope = GossipEnvelope::unsigned_for_network(
+            "ab".repeat(32),
+            keypair.x_only_public_key().0.to_string(),
+            1_782_800_000,
+            "25".repeat(32),
+            message(),
+        )
+        .unwrap();
+        envelope.sign(&keypair).unwrap();
+        envelope.network_id = Some("cd".repeat(32));
+
+        assert!(matches!(
+            envelope.verify_signature(),
+            Err(GossipError::InvalidSignature(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_gossip_serialization_remains_network_id_free() {
+        let keypair = keypair(44);
+        let mut envelope = GossipEnvelope::unsigned(
+            keypair.x_only_public_key().0.to_string(),
+            1_782_800_000,
+            "26".repeat(32),
+            message(),
+        )
+        .unwrap();
+        envelope.sign(&keypair).unwrap();
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(!json.contains("network_id"));
+        envelope.verify_signature().unwrap();
+        assert!(matches!(
+            envelope.verify_network(&"ab".repeat(32)),
+            Err(GossipError::MissingNetworkId)
+        ));
     }
 
     #[test]

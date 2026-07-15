@@ -45,6 +45,100 @@ jobs:
           python-version: "3.12"
       - name: Verify Idena legacy compatibility lock
         run: python scripts/pohw-idena-compatibility-lock.py
+      - name: Verify Experiment 1 manifest and provenance files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/pohw-experiment-1-manifest.py verify \
+            compatibility/experiment-1-full-consensus.json --repo-root .
+          required=(
+            EXPERIMENT-1.md
+            SECURITY.md
+            compatibility/experiment-1-full-consensus.json
+            compatibility/governance-build-plan-v1.json
+            compatibility/governance-fork-lock.json
+            compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
+            vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch
+            scripts/pohw-experiment-1-manifest.py
+            scripts/pohw-bootstrap-bitcoin-core-fork.sh
+            scripts/pohw-install-experiment-1-adapter.sh
+            scripts/pohw-activate-experiment-1-profile.py
+            scripts/pohw-host-firewall.py
+            scripts/pohw-governance-runtime-gate.py
+            deploy/bitcoin/bitcoin-pohw-experiment-1.conf.example
+            deploy/pohw-experiment-1.env.example
+            deploy/systemd/bitcoind-pohw-experiment-1.service
+            deploy/systemd/pohw-gossip-experiment-1.conf
+            deploy/systemd/pohw-mining-experiment-1.conf
+            deploy/systemd/pohw-host-firewall.service
+            deploy/nftables/pohw-host-firewall.json.example
+            tests/test_pohw_experiment_1.py
+            tests/test_pohw_install_experiment_1_adapter.py
+            tests/test_pohw_experiment_1_profile.py
+            tests/test_pohw_bootstrap_ci_security.py
+            tests/test_pohw_host_firewall.py
+            tests/test_pohw_governance_runtime_gate.py
+          )
+          git ls-files --error-unmatch -- "${required[@]}" >/dev/null
+          for path in "${required[@]}"; do test -s "$path"; done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("compatibility/experiment-1-full-consensus.json").read_text())
+          activation = manifest["activation_id"]
+          datadir = (
+              "/srv/sharechain/"
+              + manifest["network"]["data_subdirectory"]
+              + "-"
+              + activation[:8]
+          )
+          values = {}
+          for line in Path("deploy/pohw-experiment-1.env.example").read_text().splitlines():
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              if key in values:
+                  raise SystemExit(f"duplicate Experiment 1 environment key: {key}")
+              values[key] = value
+          expected = {
+              "POHW_GOSSIP_NETWORK_ID": activation,
+              "POHW_DATADIR": datadir,
+              "POHW_STRATUM_BLOCK_CANDIDATE_DIR": datadir + "/block-candidates",
+              "POHW_PAYOUT_CANDIDATE_DIR": datadir + "/payout-candidates",
+          }
+          for key, value in expected.items():
+              if values.get(key) != value:
+                  raise SystemExit(f"Experiment 1 environment example drift: {key}")
+          PY
+      - name: Validate governance build plan and local lock digests
+        run: |
+          python3 scripts/pohw-governance-build-evidence.py validate-plan \
+            --plan compatibility/governance-build-plan-v1.json
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("compatibility/governance-build-plan-v1.json").read_text())
+          checked = 0
+          for target in plan["targets"]:
+              for lock in target["dependencyLocks"]:
+                  if lock["repository"] != "P2poolBTC":
+                      continue
+                  path = Path(lock["path"])
+                  if path.is_absolute() or ".." in path.parts or not path.is_file():
+                      raise SystemExit(f"unsafe or missing P2poolBTC lock path: {path}")
+                  actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                  if actual != lock["sha256"]:
+                      raise SystemExit(
+                          f"governance build-plan lock drift: {target['id']}:{path}"
+                      )
+                  checked += 1
+          if checked == 0:
+              raise SystemExit("governance build plan contains no local lock digests")
+          print(f"verified {checked} local governance build-plan lock digests")
+          PY
       - name: Test host tooling
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test reward indexer
@@ -89,6 +183,142 @@ jobs:
         run: corepack pnpm@11.11.0 --dir contracts/idena-code-governance test
       - name: Verify governance contract lock
         run: python3 scripts/pohw-governance-runtime-gate.py --verify-artifact-only
+
+  governance-production-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate locked component revisions
+        id: governance_lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/governance-components.tsv" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          lock = json.loads(Path("compatibility/governance-fork-lock.json").read_text())
+          commit = re.compile(r"^[0-9a-f]{40}$")
+          components = lock.get("components")
+          if not isinstance(components, list) or not components:
+              raise SystemExit("governance lock has no components")
+          lines = []
+          seen = set()
+          for component in components:
+              name = component.get("name")
+              repository = component.get("repository")
+              revision = component.get("commit")
+              if (
+                  not isinstance(name, str)
+                  or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name)
+                  or name in seen
+                  or not isinstance(repository, str)
+                  or not re.fullmatch(
+                      r"https://github\.com/ubiubi18/[A-Za-z0-9_.-]+\.git",
+                      repository,
+                  )
+                  or not isinstance(revision, str)
+                  or not commit.fullmatch(revision)
+              ):
+                  raise SystemExit(f"invalid or moving component pin: {name!r}")
+              seen.add(name)
+              lines.append(f"{name}\t{repository}\t{revision}\n")
+          Path(sys.argv[1]).write_text("".join(lines), encoding="utf-8")
+          go_version = lock.get("toolchains", {}).get("go")
+          if not isinstance(go_version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", go_version):
+              raise SystemExit("governance lock has no exact Go toolchain")
+          node_version = lock.get("toolchains", {}).get("node")
+          pnpm_version = lock.get("toolchains", {}).get("pnpm")
+          for name, version in (("node", node_version), ("pnpm", pnpm_version)):
+              if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+                  raise SystemExit(f"governance lock has no exact {name} toolchain")
+          with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+              output.write(f"go_version={go_version}\n")
+              output.write(f"node_version={node_version}\n")
+              output.write(f"pnpm_version={pnpm_version}\n")
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ steps.governance_lock.outputs.node_version }}
+      - name: Build exact governance contract artifact
+        run: |
+          corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-code-governance install --frozen-lockfile
+          corepack pnpm@${{ steps.governance_lock.outputs.pnpm_version }} --dir contracts/idena-code-governance build
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ steps.governance_lock.outputs.go_version }}
+          cache: false
+      - name: Check out exact locked component commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/governance-components"
+          mkdir -p "$root"
+          while IFS=$'\t' read -r name repository revision; do
+            destination="$root/$name"
+            git init -q "$destination"
+            git -C "$destination" remote add origin "$repository"
+            git -C "$destination" fetch -q --depth=1 origin "$revision"
+            test "$(git -C "$destination" rev-parse FETCH_HEAD)" = "$revision"
+            git -C "$destination" checkout -q --detach "$revision"
+            test "$(git -C "$destination" rev-parse HEAD)" = "$revision"
+            test -z "$(git -C "$destination" status --porcelain=v1 --untracked-files=all)"
+          done < "$RUNNER_TEMP/governance-components.tsv"
+      - name: Run production Idena WASM runtime compatibility gate
+        run: |
+          python3 scripts/pohw-governance-runtime-gate.py \
+            --idena-go "$RUNNER_TEMP/governance-components/idena-go"
+      - name: Confirm governance release eligibility or inactive interlock
+        id: governance_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          lock = json.loads(Path("compatibility/governance-fork-lock.json").read_text())
+          prototype = lock.get("governancePrototype", {})
+          source_status = prototype.get("sourceStatus")
+          eligible = source_status == "canonical-locked-source"
+          if not eligible:
+              allowed = {"uncommitted-local-prototype", "committed-experimental-prototype"}
+              activation = lock.get("activation", {})
+              if (
+                  source_status not in allowed
+                  or lock.get("status") != "experimental-inactive"
+                  or prototype.get("canonicalAuthorization") != "none"
+                  or activation.get("enabled") is not False
+                  or activation.get("liveCanonicalReferenceChangesPermitted") is not False
+              ):
+                  raise SystemExit("noncanonical governance source lacks the inactive safety interlock")
+              print(
+                  "governance release gate remains blocked by the explicit inactive prototype lock; "
+                  "production-runtime compatibility passed"
+              )
+          with Path(sys.argv[1]).open("a", encoding="utf-8") as output:
+              output.write(f"eligible={'true' if eligible else 'false'}\n")
+          PY
+      - name: Run release-grade locked-source gate
+        if: steps.governance_release.outputs.eligible == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS=$'\t' read -r name _ _; do
+            if [[ "$name" != idena-go ]]; then
+              args+=(--component-repo "$name=$RUNNER_TEMP/governance-components/$name")
+            fi
+          done < "$RUNNER_TEMP/governance-components.tsv"
+          python3 scripts/pohw-governance-runtime-gate.py \
+            --idena-go "$RUNNER_TEMP/governance-components/idena-go" \
+            --require-locked-sources "${args[@]}"
 
   secrets:
     runs-on: ubuntu-latest

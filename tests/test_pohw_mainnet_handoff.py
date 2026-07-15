@@ -134,6 +134,8 @@ class MainnetHandoffTest(unittest.TestCase):
                     "--derive-pohw-payouts-from-state",
                     "--auto-submit-blocks",
                     "--allow-mainnet-submit",
+                    "--expected-rpc-chain",
+                    "main",
                     "--snapshot-dir",
                     str(snapshot_dir),
                     "--payout-candidate-dir",
@@ -290,6 +292,7 @@ class MainnetHandoffTest(unittest.TestCase):
             self.assertEqual(receipt["miningMode"], "bitcoin-mainnet")
             self.assertTrue(receipt["forkDataDeleted"])
             self.assertIn("POHW_STRATUM_ALLOW_MAINNET_SUBMIT=true", mode)
+            self.assertIn("POHW_BITCOIN_EXPECTED_CHAIN=main", mode)
             self.assertIn("POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE=true", mode)
             self.assertIn("POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=false", mode)
             self.assertIn("POHW_STRATUM_FORK_CHAIN_RPC_ADDR=\n", mode)

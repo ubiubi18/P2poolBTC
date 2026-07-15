@@ -29,7 +29,12 @@ const GENERATED_COMPONENT_CHECKOUTS: &[&str] = &[
     "idena-wasm-binding",
     "wasmer",
 ];
-const GENERATED_OUTPUT_DIRECTORIES: &[&str] = &["renderer/out"];
+const GENERATED_OUTPUT_DIRECTORIES: &[&str] = &[
+    "contracts/idena-code-governance/build",
+    "contracts/idena-snapshot-registry/build",
+    "renderer/out",
+    "ui/pohw-dashboard/dist",
+];
 const VCS_CONTROL_NAMES: &[&str] = &[".git", ".hg", ".svn"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1808,11 +1813,13 @@ mod tests {
     }
 
     #[test]
-    fn source_package_omits_only_the_desktop_generated_renderer_output() {
+    fn source_package_omits_only_explicit_generated_outputs() {
         let root = temp_dir("generated-renderer-output");
         fs::write(root.join("README.md"), "fixture\n").unwrap();
-        fs::create_dir_all(root.join("renderer/out")).unwrap();
-        fs::write(root.join("renderer/out/index.html"), "generated\n").unwrap();
+        for directory in GENERATED_OUTPUT_DIRECTORIES {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join("generated.bin"), "generated\n").unwrap();
+        }
         fs::create_dir_all(root.join("fixtures/renderer/out")).unwrap();
         fs::write(
             root.join("fixtures/renderer/out/source.html"),
@@ -1831,24 +1838,27 @@ mod tests {
             vec!["README.md", "fixtures/renderer/out/source.html"]
         );
 
-        let bytes = b"generated\n".to_vec();
-        let cid = cid_for(RAW_CODEC, &bytes).to_string();
-        let forged = SourceTreeManifestV1 {
-            schema_version: 1,
-            kind: "pohw-source-tree-v1".to_string(),
-            repository: "fixture".to_string(),
-            files: vec![SourceFileEntryV1 {
-                path: "renderer/out/index.html".to_string(),
-                mode: 0o644,
-                size: bytes.len() as u64,
-                cid: cid.clone(),
-                sha256: sha256_hex(&bytes),
-            }],
-        };
-        assert!(matches!(
-            validate_manifest(&forged, &BTreeMap::from([(cid, bytes)])),
-            Err(SourceError::ForbiddenPath(path)) if path == "renderer/out/index.html"
-        ));
+        for directory in GENERATED_OUTPUT_DIRECTORIES {
+            let bytes = b"generated\n".to_vec();
+            let cid = cid_for(RAW_CODEC, &bytes).to_string();
+            let path = format!("{directory}/generated.bin");
+            let forged = SourceTreeManifestV1 {
+                schema_version: 1,
+                kind: "pohw-source-tree-v1".to_string(),
+                repository: "fixture".to_string(),
+                files: vec![SourceFileEntryV1 {
+                    path: path.clone(),
+                    mode: 0o644,
+                    size: bytes.len() as u64,
+                    cid: cid.clone(),
+                    sha256: sha256_hex(&bytes),
+                }],
+            };
+            assert!(matches!(
+                validate_manifest(&forged, &BTreeMap::from([(cid, bytes)])),
+                Err(SourceError::ForbiddenPath(rejected)) if rejected == path
+            ));
+        }
 
         fs::remove_dir_all(root).unwrap();
     }

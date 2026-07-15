@@ -21,7 +21,7 @@
         {
           "repository": "P2poolBTC",
           "path": "Cargo.lock",
-          "sha256": "ada4ba420c7a5e6128b4c5196bffd4de697728b0a30581493317acc9d44e876f",
+          "sha256": "81e0091398279ba7286640adb87bbf30748ba5b64c24f6ca6b6da18af6d06252",
           "format": "cargo-lock"
         }
       ],
@@ -95,6 +95,24 @@
           "format": "pnpm-lock"
         },
         {
+          "repository": "P2poolBTC",
+          "path": "compatibility/governance-fork-lock.json",
+          "sha256": "3856724294634164a0682ec199a0c950cd4eaa478aae64408502465b41ef1de5",
+          "format": "digest-only"
+        },
+        {
+          "repository": "P2poolBTC",
+          "path": "compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go",
+          "sha256": "5d6a26c1ea95d002a6321b9055307c139c160c9242f04226d990750e39e129d3",
+          "format": "digest-only"
+        },
+        {
+          "repository": "P2poolBTC",
+          "path": "scripts/pohw-governance-runtime-gate.py",
+          "sha256": "279d5d446fae08a94ca38e494380f313dc786686e718665a846a3d152fe05300",
+          "format": "digest-only"
+        },
+        {
           "repository": "idena-go",
           "path": "go.mod",
           "sha256": "2c893f802ab84d345c9fb116469145c546ddd4b2a2892d5a83bdd067f5a3834b",
@@ -154,9 +172,9 @@
           "platform": "wasm",
           "architecture": "wasm32",
           "deterministic": true,
-          "expectedCid": "bafkreienni6a2jk7j3x5yhwuuzumcd6oq4wrlwjjq5h6estcfv5ukjkfai",
-          "expectedSha256": "8d6a3c0d255f4eefdc1ed4a668c10fce872d15d929874fe24a622d7b45254502",
-          "expectedSize": 177175
+          "expectedCid": "bafkreihv375yxvslxtmzq6dijulqybflhqfugt3q3xixjijes5lwpknm74",
+          "expectedSha256": "f5dffb8bd64bbcd99878684d170c04ab3c0b434f70ddd174a124975767a9acff",
+          "expectedSize": 211486
         }
       ],
       "reproducibility": "deterministic-core",
@@ -173,7 +191,7 @@
         {
           "repository": "P2poolBTC",
           "path": "ui/pohw-dashboard/pnpm-lock.yaml",
-          "sha256": "13d9c6354e4a797aeb267a42cfdab31f5e4f6234e181b1dc1494f992267cfec2",
+          "sha256": "ca5aa34e4e8dc041d0d64f7280bffa889593ed480d10ccd04d4edfde90ad8d25",
           "format": "pnpm-lock"
         }
       ],

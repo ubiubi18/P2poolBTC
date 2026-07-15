@@ -1,0 +1,30 @@
+#!/usr/sbin/nft -f
+
+# Reference policy for a Debian host. Prefer scripts/pohw-host-firewall.py,
+# which checks and atomically replaces only the pohw_host_firewall table.
+# This example intentionally contains no host addresses or credentials.
+# Edit the explicit port sets before loading it. Do not expose RPC, dashboard,
+# Stratum, or control ports as public P2P ports.
+# Port 22 below is an explicit public-SSH choice, not a default. Remove the
+# SSH definition and accept rule when administration is Tailscale-only.
+
+define pohw_ssh_tcp_ports = { 22 }
+define pohw_public_p2p_tcp_ports = { 8333 }
+
+table inet pohw_host_firewall {
+    comment "Managed by pohw-host-firewall.py schema v1"
+
+    chain input {
+        type filter hook input priority -10; policy drop;
+
+        iifname "lo" counter accept comment "pohw:accept-loopback"
+        ct state invalid counter drop comment "pohw:drop-invalid"
+        ct state { established, related } counter accept comment "pohw:accept-established-related"
+        iifname "tailscale0" counter accept comment "pohw:accept-tailscale"
+        meta l4proto icmp counter accept comment "pohw:accept-icmp"
+        meta l4proto ipv6-icmp counter accept comment "pohw:accept-icmpv6"
+        tcp dport $pohw_ssh_tcp_ports ct state new counter accept comment "pohw:accept-ssh"
+        tcp dport $pohw_public_p2p_tcp_ports ct state new counter accept comment "pohw:accept-public-p2p"
+        counter drop comment "pohw:drop-all-other-input"
+    }
+}

@@ -1,0 +1,13 @@
+{
+  "targets": {
+    "release": {
+      "outFile": "build/idena-pohw-miner-registry.wasm",
+      "textFile": "build/idena-pohw-miner-registry.wat",
+      "optimizeLevel": 3,
+      "shrinkLevel": 2,
+      "noAssert": false,
+      "disable": ["bulk-memory"]
+    }
+  }
+}
+

@@ -1,9 +1,11 @@
 # Migration And Rollback
 
-## Phase 0: local only
+## Phase 0: committed prototype, not deployed
 
-The current state is a committed experimental prototype. The legacy compatibility
-lock stays byte-for-byte unchanged. No contract address, initial canonical CID,
+The current state is a committed experimental prototype based on the exact
+revision recorded in the governance-fork lock. It is not a canonical source
+CID, an authorized release, or a deployed governance system.
+The legacy compatibility lock stays byte-for-byte unchanged. No contract address, initial canonical CID,
 genesis CID, activation height, or release is authorized.
 
 Run package, proposal, contract-emulator, dashboard, desktop, identity-replay,

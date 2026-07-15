@@ -1,0 +1,48 @@
+[Unit]
+Description=PoHW Experiment 1 bounded bootstrap mining attempt
+Requisite=bitcoind-pohw-experiment-1.service pohw-mining-adapter.service
+After=bitcoind-pohw-experiment-1.service pohw-mining-adapter.service
+ConditionPathExists=/etc/pohw/enable-experiment-1-mining
+ConditionPathExists=/etc/pohw/enable-experiment-1-bootstrap-miner
+
+[Service]
+Type=oneshot
+User=pohw
+Group=pohw
+SupplementaryGroups=bitcoin-pohw-rpc
+WorkingDirectory=/opt/p2pool
+EnvironmentFile=/etc/pohw/bootstrap-miner.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/p2pool/scripts/pohw-run-bootstrap-miner.sh
+TimeoutStartSec=45
+Nice=19
+CPUQuota=5%
+CPUWeight=1
+IOSchedulingClass=idle
+OOMScoreAdjust=500
+MemoryMax=256M
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+ReadOnlyPaths=/opt/p2pool /etc/pohw /run/bitcoin-pohw-rpc

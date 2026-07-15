@@ -24,7 +24,7 @@ the loopback API/UI health endpoints, and restores prior units on failure.
 
 Build first:
   cargo build --release
-  corepack pnpm@10.13.1 --dir ui/pohw-dashboard build
+  corepack pnpm@11.11.0 --dir ui/pohw-dashboard build
 EOF
 }
 
@@ -62,6 +62,16 @@ require_root_runtime_file() {
   (( (8#$mode & 8#022) == 0 )) || fail "Runtime file must not be group/world writable: $path"
 }
 
+require_root_runtime_directory() {
+  local path=$1
+  [[ -d "$path" && ! -L "$path" ]] || fail "Required runtime directory is missing: $path"
+  [[ "$(stat -c %U:%G -- "$path")" == "root:root" ]] \
+    || fail "Runtime directory must be root-owned: $path"
+  local mode
+  mode="$(stat -c %a -- "$path")"
+  (( (8#$mode & 8#022) == 0 )) || fail "Runtime directory must not be group/world writable: $path"
+}
+
 env_value() {
   local key=$1
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE"
@@ -79,6 +89,10 @@ allowed = {
     "POHW_SNAPSHOT_DIR",
     "POHW_FORK_ACTIVATION_MANIFEST",
     "POHW_EXPLORER_FORK_CHAIN_RPC_ADDR",
+    "POHW_EXPLORER_POHW_CORE_MANIFEST",
+    "POHW_ENABLE_BITCOIN_RPC",
+    "BITCOIN_RPC_URL",
+    "BITCOIN_RPC_COOKIE_FILE",
     "POHW_EXPLORER_BITCOIN_INDEX_URL",
     "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX",
     "POHW_DASHBOARD_BIND_ADDR",
@@ -199,6 +213,17 @@ fi
   || fail "Run this installer from the protected runtime checkout at $RUNTIME_DIR"
 [[ ! -L "$ROOT_DIR" && ! -L "$STATE_DIR" && ! -L "$ENV_FILE" ]] \
   || fail "Refusing symlinked runtime, state, or environment path"
+for runtime_directory in \
+  "$RUNTIME_DIR" \
+  "$RUNTIME_DIR/scripts" \
+  "$RUNTIME_DIR/target" \
+  "$RUNTIME_DIR/target/release" \
+  "$RUNTIME_DIR/compatibility" \
+  "$RUNTIME_DIR/ui" \
+  "$RUNTIME_DIR/ui/pohw-dashboard" \
+  "$RUNTIME_DIR/ui/pohw-dashboard/dist"; do
+  require_root_runtime_directory "$runtime_directory"
+done
 getent passwd pohw >/dev/null || fail "Required service user is missing: pohw"
 if ! getent passwd "$UI_USER" >/dev/null; then
   getent group "$UI_USER" >/dev/null \
@@ -224,6 +249,11 @@ validate_explorer_environment
 
 api_bind="$(env_value POHW_DASHBOARD_BIND_ADDR)"
 fork_rpc="$(env_value POHW_EXPLORER_FORK_CHAIN_RPC_ADDR)"
+fork_manifest="$(env_value POHW_FORK_ACTIVATION_MANIFEST)"
+core_manifest="$(env_value POHW_EXPLORER_POHW_CORE_MANIFEST)"
+enable_bitcoin_rpc="$(env_value POHW_ENABLE_BITCOIN_RPC)"
+bitcoin_rpc_url="$(env_value BITCOIN_RPC_URL)"
+bitcoin_rpc_cookie="$(env_value BITCOIN_RPC_COOKIE_FILE)"
 bitcoin_index_url="$(env_value POHW_EXPLORER_BITCOIN_INDEX_URL)"
 allow_remote_bitcoin_index="$(env_value POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX)"
 allow_remote_bitcoin_index="${allow_remote_bitcoin_index:-false}"
@@ -232,14 +262,23 @@ ui_port="$(env_value POHW_DASHBOARD_UI_PORT)"
 datadir="$(env_value POHW_DATADIR)"
 snapshot_dir="$(env_value POHW_SNAPSHOT_DIR)"
 [[ -n "$api_bind" ]] || fail "POHW_DASHBOARD_BIND_ADDR is missing from $ENV_FILE"
-[[ -n "$fork_rpc" ]] || fail "POHW_EXPLORER_FORK_CHAIN_RPC_ADDR is missing from $ENV_FILE"
+[[ -z "$fork_rpc" && -z "$fork_manifest" ]] \
+  || fail "Dedicated-host installation no longer accepts the retired Experiment 0 fork RPC"
+[[ "$core_manifest" == "$RUNTIME_DIR/compatibility/experiment-1-full-consensus.json" ]] \
+  || fail "POHW_EXPLORER_POHW_CORE_MANIFEST must select the protected Experiment 1 manifest"
+[[ "$enable_bitcoin_rpc" == "true" ]] \
+  || fail "POHW_ENABLE_BITCOIN_RPC must be true for the Experiment 1 explorer"
+[[ "$bitcoin_rpc_url" == "http://127.0.0.1:40414" ]] \
+  || fail "BITCOIN_RPC_URL must select the dedicated loopback Experiment 1 Core RPC"
+[[ "$bitcoin_rpc_cookie" == "/run/bitcoin-pohw-rpc/.cookie" ]] \
+  || fail "BITCOIN_RPC_COOKIE_FILE must select the dedicated Experiment 1 cookie"
 [[ -n "$bitcoin_index_url" ]] || fail "POHW_EXPLORER_BITCOIN_INDEX_URL is missing from $ENV_FILE"
 [[ -n "$ui_host" ]] || fail "POHW_DASHBOARD_UI_BIND_HOST is missing from $ENV_FILE"
 [[ -n "$ui_port" ]] || fail "POHW_DASHBOARD_UI_PORT is missing from $ENV_FILE"
 [[ -n "$datadir" ]] || fail "POHW_DATADIR is missing from $ENV_FILE"
 [[ -n "$snapshot_dir" ]] || fail "POHW_SNAPSHOT_DIR is missing from $ENV_FILE"
 validate_loopback_endpoint POHW_DASHBOARD_BIND_ADDR "$api_bind"
-validate_loopback_endpoint POHW_EXPLORER_FORK_CHAIN_RPC_ADDR "$fork_rpc"
+validate_bitcoin_index_url BITCOIN_RPC_URL "$bitcoin_rpc_url" false
 case "$allow_remote_bitcoin_index" in
   true|false) ;;
   *) fail "POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX must be true or false" ;;
@@ -249,6 +288,12 @@ validate_bitcoin_index_url \
 validate_loopback_endpoint POHW_DASHBOARD_UI_BIND "${ui_host}:${ui_port}"
 [[ "$(env_value POHW_EXPLORER_PUBLIC)" == "true" ]] \
   || fail "Dedicated-host profile requires POHW_EXPLORER_PUBLIC=true"
+require_root_runtime_file "$core_manifest"
+require_regular_file "$bitcoin_rpc_cookie"
+[[ "$(stat -c %U:%G -- "$bitcoin_rpc_cookie")" == "bitcoin-pohw:bitcoin-pohw-rpc" ]] \
+  || fail "Experiment 1 RPC cookie has an unexpected owner or group"
+[[ "$(stat -c %a -- "$bitcoin_rpc_cookie")" == "640" ]] \
+  || fail "Experiment 1 RPC cookie must use mode 0640"
 api_origin="$(loopback_http_origin "$api_bind")"
 ui_origin="$(loopback_http_origin "${ui_host}:${ui_port}")"
 

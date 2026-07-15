@@ -460,6 +460,7 @@ POHW_STRATUM_BUILD_POHW_JOB_FROM_RPC=false
 POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE=true
 POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true
 POHW_STRATUM_ALLOW_MAINNET_SUBMIT=true
+POHW_BITCOIN_EXPECTED_CHAIN=main
 """
 
 
@@ -527,6 +528,7 @@ def verify_mainnet_process(config: Config, env: dict[str, str]) -> None:
         "--derive-pohw-payouts-from-state",
         "--auto-submit-blocks",
         "--allow-mainnet-submit",
+        "--expected-rpc-chain",
     }
     forbidden = {
         "--fork-chain-rpc-addr",
@@ -545,6 +547,7 @@ def verify_mainnet_process(config: Config, env: dict[str, str]) -> None:
         "--payout-candidate-dir": str(config.payout_candidate_dir),
         "--pohw-commitment-file": str(config.pohw_commitment),
         "--rpc-url": config.rpc_url,
+        "--expected-rpc-chain": "main",
     }
     if config.rpc_cookie_file is not None:
         expected_options["--rpc-cookie-file"] = str(config.rpc_cookie_file)

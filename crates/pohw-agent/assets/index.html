@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="pohw-csrf" content="__POHW_CSRF_TOKEN__">
+    <title>P2PoolBTC Join</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <strong>P2PoolBTC Join</strong>
+        <span id="experiment-label">Verifying local source build</span>
+      </div>
+      <span class="no-value">EXPERIMENTAL · NO VALUE</span>
+    </header>
+
+    <main>
+      <section class="status-band" aria-live="polite">
+        <div><span>Source build</span><strong id="source-state">Checking</strong></div>
+        <div><span>Source CID</span><strong id="source-cid">-</strong></div>
+        <div><span>Launch phase</span><strong id="launch-phase">-</strong></div>
+        <div><span>Activation</span><strong id="activation-id">-</strong></div>
+        <div><span>Services</span><strong id="services-state">Stopped</strong></div>
+      </section>
+
+      <section class="step" id="identity-step">
+        <div class="step-index">1</div>
+        <div class="step-body">
+          <h1>Register your Idena identity</h1>
+          <form id="identity-form" autocomplete="off">
+            <label>
+              Miner name
+              <input id="miner-id" name="miner_id" maxlength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}" placeholder="alice-01" required>
+            </label>
+            <label>
+              Public Idena address
+              <input id="idena-address" name="idena_address" maxlength="42" pattern="0x[0-9a-fA-F]{40}" placeholder="0x..." required spellcheck="false">
+            </label>
+            <button type="submit" class="primary">Create signing request</button>
+          </form>
+          <div id="sign-actions" class="actions" hidden>
+            <a id="sign-web" class="button primary" rel="noreferrer">Sign in Idena Web</a>
+            <a id="sign-desktop" class="button secondary">Open Idena Desktop</a>
+          </div>
+          <p id="identity-status" class="inline-status">Waiting for identity details.</p>
+        </div>
+      </section>
+
+      <section class="step" id="launch-step">
+        <div class="step-index">2</div>
+        <div class="step-body">
+          <h2>Start the local experiment node</h2>
+          <label class="acknowledgement">
+            <input id="no-value-ack" type="checkbox">
+            <span>I understand this fork is experimental, has no monetary value, and does not submit to Bitcoin mainnet.</span>
+          </label>
+          <div class="actions">
+            <button id="start-node" type="button" class="primary" disabled>Start node</button>
+            <button id="stop-node" type="button" class="danger" disabled>Stop</button>
+          </div>
+          <p id="launch-status" class="inline-status">Identity registration is required.</p>
+        </div>
+      </section>
+
+      <section class="step" id="miner-step">
+        <div class="step-index">3</div>
+        <div class="step-body">
+          <h2>Point your miner</h2>
+          <dl class="credentials">
+            <div><dt>Stratum URL</dt><dd id="stratum-url">Available after launch</dd></div>
+            <div><dt>Worker</dt><dd id="stratum-worker">Available after launch</dd></div>
+            <div><dt>Password</dt><dd id="stratum-password">Shown once after launch</dd></div>
+          </dl>
+          <a id="explorer-link" class="text-link" rel="noreferrer" target="_blank" hidden>Open experiment explorer</a>
+        </div>
+      </section>
+
+      <div id="error-box" class="error-box" role="alert" hidden></div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

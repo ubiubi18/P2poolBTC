@@ -550,6 +550,7 @@ PY
   template_args+=("${common_publish_args[@]}")
   template_args+=(
     --bitcoin-header-hex "$header_hex" \
+    --share-target "$SHARE_TARGET" \
     --message-out "$OUTPUT_DIR/bitcoin-work-template-message.json" \
     --envelope-out "$OUTPUT_DIR/bitcoin-work-template-envelope.json" \
     --accept-locally

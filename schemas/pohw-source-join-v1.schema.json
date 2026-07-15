@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.invalid/schemas/pohw-source-join-v1.schema.json",
+  "title": "P2PoolBTC Source Join Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "network_mode", "trust_model", "source", "activation", "launch", "peers"],
+  "properties": {
+    "schema_version": {"const": "pohw-source-join/v1"},
+    "experiment_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._:/-]+$"},
+    "network_mode": {"const": "join-existing"},
+    "trust_model": {"const": "local-source-build"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_url", "git_commit", "source_tree_cid", "source_tree_sha256", "cargo_lock_sha256", "cyclonedx_sbom_sha256", "local_artifact"],
+      "properties": {
+        "repository_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "git_commit": {"$ref": "#/$defs/sha1"},
+        "source_tree_cid": {"type": "string", "pattern": "^b[a-z2-7]+$"},
+        "source_tree_sha256": {"$ref": "#/$defs/sha256"},
+        "cargo_lock_sha256": {"$ref": "#/$defs/sha256"},
+        "cyclonedx_sbom_sha256": {"$ref": "#/$defs/sha256"},
+        "local_artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "sha256"],
+          "properties": {
+            "target": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._:/-]+$"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation_id", "manifest_sha256"],
+      "properties": {
+        "activation_id": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "no_value", "mainnet_handoff_armed"],
+      "properties": {
+        "phase": {"enum": ["registration", "fork-sync", "mining"]},
+        "no_value": {"const": true},
+        "mainnet_handoff_armed": {"const": false}
+      }
+    },
+    "peers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gossip", "fork_rpc", "fork_p2p"],
+      "properties": {
+        "gossip": {"$ref": "#/$defs/peers"},
+        "fork_rpc": {"$ref": "#/$defs/peers"},
+        "fork_p2p": {"$ref": "#/$defs/peers"},
+        "explorer_url": {"type": "string", "format": "uri", "pattern": "^https://"}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "proof_root", "source_height", "distinct_voter_count"],
+      "properties": {
+        "snapshot_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9._:/-]+$"},
+        "proof_root": {"$ref": "#/$defs/sha256"},
+        "source_height": {"type": "integer", "minimum": 1},
+        "distinct_voter_count": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"launch": {"properties": {"phase": {"const": "mining"}}}}},
+      "then": {"required": ["snapshot"]}
+    }
+  ],
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "peers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 3, "maxLength": 320}
+    }
+  }
+}

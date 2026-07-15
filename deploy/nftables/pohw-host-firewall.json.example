@@ -1,0 +1,11 @@
+{
+  "publicP2pTcpPorts": [
+    8333,
+    40405,
+    40406,
+    40409
+  ],
+  "publicSshTcpPorts": [],
+  "schema": "pohw-host-firewall-config/v1",
+  "sensitiveTcpPorts": []
+}

@@ -1,23 +1,33 @@
 use crate::{
-    bitcoin_rpc::{BitcoinMiningJobTemplate, SubmitBlockOutcome},
+    bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinMiningJobTransaction, SubmitBlockOutcome},
     p2p_node::ConnectionLimiter,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::consensus::encode::{deserialize, serialize};
-use bitcoin::hashes::{sha256, Hash as BitcoinHash};
+use bitcoin::hashes::{
+    hmac::{Hmac, HmacEngine},
+    sha256, sha256d, Hash as BitcoinHash, HashEngine,
+};
 use bitcoin::pow::{CompactTarget, Target, Work};
-use bitcoin::{Address, Block, BlockHash, Network, OutPoint, Transaction, TxOut, Txid, Weight};
+use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+use bitcoin::{
+    ecdsa, taproot, Address, Block, BlockHash, CompressedPublicKey, Network, OutPoint, Transaction,
+    TxOut, Txid, Weight,
+};
 use chrono::Utc;
 use crypto_bigint::{NonZero, U256 as CryptoU256, U512 as CryptoU512};
 use fs2::FileExt;
 use pohw_core::fork::{
-    ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm,
-    BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL,
+    ForkActivationManifest, ForkConfig, ForkDifficultyAlgorithm, ForkTransactionConsensus,
+    ForkTransactionUpgradeManifest, BITCOIN_DIFFICULTY_ADJUSTMENT_INTERVAL,
 };
-use pohw_core::sharechain::BitcoinWorkTemplate;
+use pohw_core::sharechain::{BitcoinWorkTemplate, Share};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::future::pending;
@@ -25,7 +35,7 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
@@ -34,6 +44,7 @@ use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
 
 const FORK_BLOCK_RECORD_SCHEMA_VERSION: u16 = 1;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_TRANSACTION_UPGRADE_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BLOCK_HEX_BYTES: usize = MAX_BLOCK_BYTES * 2;
 const MAX_WIRE_FRAME_BYTES: usize = MAX_BLOCK_HEX_BYTES + 64 * 1024;
@@ -43,14 +54,30 @@ const MAX_MONEY_SATS: u64 = 21_000_000 * 100_000_000;
 const MAX_CONNECTIONS: usize = 128;
 const MAX_CONNECTIONS_PER_IP: usize = 16;
 const MAX_PEERS: usize = 64;
+const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
+const MAX_MEMPOOL_BYTES: usize = 3 * 1024 * 1024;
+const MAX_MEMPOOL_TRANSACTION_BYTES: usize = 400_000;
+const MAX_TEMPLATE_NON_COINBASE_WEIGHT_WU: u64 = 3_500_000;
 const DEFAULT_NETWORK_TIMEOUT_SECONDS: u64 = 15;
-const FORK_PROTOCOL_VERSION: u16 = 2;
+const FORK_P2P_CAPABILITY_FILE_ENV: &str = "POHW_FORK_P2P_CAPABILITY_FILE";
+const DEFAULT_FORK_P2P_CAPABILITY_FILE: &str = "fork-p2p.capability";
+const MIN_FORK_P2P_CAPABILITY_BYTES: usize = 32;
+const MAX_FORK_P2P_CAPABILITY_BYTES: usize = 512;
+const FORK_P2P_AUTH_WINDOW_SECONDS: u64 = 120;
+const FORK_P2P_RATE_WINDOW_SECONDS: u64 = 60;
+const MAX_P2P_BLOCK_SUBMISSIONS_PER_WINDOW: usize = 12;
+const MAX_P2P_TRANSACTION_SUBMISSIONS_PER_WINDOW: usize = 120;
+const MAX_P2P_MEMPOOL_REQUESTS_PER_WINDOW: usize = 12;
+const MAX_P2P_AUTH_NONCES: usize = 65_536;
+const MAX_P2P_RATE_LIMIT_IPS: usize = MAX_CONNECTIONS;
+const FORK_PROTOCOL_VERSION: u16 = 3;
 const FORK_BLOCK_VERSION: i32 = 0x2000_0000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ForkChainNodeConfig {
     pub datadir: PathBuf,
     pub activation_manifest: PathBuf,
+    pub transaction_upgrade_manifest: Option<PathBuf>,
     pub rpc_bind_addr: SocketAddr,
     pub p2p_bind_addr: Option<SocketAddr>,
     pub allow_non_loopback_p2p: bool,
@@ -77,6 +104,9 @@ pub(crate) struct ForkChainStatus {
     pub bootstrap_handoff_hashrate_hps: u64,
     pub estimated_hashrate_hps: String,
     pub blocks_until_bitcoin_retarget: Option<u64>,
+    pub transaction_upgrade_id: Option<String>,
+    pub transaction_activation_height: Option<u64>,
+    pub mempool_transaction_count: usize,
     pub transaction_consensus: String,
 }
 
@@ -248,6 +278,18 @@ pub(crate) struct ForkUtxoPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkUnspentOutput {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+    pub height: u64,
+    pub confirmations: u64,
+    pub coinbase: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ForkBlockAcceptance {
     pub accepted: bool,
     pub became_active_tip: bool,
@@ -258,12 +300,26 @@ pub(crate) struct ForkBlockAcceptance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ForkTransactionAcceptance {
+    pub accepted: bool,
+    pub txid: String,
+    pub fee_sats: u64,
+    pub mempool_transaction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ForkWorkTemplateValidation {
     pub template_hash: String,
     pub previous_block_hash: String,
     pub height: u64,
     pub header_time: u32,
     pub bits: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ForkShareValidation {
+    pub template: ForkWorkTemplateValidation,
+    pub work_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +345,43 @@ struct IndexedForkOutput {
     coinbase: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ForkTransactionLocation {
+    block_hash: BlockHash,
+    transaction_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct ForkAddressAccumulator {
+    transaction_ids: BTreeSet<Txid>,
+    funded_output_count: usize,
+    funded_total_sats: u64,
+    spent_output_count: usize,
+    spent_total_sats: u64,
+    first_seen_height: Option<u64>,
+    last_seen_height: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ForkAddressIndexEntry {
+    summary: ForkAddressSummary,
+    transactions: Vec<ForkTransactionRef>,
+    utxos: Vec<ForkUtxo>,
+}
+
+#[derive(Debug, Default)]
+struct ForkExplorerIndex {
+    outputs: BTreeMap<OutPoint, IndexedForkOutput>,
+    spends: BTreeMap<OutPoint, ForkOutputSpend>,
+    addresses: BTreeMap<String, ForkAddressIndexEntry>,
+}
+
+#[derive(Debug, Default)]
+struct ForkBranchState {
+    utxos: BTreeMap<OutPoint, IndexedForkOutput>,
+    txids: BTreeSet<Txid>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DifficultyPhase {
     Bootstrap,
@@ -307,21 +400,44 @@ struct NextDifficulty {
 pub(crate) struct ForkChainStore {
     datadir: PathBuf,
     manifest: ForkActivationManifest,
+    transaction_upgrade: Option<ForkTransactionUpgradeManifest>,
     inherited_tip_hash: BlockHash,
     blocks: BTreeMap<BlockHash, BlockNode>,
     active_tip: Option<BlockHash>,
     active_by_height: BTreeMap<u64, BlockHash>,
+    stored_block_order: BTreeSet<(Reverse<u64>, BlockHash)>,
+    transaction_locations: BTreeMap<Txid, Vec<ForkTransactionLocation>>,
+    explorer: ForkExplorerIndex,
+    mempool: BTreeMap<Txid, Transaction>,
+    mempool_bytes: usize,
     _lock: File,
 }
 
 impl ForkChainStore {
+    #[cfg(test)]
     pub(crate) fn open(datadir: &Path, activation_manifest: &Path) -> Result<Self> {
+        Self::open_with_transaction_upgrade(datadir, activation_manifest, None)
+    }
+
+    pub(crate) fn open_with_transaction_upgrade(
+        datadir: &Path,
+        activation_manifest: &Path,
+        transaction_upgrade_manifest: Option<&Path>,
+    ) -> Result<Self> {
         let manifest = read_activation_manifest(activation_manifest)?;
         manifest
             .validate()
             .context("invalid fork activation manifest")?;
         if manifest.config.inherited_utxo_spending_enabled {
             bail!("Experiment 0 fork node requires inherited_utxo_spending_enabled=false");
+        }
+        let transaction_upgrade = transaction_upgrade_manifest
+            .map(read_transaction_upgrade_manifest)
+            .transpose()?;
+        if let Some(upgrade) = &transaction_upgrade {
+            upgrade
+                .validate_for(&manifest)
+                .context("fork transaction upgrade does not match the activation manifest")?;
         }
         ensure_private_directory(datadir)?;
         let lock_path = datadir.join("fork-chain.lock");
@@ -337,10 +453,16 @@ impl ForkChainStore {
         let mut store = Self {
             datadir: datadir.to_path_buf(),
             manifest,
+            transaction_upgrade,
             inherited_tip_hash,
             blocks: BTreeMap::new(),
             active_tip: None,
             active_by_height: BTreeMap::new(),
+            stored_block_order: BTreeSet::new(),
+            transaction_locations: BTreeMap::new(),
+            explorer: ForkExplorerIndex::default(),
+            mempool: BTreeMap::new(),
+            mempool_bytes: 0,
             _lock: lock,
         };
         store.replay_block_log()?;
@@ -349,6 +471,18 @@ impl ForkChainStore {
 
     pub(crate) fn manifest(&self) -> &ForkActivationManifest {
         &self.manifest
+    }
+
+    fn transaction_upgrade_id(&self) -> Option<String> {
+        self.transaction_upgrade
+            .as_ref()
+            .map(|upgrade| upgrade.upgrade_id.clone())
+    }
+
+    fn transactions_active_at(&self, height: u64) -> bool {
+        self.transaction_upgrade
+            .as_ref()
+            .is_some_and(|upgrade| height >= upgrade.activation_height)
     }
 
     pub(crate) fn status(&self) -> ForkChainStatus {
@@ -410,8 +544,27 @@ impl ForkChainStore {
             )
             .to_string(),
             blocks_until_bitcoin_retarget,
-            transaction_consensus: "coinbase-only; inherited and post-fork spends disabled"
-                .to_string(),
+            transaction_upgrade_id: self.transaction_upgrade_id(),
+            transaction_activation_height: self
+                .transaction_upgrade
+                .as_ref()
+                .map(|upgrade| upgrade.activation_height),
+            mempool_transaction_count: self.mempool.len(),
+            transaction_consensus: match &self.transaction_upgrade {
+                Some(upgrade) if tip_height >= upgrade.activation_height => format!(
+                    "{} active; fork-created P2WPKH and P2TR key-path UTXOs only; inherited UTXOs disabled",
+                    upgrade.transaction_consensus.as_str()
+                ),
+                Some(upgrade) => format!(
+                    "coinbase-only through height {}; {} activates at height {}; inherited UTXOs disabled",
+                    upgrade.activation_height - 1,
+                    upgrade.transaction_consensus.as_str(),
+                    upgrade.activation_height
+                ),
+                None => {
+                    "coinbase-only; inherited and post-fork spends disabled".to_string()
+                }
+            },
         }
     }
 
@@ -428,17 +581,104 @@ impl ForkChainStore {
         let curtime = now_unix.max(minimum_time);
         let curtime = u32::try_from(curtime).context("fork-chain template time exceeds u32")?;
         let next_difficulty = self.next_difficulty(self.active_tip, height, curtime)?;
+        let (selected_transactions, fees_sats) = self.template_transactions(height)?;
+        let coinbase_value_sats = block_subsidy_sats(height)
+            .checked_add(fees_sats)
+            .context("fork-chain template coinbase value overflow")?;
+        let default_witness_commitment = (!selected_transactions.is_empty())
+            .then(|| witness_commitment_script(&selected_transactions))
+            .transpose()?;
+        let transaction_hashes = selected_transactions
+            .iter()
+            .map(|tx| tx.compute_txid().to_string())
+            .collect();
+        let transactions = selected_transactions
+            .iter()
+            .map(|tx| BitcoinMiningJobTransaction {
+                txid: tx.compute_txid().to_string(),
+                data_hex: hex::encode(serialize(tx)),
+            })
+            .collect();
         Ok(BitcoinMiningJobTemplate {
             version: FORK_BLOCK_VERSION,
             previous_block_hash: status.tip_hash,
             curtime,
             bits: format!("{:08x}", next_difficulty.bits.to_consensus()),
             height,
-            coinbase_value_sats: block_subsidy_sats(height),
-            transaction_hashes: Vec::new(),
-            transactions: Vec::new(),
-            default_witness_commitment: None,
+            coinbase_value_sats,
+            transaction_hashes,
+            transactions,
+            default_witness_commitment,
+            pohw_replay_marker: None,
         })
+    }
+
+    pub(crate) fn submit_transaction(
+        &mut self,
+        transaction_hex: &str,
+    ) -> Result<ForkTransactionAcceptance> {
+        let normalized = normalize_transaction_hex(transaction_hex)?;
+        let transaction = decode_transaction(&normalized)?;
+        let txid = transaction.compute_txid();
+        if self.mempool.contains_key(&txid) {
+            return Ok(ForkTransactionAcceptance {
+                accepted: false,
+                txid: txid.to_string(),
+                fee_sats: 0,
+                mempool_transaction_count: self.mempool.len(),
+            });
+        }
+        if self.mempool.len() >= MAX_MEMPOOL_TRANSACTIONS {
+            bail!("fork transaction mempool is full");
+        }
+        let transaction_bytes = normalized.len() / 2;
+        let next_mempool_bytes = checked_mempool_bytes(self.mempool_bytes, transaction_bytes)?;
+        let next_height = self
+            .status()
+            .tip_height
+            .checked_add(1)
+            .context("fork-chain mempool height overflow")?;
+        if !self.transactions_active_at(next_height) {
+            let activation_height = self
+                .transaction_upgrade
+                .as_ref()
+                .map(|upgrade| upgrade.activation_height)
+                .context("fork transaction consensus upgrade is not configured")?;
+            bail!("fork transactions are not active until block height {activation_height}");
+        }
+        let mut branch_state = self.branch_state(self.active_tip)?;
+        if branch_state.txids.contains(&txid) {
+            bail!("fork transaction {txid} is already confirmed on the active chain");
+        }
+        let mempool_spends = self
+            .mempool
+            .values()
+            .flat_map(|tx| tx.input.iter().map(|input| input.previous_output))
+            .collect::<BTreeSet<_>>();
+        if transaction
+            .input
+            .iter()
+            .any(|input| mempool_spends.contains(&input.previous_output))
+        {
+            bail!("fork transaction conflicts with an existing mempool spend");
+        }
+        let fee_sats =
+            self.validate_and_apply_transaction(&transaction, next_height, &mut branch_state)?;
+        self.mempool.insert(txid, transaction);
+        self.mempool_bytes = next_mempool_bytes;
+        Ok(ForkTransactionAcceptance {
+            accepted: true,
+            txid: txid.to_string(),
+            fee_sats,
+            mempool_transaction_count: self.mempool.len(),
+        })
+    }
+
+    pub(crate) fn mempool_transactions(&self) -> Vec<String> {
+        self.mempool
+            .values()
+            .map(|transaction| hex::encode(serialize(transaction)))
+            .collect()
     }
 
     pub(crate) fn submit_block(&mut self, block_hex: &str) -> Result<ForkBlockAcceptance> {
@@ -469,7 +709,11 @@ impl ForkChainStore {
         self.append_record(&normalized)?;
         let height = node.height;
         self.blocks.insert(hash, node);
+        self.index_stored_block(hash)?;
         self.consider_active_tip(hash)?;
+        if previous_tip != self.active_tip {
+            self.revalidate_mempool()?;
+        }
         let status = self.status();
         Ok(ForkBlockAcceptance {
             accepted: true,
@@ -499,36 +743,46 @@ impl ForkChainStore {
         if !(1..=100).contains(&limit) {
             bail!("fork block page limit must be between 1 and 100");
         }
-        let mut blocks = self.blocks.iter().collect::<Vec<_>>();
-        blocks.sort_by(|(left_hash, left), (right_hash, right)| {
-            right
-                .height
-                .cmp(&left.height)
-                .then_with(|| left_hash.to_string().cmp(&right_hash.to_string()))
-        });
-        let start = match cursor {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let ordered: Box<dyn Iterator<Item = &(Reverse<u64>, BlockHash)> + '_> = match cursor {
             Some(cursor) => {
                 let cursor = BlockHash::from_str(cursor)
                     .context("fork block cursor is not a valid block hash")?;
-                blocks
-                    .iter()
-                    .position(|(hash, _)| **hash == cursor)
-                    .map(|position| position + 1)
-                    .context("fork block cursor is not present in local replay")?
+                let node = self
+                    .blocks
+                    .get(&cursor)
+                    .context("fork block cursor is not present in local replay")?;
+                let key = (Reverse(node.height), cursor);
+                if !self.stored_block_order.contains(&key) {
+                    bail!("fork block cursor is not present in the explorer index");
+                }
+                Box::new(self.stored_block_order.range((Excluded(key), Unbounded)))
             }
-            None => 0,
+            None => Box::new(self.stored_block_order.iter()),
         };
-        let end = start.saturating_add(limit).min(blocks.len());
-        let items = blocks[start..end]
-            .iter()
-            .map(|(hash, node)| self.block_summary_for_node(**hash, node))
+        let mut page_hashes = ordered
+            .take(limit.saturating_add(1))
+            .map(|(_, hash)| *hash)
             .collect::<Vec<_>>();
-        let next_cursor = (end < blocks.len())
+        let has_more = page_hashes.len() > limit;
+        page_hashes.truncate(limit);
+        let items = page_hashes
+            .iter()
+            .map(|hash| {
+                let node = self
+                    .blocks
+                    .get(hash)
+                    .expect("indexed fork block must exist in block map");
+                self.block_summary_for_node(*hash, node)
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = has_more
             .then(|| items.last().map(|item| item.block_hash.clone()))
             .flatten();
         Ok(ForkBlockPage {
             tip_height: self.status().tip_height,
-            total: blocks.len(),
+            total: self.stored_block_order.len(),
             items,
             next_cursor,
         })
@@ -554,7 +808,6 @@ impl ForkChainStore {
             return Ok(None);
         };
         let active = self.active_by_height.get(&node.height) == Some(&hash);
-        let outputs = self.active_output_index()?;
         let total = node.block.txdata.len();
         let end = cursor.saturating_add(limit).min(total);
         let items = if cursor >= total {
@@ -564,7 +817,14 @@ impl ForkChainStore {
                 .iter()
                 .enumerate()
                 .map(|(offset, tx)| {
-                    transaction_ref(tx, hash, node.height, active, cursor + offset, &outputs)
+                    transaction_ref(
+                        tx,
+                        hash,
+                        node.height,
+                        active,
+                        cursor + offset,
+                        &self.explorer.outputs,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()?
         };
@@ -578,18 +838,22 @@ impl ForkChainStore {
 
     pub(crate) fn transaction_detail(&self, txid: &str) -> Result<Option<ForkTransactionDetail>> {
         let txid = Txid::from_str(txid).context("invalid fork transaction id")?;
-        let outputs = self.active_output_index()?;
-        let spends = self.active_spend_index();
-        let mut matches = self
-            .blocks
+        let Some(locations) = self.transaction_locations.get(&txid) else {
+            return Ok(None);
+        };
+        let mut matches = locations
             .iter()
-            .flat_map(|(block_hash, node)| {
-                node.block
+            .map(|location| {
+                let node = self
+                    .blocks
+                    .get(&location.block_hash)
+                    .expect("indexed transaction block must exist");
+                let tx = node
+                    .block
                     .txdata
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, tx)| tx.compute_txid() == txid)
-                    .map(move |(index, tx)| (*block_hash, node, index, tx))
+                    .get(location.transaction_index)
+                    .expect("indexed transaction position must exist");
+                (location.block_hash, node, location.transaction_index, tx)
             })
             .collect::<Vec<_>>();
         matches.sort_by(
@@ -613,59 +877,29 @@ impl ForkChainStore {
             node.height,
             active,
             transaction_index,
-            &outputs,
-            &spends,
+            &self.explorer.outputs,
+            &self.explorer.spends,
         )?))
     }
 
     pub(crate) fn address_summary(&self, address: &str) -> Result<ForkAddressSummary> {
         let address = normalize_mainnet_address(address)?;
-        let outputs = self.active_output_index()?;
-        let spends = self.active_spend_index();
-        let mut transactions = BTreeSet::new();
-        let mut funded_output_count = 0usize;
-        let mut funded_total_sats = 0u64;
-        let mut spent_output_count = 0usize;
-        let mut spent_total_sats = 0u64;
-        let mut first_seen_height = None;
-        let mut last_seen_height = None;
-        for (outpoint, indexed) in &outputs {
-            if output_address(&indexed.output).as_deref() != Some(address.as_str()) {
-                continue;
-            }
-            transactions.insert(outpoint.txid);
-            funded_output_count = funded_output_count.saturating_add(1);
-            funded_total_sats = funded_total_sats
-                .checked_add(indexed.output.value.to_sat())
-                .context("fork address funded total overflow")?;
-            update_height_range(
-                &mut first_seen_height,
-                &mut last_seen_height,
-                indexed.height,
-            );
-            if let Some(spend) = spends.get(outpoint) {
-                transactions
-                    .insert(Txid::from_str(&spend.txid).expect("indexed spend txid is valid"));
-                spent_output_count = spent_output_count.saturating_add(1);
-                spent_total_sats = spent_total_sats
-                    .checked_add(indexed.output.value.to_sat())
-                    .context("fork address spent total overflow")?;
-                update_height_range(&mut first_seen_height, &mut last_seen_height, spend.height);
-            }
-        }
-        Ok(ForkAddressSummary {
-            address,
-            transaction_count: transactions.len(),
-            funded_output_count,
-            funded_total_sats,
-            spent_output_count,
-            spent_total_sats,
-            balance_sats: funded_total_sats
-                .checked_sub(spent_total_sats)
-                .context("fork address balance underflow")?,
-            first_seen_height,
-            last_seen_height,
-        })
+        Ok(self
+            .explorer
+            .addresses
+            .get(&address)
+            .map(|entry| entry.summary.clone())
+            .unwrap_or(ForkAddressSummary {
+                address,
+                transaction_count: 0,
+                funded_output_count: 0,
+                funded_total_sats: 0,
+                spent_output_count: 0,
+                spent_total_sats: 0,
+                balance_sats: 0,
+                first_seen_height: None,
+                last_seen_height: None,
+            }))
     }
 
     pub(crate) fn address_transactions(
@@ -676,37 +910,12 @@ impl ForkChainStore {
     ) -> Result<ForkAddressTransactionPage> {
         validate_numeric_page(cursor, limit)?;
         let address = normalize_mainnet_address(address)?;
-        let outputs = self.active_output_index()?;
-        let mut items = Vec::new();
-        for (height, block_hash) in self.active_by_height.iter().rev() {
-            let node = self
-                .blocks
-                .get(block_hash)
-                .expect("active fork block must exist");
-            for (transaction_index, tx) in node.block.txdata.iter().enumerate().rev() {
-                let related_output = tx
-                    .output
-                    .iter()
-                    .any(|output| output_address(output).as_deref() == Some(address.as_str()));
-                let related_input = tx.input.iter().any(|input| {
-                    outputs
-                        .get(&input.previous_output)
-                        .and_then(|indexed| output_address(&indexed.output))
-                        .as_deref()
-                        == Some(address.as_str())
-                });
-                if related_output || related_input {
-                    items.push(transaction_ref(
-                        tx,
-                        *block_hash,
-                        *height,
-                        true,
-                        transaction_index,
-                        &outputs,
-                    )?);
-                }
-            }
-        }
+        let items = self
+            .explorer
+            .addresses
+            .get(&address)
+            .map(|entry| entry.transactions.as_slice())
+            .unwrap_or_default();
         let total = items.len();
         let end = cursor.saturating_add(limit).min(total);
         let page_items = if cursor >= total {
@@ -730,31 +939,12 @@ impl ForkChainStore {
     ) -> Result<ForkUtxoPage> {
         validate_numeric_page(cursor, limit)?;
         let address = normalize_mainnet_address(address)?;
-        let outputs = self.active_output_index()?;
-        let spends = self.active_spend_index();
-        let mut items = outputs
-            .iter()
-            .filter(|(outpoint, indexed)| {
-                !spends.contains_key(outpoint)
-                    && output_address(&indexed.output).as_deref() == Some(address.as_str())
-            })
-            .map(|(outpoint, indexed)| ForkUtxo {
-                txid: outpoint.txid.to_string(),
-                vout: outpoint.vout,
-                value_sats: indexed.output.value.to_sat(),
-                script_pubkey_hex: hex::encode(indexed.output.script_pubkey.as_bytes()),
-                script_type: script_type(&indexed.output),
-                height: indexed.height,
-                coinbase: indexed.coinbase,
-            })
-            .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            right
-                .height
-                .cmp(&left.height)
-                .then_with(|| left.txid.cmp(&right.txid))
-                .then_with(|| left.vout.cmp(&right.vout))
-        });
+        let items = self
+            .explorer
+            .addresses
+            .get(&address)
+            .map(|entry| entry.utxos.as_slice())
+            .unwrap_or_default();
         let total = items.len();
         let end = cursor.saturating_add(limit).min(total);
         let page_items = if cursor >= total {
@@ -770,56 +960,249 @@ impl ForkChainStore {
         })
     }
 
-    fn active_output_index(&self) -> Result<BTreeMap<OutPoint, IndexedForkOutput>> {
-        let mut outputs = BTreeMap::new();
-        for (height, block_hash) in &self.active_by_height {
-            let node = self
-                .blocks
-                .get(block_hash)
-                .expect("active fork block must exist");
-            for tx in &node.block.txdata {
-                let txid = tx.compute_txid();
-                for (vout, output) in tx.output.iter().enumerate() {
-                    let vout =
-                        u32::try_from(vout).context("fork transaction output index exceeds u32")?;
-                    outputs.insert(
-                        OutPoint { txid, vout },
-                        IndexedForkOutput {
-                            output: output.clone(),
-                            height: *height,
-                            coinbase: tx.is_coinbase(),
-                        },
-                    );
-                }
-            }
+    pub(crate) fn unspent_output(
+        &self,
+        txid: &str,
+        vout: u32,
+    ) -> Result<Option<ForkUnspentOutput>> {
+        let txid = Txid::from_str(txid).context("invalid fork transaction id")?;
+        let outpoint = OutPoint { txid, vout };
+        if self.explorer.spends.contains_key(&outpoint) {
+            return Ok(None);
         }
-        Ok(outputs)
+        let Some(indexed) = self.explorer.outputs.get(&outpoint) else {
+            return Ok(None);
+        };
+        let tip_height = self.status().tip_height;
+        let confirmations = tip_height
+            .checked_sub(indexed.height)
+            .and_then(|depth| depth.checked_add(1))
+            .context("fork UTXO confirmation depth overflow")?;
+        Ok(Some(ForkUnspentOutput {
+            txid: txid.to_string(),
+            vout,
+            value_sats: indexed.output.value.to_sat(),
+            script_pubkey_hex: hex::encode(indexed.output.script_pubkey.as_bytes()),
+            height: indexed.height,
+            confirmations,
+            coinbase: indexed.coinbase,
+        }))
     }
 
-    fn active_spend_index(&self) -> BTreeMap<OutPoint, ForkOutputSpend> {
-        let mut spends = BTreeMap::new();
-        for (height, block_hash) in &self.active_by_height {
+    fn branch_state(&self, parent: Option<BlockHash>) -> Result<ForkBranchState> {
+        let mut branch = Vec::new();
+        let mut cursor = parent;
+        while let Some(hash) = cursor {
             let node = self
                 .blocks
-                .get(block_hash)
-                .expect("active fork block must exist");
-            for tx in &node.block.txdata {
-                if tx.is_coinbase() {
-                    continue;
-                }
-                for (vin, input) in tx.input.iter().enumerate() {
-                    spends.insert(
-                        input.previous_output,
-                        ForkOutputSpend {
-                            txid: tx.compute_txid().to_string(),
-                            vin,
-                            height: *height,
-                        },
+                .get(&hash)
+                .ok_or_else(|| anyhow!("fork UTXO traversal found missing block {hash}"))?;
+            branch.push((hash, node));
+            cursor = if node.block.header.prev_blockhash == self.inherited_tip_hash {
+                None
+            } else {
+                Some(node.block.header.prev_blockhash)
+            };
+        }
+        branch.reverse();
+
+        let mut state = ForkBranchState::default();
+        for (block_hash, node) in branch {
+            for transaction in &node.block.txdata {
+                let txid = transaction.compute_txid();
+                if !state.txids.insert(txid) {
+                    bail!(
+                        "fork branch contains duplicate transaction id {txid} at block {block_hash}"
                     );
                 }
+                if !transaction.is_coinbase() {
+                    for input in &transaction.input {
+                        state.utxos.remove(&input.previous_output).ok_or_else(|| {
+                            anyhow!(
+                                "fork branch transaction {txid} spends missing output {}",
+                                input.previous_output
+                            )
+                        })?;
+                    }
+                }
+                add_transaction_outputs(&mut state, transaction, node.height)?;
             }
         }
-        spends
+        Ok(state)
+    }
+
+    fn validate_and_apply_transaction(
+        &self,
+        transaction: &Transaction,
+        height: u64,
+        state: &mut ForkBranchState,
+    ) -> Result<u64> {
+        let upgrade = self
+            .transaction_upgrade
+            .as_ref()
+            .filter(|upgrade| height >= upgrade.activation_height)
+            .context("fork transaction validation requested before activation")?;
+        match upgrade.transaction_consensus {
+            ForkTransactionConsensus::SegwitKeypathV1 => {}
+        }
+        if transaction.is_coinbase() {
+            bail!("fork non-coinbase transaction set contains a coinbase");
+        }
+        if transaction.version.0 != 2 {
+            bail!("fork transaction version must be 2");
+        }
+        if transaction.lock_time.to_consensus_u32() != 0 {
+            bail!("fork transaction lock_time must be zero in segwit-keypath-v1");
+        }
+        if transaction.input.is_empty() {
+            bail!("fork transaction has no inputs");
+        }
+        if transaction.output.is_empty() {
+            bail!("fork transaction has no outputs");
+        }
+        if transaction.weight().to_wu() > upgrade.max_transaction_weight_wu {
+            bail!(
+                "fork transaction exceeds the {} weight-unit limit",
+                upgrade.max_transaction_weight_wu
+            );
+        }
+        let txid = transaction.compute_txid();
+        if state.txids.contains(&txid) {
+            bail!("fork branch already contains transaction id {txid}");
+        }
+
+        let mut output_total = 0u64;
+        for output in &transaction.output {
+            let amount = output.value.to_sat();
+            if amount > MAX_MONEY_SATS {
+                bail!("fork transaction output exceeds MAX_MONEY");
+            }
+            output_total = output_total
+                .checked_add(amount)
+                .context("fork transaction output total overflow")?;
+            if output_total > MAX_MONEY_SATS {
+                bail!("fork transaction output total exceeds MAX_MONEY");
+            }
+        }
+
+        let mut seen_inputs = BTreeSet::new();
+        let mut prevouts = Vec::with_capacity(transaction.input.len());
+        let mut input_total = 0u64;
+        for input in &transaction.input {
+            if !input.script_sig.is_empty() {
+                bail!("fork segwit key-path input scriptSig must be empty");
+            }
+            if !seen_inputs.insert(input.previous_output) {
+                bail!("fork transaction repeats input {}", input.previous_output);
+            }
+            let previous = state.utxos.get(&input.previous_output).ok_or_else(|| {
+                anyhow!(
+                    "fork transaction input {} is not an unspent fork-created output",
+                    input.previous_output
+                )
+            })?;
+            if previous.coinbase
+                && height.saturating_sub(previous.height) < upgrade.coinbase_maturity
+            {
+                bail!(
+                    "fork transaction spends immature coinbase {} at depth {}; {} required",
+                    input.previous_output,
+                    height.saturating_sub(previous.height),
+                    upgrade.coinbase_maturity
+                );
+            }
+            input_total = input_total
+                .checked_add(previous.output.value.to_sat())
+                .context("fork transaction input total overflow")?;
+            if input_total > MAX_MONEY_SATS {
+                bail!("fork transaction input total exceeds MAX_MONEY");
+            }
+            prevouts.push(previous.output.clone());
+        }
+        let fee_sats = input_total.checked_sub(output_total).ok_or_else(|| {
+            anyhow!("fork transaction outputs {output_total} sats exceed inputs {input_total} sats")
+        })?;
+        validate_segwit_keypath_signatures(transaction, &prevouts)?;
+
+        for input in &transaction.input {
+            state
+                .utxos
+                .remove(&input.previous_output)
+                .expect("validated fork transaction input remains unspent");
+        }
+        state.txids.insert(txid);
+        add_transaction_outputs(state, transaction, height)?;
+        Ok(fee_sats)
+    }
+
+    fn template_transactions(&self, height: u64) -> Result<(Vec<Transaction>, u64)> {
+        if !self.transactions_active_at(height) || self.mempool.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let upgrade = self
+            .transaction_upgrade
+            .as_ref()
+            .expect("active transaction consensus has an upgrade manifest");
+        let max_non_coinbase = usize::try_from(upgrade.max_block_transactions - 1)
+            .context("fork max transaction count exceeds usize")?;
+        let mut state = self.branch_state(self.active_tip)?;
+        let mut selected = Vec::new();
+        let mut total_weight = 0u64;
+        let mut total_fees = 0u64;
+        for transaction in self.mempool.values() {
+            if selected.len() >= max_non_coinbase {
+                break;
+            }
+            let weight = transaction.weight().to_wu();
+            if total_weight.saturating_add(weight) > MAX_TEMPLATE_NON_COINBASE_WEIGHT_WU {
+                continue;
+            }
+            let fee = match self.validate_and_apply_transaction(transaction, height, &mut state) {
+                Ok(fee) => fee,
+                Err(_) => continue,
+            };
+            total_weight = total_weight
+                .checked_add(weight)
+                .context("fork template transaction weight overflow")?;
+            total_fees = total_fees
+                .checked_add(fee)
+                .context("fork template fee total overflow")?;
+            selected.push(transaction.clone());
+        }
+        Ok((selected, total_fees))
+    }
+
+    fn revalidate_mempool(&mut self) -> Result<()> {
+        let next_height = self
+            .status()
+            .tip_height
+            .checked_add(1)
+            .context("fork-chain mempool revalidation height overflow")?;
+        let pending = std::mem::take(&mut self.mempool);
+        self.mempool_bytes = 0;
+        if !self.transactions_active_at(next_height) {
+            return Ok(());
+        }
+        let mut state = self.branch_state(self.active_tip)?;
+        for (txid, transaction) in pending {
+            if state.txids.contains(&txid) {
+                continue;
+            }
+            if self
+                .validate_and_apply_transaction(&transaction, next_height, &mut state)
+                .is_ok()
+            {
+                let transaction_bytes = serialize(&transaction).len();
+                let Ok(next_mempool_bytes) =
+                    checked_mempool_bytes(self.mempool_bytes, transaction_bytes)
+                else {
+                    continue;
+                };
+                self.mempool.insert(txid, transaction);
+                self.mempool_bytes = next_mempool_bytes;
+            }
+        }
+        Ok(())
     }
 
     fn block_summary_for_node(&self, hash: BlockHash, node: &BlockNode) -> ForkBlockSummary {
@@ -908,6 +1291,56 @@ impl ForkChainStore {
         })
     }
 
+    pub(crate) fn validate_share(
+        &self,
+        template: &BitcoinWorkTemplate,
+        share: &Share,
+        now_unix: u64,
+    ) -> Result<ForkShareValidation> {
+        if !share
+            .bitcoin_template_hash
+            .eq_ignore_ascii_case(&template.template_hash)
+        {
+            bail!("fork share references a different work template");
+        }
+        let header_prefix = share
+            .bitcoin_header_prefix_hex()
+            .context("fork share Bitcoin header is invalid")?;
+        if !header_prefix.eq_ignore_ascii_case(&template.header_prefix_hex) {
+            bail!("fork share header does not match its work template");
+        }
+        let recomputed_work_hash = share
+            .recomputed_work_hash()
+            .context("fork share work hash cannot be recomputed")?;
+        if !share.work_hash.eq_ignore_ascii_case(&recomputed_work_hash) {
+            bail!("fork share work hash does not match its Bitcoin header");
+        }
+
+        let validation = self.validate_work_template(template, now_unix)?;
+        let active_parent = self.active_tip.unwrap_or(self.inherited_tip_hash);
+        let work_status = if validation
+            .previous_block_hash
+            .eq_ignore_ascii_case(&active_parent.to_string())
+        {
+            "current-active-tip-share"
+        } else {
+            let active_block = self
+                .active_block_hash(validation.height)
+                .context("stale fork share has no active-chain block at its height")?;
+            if !share.work_hash.eq_ignore_ascii_case(&active_block) {
+                bail!(
+                    "stale fork share is not the exact active-chain block at height {}",
+                    validation.height
+                );
+            }
+            "historical-exact-active-block"
+        };
+        Ok(ForkShareValidation {
+            template: validation,
+            work_status: work_status.to_string(),
+        })
+    }
+
     fn replay_block_log(&mut self) -> Result<()> {
         let path = self.block_log_path();
         let mut file = open_private_file(&path, true)?;
@@ -945,6 +1378,7 @@ impl ForkChainStore {
             let node =
                 self.validate_block(block, normalized, u64::MAX - MAX_FUTURE_BLOCK_SECONDS)?;
             self.blocks.insert(hash, node);
+            self.index_stored_block(hash)?;
             self.consider_active_tip(hash)?;
         }
         Ok(())
@@ -954,8 +1388,8 @@ impl ForkChainStore {
         if block.weight() > Weight::MAX_BLOCK {
             bail!("fork block exceeds the 4,000,000 weight-unit consensus limit");
         }
-        if block.txdata.len() != 1 {
-            bail!("Experiment 0 fork blocks must contain exactly one coinbase transaction");
+        if block.txdata.is_empty() {
+            bail!("fork block has no coinbase transaction");
         }
         let coinbase = &block.txdata[0];
         if !coinbase.is_coinbase() {
@@ -1012,8 +1446,9 @@ impl ForkChainStore {
         {
             bail!("fork block time is more than two hours in the future");
         }
+        let fees_sats = self.validate_block_transactions(&block, height, parent_tip)?;
         validate_coinbase_height(coinbase, height)?;
-        validate_coinbase_reward(coinbase, height)?;
+        validate_coinbase_reward(coinbase, height, fees_sats)?;
         let cumulative_work = parent_work + required_target.to_work();
         Ok(BlockNode {
             block,
@@ -1022,6 +1457,56 @@ impl ForkChainStore {
             cumulative_work,
             difficulty_phase: next_difficulty.phase,
         })
+    }
+
+    fn validate_block_transactions(
+        &self,
+        block: &Block,
+        height: u64,
+        parent: Option<BlockHash>,
+    ) -> Result<u64> {
+        if !self.transactions_active_at(height) {
+            if block.txdata.len() != 1 {
+                bail!(
+                    "fork blocks before the transaction activation height must contain exactly one coinbase transaction"
+                );
+            }
+            return Ok(0);
+        }
+        let upgrade = self
+            .transaction_upgrade
+            .as_ref()
+            .expect("active transaction rules have an upgrade manifest");
+        if block.txdata.len()
+            > usize::try_from(upgrade.max_block_transactions)
+                .context("fork max block transaction count exceeds usize")?
+        {
+            bail!(
+                "fork block contains {} transactions; {} allowed",
+                block.txdata.len(),
+                upgrade.max_block_transactions
+            );
+        }
+        if block.txdata.iter().skip(1).any(Transaction::is_coinbase) {
+            bail!("fork block contains more than one coinbase transaction");
+        }
+
+        let coinbase = &block.txdata[0];
+        let coinbase_txid = coinbase.compute_txid();
+        let mut state = self.branch_state(parent)?;
+        if !state.txids.insert(coinbase_txid) {
+            bail!("fork branch already contains coinbase transaction id {coinbase_txid}");
+        }
+        add_transaction_outputs(&mut state, coinbase, height)?;
+
+        let mut fees_sats = 0u64;
+        for transaction in block.txdata.iter().skip(1) {
+            let fee = self.validate_and_apply_transaction(transaction, height, &mut state)?;
+            fees_sats = fees_sats
+                .checked_add(fee)
+                .context("fork block fee total overflow")?;
+        }
+        Ok(fees_sats)
     }
 
     fn next_difficulty(
@@ -1158,6 +1643,33 @@ impl ForkChainStore {
         Ok(())
     }
 
+    fn index_stored_block(&mut self, hash: BlockHash) -> Result<()> {
+        let node = self
+            .blocks
+            .get(&hash)
+            .context("cannot index a fork block that is not stored")?;
+        let height = node.height;
+        let txids = node
+            .block
+            .txdata
+            .iter()
+            .map(Transaction::compute_txid)
+            .collect::<Vec<_>>();
+        if !self.stored_block_order.insert((Reverse(height), hash)) {
+            bail!("fork block is already present in explorer ordering index");
+        }
+        for (transaction_index, txid) in txids.into_iter().enumerate() {
+            self.transaction_locations
+                .entry(txid)
+                .or_default()
+                .push(ForkTransactionLocation {
+                    block_hash: hash,
+                    transaction_index,
+                });
+        }
+        Ok(())
+    }
+
     fn rebuild_active_index(&mut self) -> Result<()> {
         let mut active = BTreeMap::new();
         let mut cursor = self.active_tip;
@@ -1174,6 +1686,191 @@ impl ForkChainStore {
             };
         }
         self.active_by_height = active;
+        self.rebuild_explorer_index()?;
+        Ok(())
+    }
+
+    fn rebuild_explorer_index(&mut self) -> Result<()> {
+        let mut outputs = BTreeMap::new();
+        let mut spends = BTreeMap::new();
+        let mut accumulators = BTreeMap::<String, ForkAddressAccumulator>::new();
+
+        for (height, block_hash) in &self.active_by_height {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for tx in &node.block.txdata {
+                let txid = tx.compute_txid();
+                for (vout, output) in tx.output.iter().enumerate() {
+                    let vout =
+                        u32::try_from(vout).context("fork transaction output index exceeds u32")?;
+                    let outpoint = OutPoint { txid, vout };
+                    outputs.insert(
+                        outpoint,
+                        IndexedForkOutput {
+                            output: output.clone(),
+                            height: *height,
+                            coinbase: tx.is_coinbase(),
+                        },
+                    );
+                    let Some(address) = output_address(output) else {
+                        continue;
+                    };
+                    let accumulator = accumulators.entry(address).or_default();
+                    accumulator.transaction_ids.insert(txid);
+                    accumulator.funded_output_count =
+                        accumulator.funded_output_count.saturating_add(1);
+                    accumulator.funded_total_sats = accumulator
+                        .funded_total_sats
+                        .checked_add(output.value.to_sat())
+                        .context("fork address funded total overflow")?;
+                    update_height_range(
+                        &mut accumulator.first_seen_height,
+                        &mut accumulator.last_seen_height,
+                        *height,
+                    );
+                }
+            }
+        }
+
+        for (height, block_hash) in &self.active_by_height {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for tx in &node.block.txdata {
+                if tx.is_coinbase() {
+                    continue;
+                }
+                let txid = tx.compute_txid();
+                for (vin, input) in tx.input.iter().enumerate() {
+                    spends.insert(
+                        input.previous_output,
+                        ForkOutputSpend {
+                            txid: txid.to_string(),
+                            vin,
+                            height: *height,
+                        },
+                    );
+                    let Some(indexed) = outputs.get(&input.previous_output) else {
+                        continue;
+                    };
+                    let Some(address) = output_address(&indexed.output) else {
+                        continue;
+                    };
+                    let accumulator = accumulators.entry(address).or_default();
+                    accumulator.transaction_ids.insert(txid);
+                    accumulator.spent_output_count =
+                        accumulator.spent_output_count.saturating_add(1);
+                    accumulator.spent_total_sats = accumulator
+                        .spent_total_sats
+                        .checked_add(indexed.output.value.to_sat())
+                        .context("fork address spent total overflow")?;
+                    update_height_range(
+                        &mut accumulator.first_seen_height,
+                        &mut accumulator.last_seen_height,
+                        *height,
+                    );
+                }
+            }
+        }
+
+        let mut addresses = accumulators
+            .into_iter()
+            .map(|(address, accumulator)| {
+                let balance_sats = accumulator
+                    .funded_total_sats
+                    .checked_sub(accumulator.spent_total_sats)
+                    .context("fork address balance underflow")?;
+                Ok((
+                    address.clone(),
+                    ForkAddressIndexEntry {
+                        summary: ForkAddressSummary {
+                            address,
+                            transaction_count: accumulator.transaction_ids.len(),
+                            funded_output_count: accumulator.funded_output_count,
+                            funded_total_sats: accumulator.funded_total_sats,
+                            spent_output_count: accumulator.spent_output_count,
+                            spent_total_sats: accumulator.spent_total_sats,
+                            balance_sats,
+                            first_seen_height: accumulator.first_seen_height,
+                            last_seen_height: accumulator.last_seen_height,
+                        },
+                        transactions: Vec::new(),
+                        utxos: Vec::new(),
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+
+        for (height, block_hash) in self.active_by_height.iter().rev() {
+            let node = self
+                .blocks
+                .get(block_hash)
+                .expect("active fork block must exist");
+            for (transaction_index, tx) in node.block.txdata.iter().enumerate().rev() {
+                let mut related_addresses = BTreeSet::new();
+                for output in &tx.output {
+                    if let Some(address) = output_address(output) {
+                        related_addresses.insert(address);
+                    }
+                }
+                for input in &tx.input {
+                    if let Some(address) = outputs
+                        .get(&input.previous_output)
+                        .and_then(|indexed| output_address(&indexed.output))
+                    {
+                        related_addresses.insert(address);
+                    }
+                }
+                if related_addresses.is_empty() {
+                    continue;
+                }
+                let transaction =
+                    transaction_ref(tx, *block_hash, *height, true, transaction_index, &outputs)?;
+                for address in related_addresses {
+                    if let Some(entry) = addresses.get_mut(&address) {
+                        entry.transactions.push(transaction.clone());
+                    }
+                }
+            }
+        }
+
+        for (outpoint, indexed) in &outputs {
+            if spends.contains_key(outpoint) {
+                continue;
+            }
+            let Some(address) = output_address(&indexed.output) else {
+                continue;
+            };
+            if let Some(entry) = addresses.get_mut(&address) {
+                entry.utxos.push(ForkUtxo {
+                    txid: outpoint.txid.to_string(),
+                    vout: outpoint.vout,
+                    value_sats: indexed.output.value.to_sat(),
+                    script_pubkey_hex: hex::encode(indexed.output.script_pubkey.as_bytes()),
+                    script_type: script_type(&indexed.output),
+                    height: indexed.height,
+                    coinbase: indexed.coinbase,
+                });
+            }
+        }
+        for entry in addresses.values_mut() {
+            entry.utxos.sort_by(|left, right| {
+                right
+                    .height
+                    .cmp(&left.height)
+                    .then_with(|| left.txid.cmp(&right.txid))
+                    .then_with(|| left.vout.cmp(&right.vout))
+            });
+        }
+
+        self.explorer = ForkExplorerIndex {
+            outputs,
+            spends,
+            addresses,
+        };
         Ok(())
     }
 
@@ -1290,6 +1987,8 @@ fn estimated_hashrate_hps(target: Target, target_spacing_seconds: u64) -> u128 {
 pub(crate) struct ForkChainClient {
     addr: SocketAddr,
     activation_id: String,
+    transaction_upgrade_id: Option<String>,
+    peer_capability: Option<Arc<Vec<u8>>>,
 }
 
 impl ForkChainClient {
@@ -1306,7 +2005,24 @@ impl ForkChainClient {
         Ok(Self {
             addr,
             activation_id,
+            transaction_upgrade_id: None,
+            peer_capability: None,
         })
+    }
+
+    fn new_peer(
+        addr: SocketAddr,
+        activation_id: String,
+        transaction_upgrade_id: Option<String>,
+        peer_capability: Option<Arc<Vec<u8>>>,
+    ) -> Result<Self> {
+        let mut client = Self::new(addr, activation_id, true)?;
+        if let Some(upgrade_id) = &transaction_upgrade_id {
+            validate_activation_id(upgrade_id).context("fork transaction upgrade id is invalid")?;
+        }
+        client.transaction_upgrade_id = transaction_upgrade_id;
+        client.peer_capability = peer_capability;
+        Ok(client)
     }
 
     pub(crate) async fn status(&self) -> Result<ForkChainStatus> {
@@ -1338,6 +2054,25 @@ impl ForkChainClient {
         })
     }
 
+    pub(crate) async fn submit_transaction(
+        &self,
+        transaction_hex: &str,
+    ) -> Result<ForkTransactionAcceptance> {
+        let value = self
+            .request(ForkWireMethod::SubmitTransaction {
+                transaction_hex: transaction_hex.to_string(),
+            })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain transaction submission response has invalid shape")
+    }
+
+    async fn mempool_transactions(&self) -> Result<Vec<String>> {
+        let value = self.request(ForkWireMethod::MempoolTransactions).await?;
+        serde_json::from_value(value)
+            .context("fork-chain mempool transaction response has invalid shape")
+    }
+
     pub(crate) async fn validate_work_template(
         &self,
         template: &BitcoinWorkTemplate,
@@ -1349,6 +2084,21 @@ impl ForkChainClient {
             .await?;
         serde_json::from_value(value)
             .context("fork-chain work-template validation response has invalid shape")
+    }
+
+    pub(crate) async fn validate_share(
+        &self,
+        template: &BitcoinWorkTemplate,
+        share: &Share,
+    ) -> Result<ForkShareValidation> {
+        let value = self
+            .request(ForkWireMethod::ValidateShare {
+                template: template.clone(),
+                share: Box::new(share.clone()),
+            })
+            .await?;
+        serde_json::from_value(value)
+            .context("fork-chain share validation response has invalid shape")
     }
 
     pub(crate) async fn active_block_hash(&self, height: u64) -> Result<Option<String>> {
@@ -1455,11 +2205,16 @@ impl ForkChainClient {
     }
 
     async fn request(&self, method: ForkWireMethod) -> Result<Value> {
-        let request = ForkWireRequest {
+        let mut request = ForkWireRequest {
             protocol_version: FORK_PROTOCOL_VERSION,
             activation_id: self.activation_id.clone(),
+            transaction_upgrade_id: self.transaction_upgrade_id.clone(),
+            auth: None,
             method,
         };
+        if let Some(capability) = self.peer_capability.as_deref() {
+            request.auth = Some(create_peer_request_auth(&request, capability)?);
+        }
         let payload =
             serde_json::to_vec(&request).context("failed to encode fork-chain request")?;
         let response = timeout(
@@ -1496,8 +2251,29 @@ impl ForkChainClient {
 struct ForkWireRequest {
     protocol_version: u16,
     activation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transaction_upgrade_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<ForkWireAuth>,
     #[serde(flatten)]
     method: ForkWireMethod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ForkWireAuth {
+    timestamp_unix: u64,
+    nonce_hex: String,
+    mac_hex: String,
+}
+
+#[derive(Serialize)]
+struct ForkWireAuthPayload<'a> {
+    protocol_version: u16,
+    activation_id: &'a str,
+    transaction_upgrade_id: &'a Option<String>,
+    timestamp_unix: u64,
+    nonce_hex: &'a str,
+    method: &'a ForkWireMethod,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1508,9 +2284,17 @@ enum ForkWireMethod {
     ValidateWorkTemplate {
         template: BitcoinWorkTemplate,
     },
+    ValidateShare {
+        template: BitcoinWorkTemplate,
+        share: Box<Share>,
+    },
     SubmitBlock {
         block_hex: String,
     },
+    SubmitTransaction {
+        transaction_hex: String,
+    },
+    MempoolTransactions,
     ActiveBlockHash {
         height: u64,
     },
@@ -1545,6 +2329,10 @@ enum ForkWireMethod {
         cursor: usize,
         limit: u16,
     },
+    UnspentOutput {
+        txid: String,
+        vout: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1578,6 +2366,234 @@ impl ForkWireResponse {
     }
 }
 
+#[derive(Debug, Default)]
+struct ForkPeerReplayState {
+    nonces: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ForkPeerMutationKind {
+    Block,
+    Transaction,
+    MempoolRead,
+}
+
+#[derive(Debug, Default)]
+struct ForkPeerRateWindow {
+    started_at_unix: u64,
+    blocks: usize,
+    transactions: usize,
+    mempool_reads: usize,
+}
+
+#[derive(Debug, Default)]
+struct ForkPeerRateLimiter {
+    by_ip: StdMutex<BTreeMap<IpAddr, ForkPeerRateWindow>>,
+}
+
+struct ForkListenerSecurity {
+    allow_templates: bool,
+    allow_unauthenticated_mutations: bool,
+    peer_capability: Option<Arc<Vec<u8>>>,
+    replay_state: StdMutex<ForkPeerReplayState>,
+    rate_limiter: ForkPeerRateLimiter,
+}
+
+impl ForkPeerRateLimiter {
+    fn observe(&self, ip: IpAddr, kind: ForkPeerMutationKind, now_unix: u64) -> Result<()> {
+        let mut peers = self
+            .by_ip
+            .lock()
+            .map_err(|_| anyhow!("fork peer rate limiter lock is poisoned"))?;
+        peers.retain(|_, window| {
+            now_unix.saturating_sub(window.started_at_unix) < FORK_P2P_RATE_WINDOW_SECONDS
+        });
+        if !peers.contains_key(&ip) && peers.len() >= MAX_P2P_RATE_LIMIT_IPS {
+            bail!("fork peer rate limiter capacity exceeded");
+        }
+        let window = peers.entry(ip).or_insert_with(|| ForkPeerRateWindow {
+            started_at_unix: now_unix,
+            ..ForkPeerRateWindow::default()
+        });
+        if now_unix.saturating_sub(window.started_at_unix) >= FORK_P2P_RATE_WINDOW_SECONDS {
+            *window = ForkPeerRateWindow {
+                started_at_unix: now_unix,
+                ..ForkPeerRateWindow::default()
+            };
+        }
+        let (counter, maximum) = match kind {
+            ForkPeerMutationKind::Block => {
+                (&mut window.blocks, MAX_P2P_BLOCK_SUBMISSIONS_PER_WINDOW)
+            }
+            ForkPeerMutationKind::Transaction => (
+                &mut window.transactions,
+                MAX_P2P_TRANSACTION_SUBMISSIONS_PER_WINDOW,
+            ),
+            ForkPeerMutationKind::MempoolRead => (
+                &mut window.mempool_reads,
+                MAX_P2P_MEMPOOL_REQUESTS_PER_WINDOW,
+            ),
+        };
+        *counter = counter.saturating_add(1);
+        if *counter > maximum {
+            bail!("fork peer request rate exceeded");
+        }
+        Ok(())
+    }
+}
+
+impl ForkWireMethod {
+    fn peer_mutation_kind(&self) -> Option<ForkPeerMutationKind> {
+        match self {
+            Self::SubmitBlock { .. } => Some(ForkPeerMutationKind::Block),
+            Self::SubmitTransaction { .. } => Some(ForkPeerMutationKind::Transaction),
+            Self::MempoolTransactions => Some(ForkPeerMutationKind::MempoolRead),
+            _ => None,
+        }
+    }
+}
+
+fn create_peer_request_auth(request: &ForkWireRequest, capability: &[u8]) -> Result<ForkWireAuth> {
+    let mut nonce = [0u8; 16];
+    OsRng.fill_bytes(&mut nonce);
+    let timestamp_unix = current_unix_time();
+    let nonce_hex = hex::encode(nonce);
+    let mac_hex = peer_request_mac(request, timestamp_unix, &nonce_hex, capability)?;
+    Ok(ForkWireAuth {
+        timestamp_unix,
+        nonce_hex,
+        mac_hex,
+    })
+}
+
+fn peer_request_mac(
+    request: &ForkWireRequest,
+    timestamp_unix: u64,
+    nonce_hex: &str,
+    capability: &[u8],
+) -> Result<String> {
+    let payload = ForkWireAuthPayload {
+        protocol_version: request.protocol_version,
+        activation_id: &request.activation_id,
+        transaction_upgrade_id: &request.transaction_upgrade_id,
+        timestamp_unix,
+        nonce_hex,
+        method: &request.method,
+    };
+    let payload =
+        serde_json::to_vec(&payload).context("failed to encode fork peer auth payload")?;
+    let mut engine = HmacEngine::<sha256::Hash>::new(capability);
+    engine.input(&payload);
+    Ok(Hmac::<sha256::Hash>::from_engine(engine).to_string())
+}
+
+fn verify_peer_request_auth(
+    request: &ForkWireRequest,
+    capability: &[u8],
+    replay_state: &StdMutex<ForkPeerReplayState>,
+    now_unix: u64,
+) -> Result<()> {
+    let auth = request
+        .auth
+        .as_ref()
+        .context("fork peer mutation request omitted authentication")?;
+    if now_unix.abs_diff(auth.timestamp_unix) > FORK_P2P_AUTH_WINDOW_SECONDS {
+        bail!("fork peer authentication timestamp is outside the allowed window");
+    }
+    if auth.nonce_hex.len() != 32
+        || !auth
+            .nonce_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("fork peer authentication nonce must be canonical lowercase hex");
+    }
+    let nonce =
+        hex::decode(&auth.nonce_hex).context("fork peer authentication nonce is invalid")?;
+    if nonce.len() != 16 {
+        bail!("fork peer authentication nonce must be 16 bytes");
+    }
+    if auth.mac_hex.len() != 64
+        || !auth
+            .mac_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("fork peer authentication MAC must be canonical lowercase hex");
+    }
+    let provided_mac =
+        hex::decode(&auth.mac_hex).context("fork peer authentication MAC is invalid")?;
+    let expected_mac = peer_request_mac(request, auth.timestamp_unix, &auth.nonce_hex, capability)?;
+    let expected_mac = hex::decode(expected_mac).expect("generated HMAC is valid hex");
+    if !constant_time_bytes_eq(&provided_mac, &expected_mac) {
+        bail!("fork peer authentication MAC does not match");
+    }
+    let mut replay = replay_state
+        .lock()
+        .map_err(|_| anyhow!("fork peer replay lock is poisoned"))?;
+    replay
+        .nonces
+        .retain(|_, timestamp| now_unix.abs_diff(*timestamp) <= FORK_P2P_AUTH_WINDOW_SECONDS);
+    if replay.nonces.contains_key(&auth.nonce_hex) {
+        bail!("fork peer authentication nonce was already used");
+    }
+    if replay.nonces.len() >= MAX_P2P_AUTH_NONCES {
+        bail!("fork peer authentication replay cache capacity exceeded");
+    }
+    replay
+        .nonces
+        .insert(auth.nonce_hex.clone(), auth.timestamp_unix);
+    Ok(())
+}
+
+fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn load_fork_peer_capability(datadir: &Path) -> Result<Option<Arc<Vec<u8>>>> {
+    let configured = std::env::var_os(FORK_P2P_CAPABILITY_FILE_ENV).map(PathBuf::from);
+    let path = configured
+        .clone()
+        .unwrap_or_else(|| datadir.join(DEFAULT_FORK_P2P_CAPABILITY_FILE));
+    if configured.is_none() && !path.exists() {
+        return Ok(None);
+    }
+    if path.as_os_str().is_empty() {
+        bail!("{FORK_P2P_CAPABILITY_FILE_ENV} must not be empty");
+    }
+    let file = open_readonly_regular_file(&path, "fork peer capability")?;
+    let metadata = file.metadata()?;
+    validate_private_file_mode(&metadata, &path)?;
+    if metadata.len() > u64::try_from(MAX_FORK_P2P_CAPABILITY_BYTES.saturating_add(2))? {
+        bail!("fork peer capability file is too large");
+    }
+    let mut capability = Vec::new();
+    file.take(u64::try_from(
+        MAX_FORK_P2P_CAPABILITY_BYTES.saturating_add(3),
+    )?)
+    .read_to_end(&mut capability)
+    .context("failed to read fork peer capability")?;
+    while capability
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        capability.pop();
+    }
+    if !(MIN_FORK_P2P_CAPABILITY_BYTES..=MAX_FORK_P2P_CAPABILITY_BYTES).contains(&capability.len())
+    {
+        bail!(
+            "fork peer capability must contain {MIN_FORK_P2P_CAPABILITY_BYTES}-{MAX_FORK_P2P_CAPABILITY_BYTES} bytes"
+        );
+    }
+    Ok(Some(Arc::new(capability)))
+}
+
 pub(crate) async fn run_fork_chain_node(config: ForkChainNodeConfig) -> Result<()> {
     if config.rpc_bind_addr.port() == 0 {
         bail!("fork-chain control RPC port must not be zero");
@@ -1605,24 +2621,54 @@ pub(crate) async fn run_fork_chain_node(config: ForkChainNodeConfig) -> Result<(
     if config.sync_interval_seconds == 0 || config.sync_interval_seconds > 3_600 {
         bail!("fork-chain sync interval must be 1..=3600 seconds");
     }
-    let store = Arc::new(RwLock::new(ForkChainStore::open(
+    let peer_capability = load_fork_peer_capability(&config.datadir)?;
+    if config
+        .p2p_bind_addr
+        .is_some_and(|bind_addr| !bind_addr.ip().is_loopback())
+        && peer_capability.is_none()
+    {
+        bail!(
+            "non-loopback fork-chain P2P requires a private capability file via {FORK_P2P_CAPABILITY_FILE_ENV} or {}",
+            config.datadir.join(DEFAULT_FORK_P2P_CAPABILITY_FILE).display()
+        );
+    }
+    if config
+        .peer_addrs
+        .iter()
+        .any(|peer| !peer.ip().is_loopback())
+        && peer_capability.is_none()
+    {
+        bail!("non-loopback fork-chain peers require an authenticated P2P capability");
+    }
+    let store = Arc::new(RwLock::new(ForkChainStore::open_with_transaction_upgrade(
         &config.datadir,
         &config.activation_manifest,
+        config.transaction_upgrade_manifest.as_deref(),
     )?));
-    let activation_id = store.read().await.manifest().activation_id.clone();
+    let (activation_id, transaction_upgrade_id) = {
+        let store = store.read().await;
+        (
+            store.manifest().activation_id.clone(),
+            store.transaction_upgrade_id(),
+        )
+    };
     let peers = Arc::new(deduplicate_peers(config.peer_addrs));
     let rpc_listener = TcpListener::bind(config.rpc_bind_addr)
         .await
         .with_context(|| format!("failed to bind fork-chain RPC on {}", config.rpc_bind_addr))?;
     eprintln!(
-        "fork-chain RPC listening on {} activation_id={}",
-        config.rpc_bind_addr, activation_id
+        "fork-chain RPC listening on {} activation_id={} transaction_upgrade_id={}",
+        config.rpc_bind_addr,
+        activation_id,
+        transaction_upgrade_id.as_deref().unwrap_or("none")
     );
     let rpc_task = tokio::spawn(serve_listener(
         rpc_listener,
         Arc::clone(&store),
         Arc::clone(&peers),
         true,
+        true,
+        None,
     ));
     let p2p_task = if let Some(bind_addr) = config.p2p_bind_addr {
         let listener = TcpListener::bind(bind_addr)
@@ -1634,6 +2680,8 @@ pub(crate) async fn run_fork_chain_node(config: ForkChainNodeConfig) -> Result<(
             Arc::clone(&store),
             Arc::clone(&peers),
             false,
+            bind_addr.ip().is_loopback(),
+            peer_capability.clone(),
         )))
     } else {
         None
@@ -1644,6 +2692,7 @@ pub(crate) async fn run_fork_chain_node(config: ForkChainNodeConfig) -> Result<(
         Some(tokio::spawn(peer_sync_loop(
             Arc::clone(&store),
             Arc::clone(&peers),
+            peer_capability.clone(),
             Duration::from_secs(config.sync_interval_seconds),
         )))
     };
@@ -1668,8 +2717,17 @@ async fn serve_listener(
     store: Arc<RwLock<ForkChainStore>>,
     peers: Arc<Vec<SocketAddr>>,
     allow_templates: bool,
+    allow_unauthenticated_mutations: bool,
+    peer_capability: Option<Arc<Vec<u8>>>,
 ) -> Result<()> {
     let connections = ConnectionLimiter::new(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP);
+    let security = Arc::new(ForkListenerSecurity {
+        allow_templates,
+        allow_unauthenticated_mutations,
+        peer_capability,
+        replay_state: StdMutex::new(ForkPeerReplayState::default()),
+        rate_limiter: ForkPeerRateLimiter::default(),
+    });
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let Some(connection_guard) = connections.try_acquire(peer_addr.ip()) else {
@@ -1677,15 +2735,12 @@ async fn serve_listener(
         };
         let store = Arc::clone(&store);
         let peers = Arc::clone(&peers);
-        let allow_submit_blocks = allow_templates
-            || peers
-                .iter()
-                .any(|configured_peer| configured_peer.ip() == peer_addr.ip());
+        let security = Arc::clone(&security);
         tokio::spawn(async move {
             let _connection_guard = connection_guard;
             if let Ok(Err(err)) = timeout(
                 Duration::from_secs(DEFAULT_NETWORK_TIMEOUT_SECONDS),
-                handle_connection(stream, store, peers, allow_templates, allow_submit_blocks),
+                handle_connection(stream, peer_addr, store, peers, security),
             )
             .await
             {
@@ -1697,10 +2752,10 @@ async fn serve_listener(
 
 async fn handle_connection(
     mut stream: TcpStream,
+    peer_addr: SocketAddr,
     store: Arc<RwLock<ForkChainStore>>,
     peers: Arc<Vec<SocketAddr>>,
-    allow_templates: bool,
-    allow_submit_blocks: bool,
+    security: Arc<ForkListenerSecurity>,
 ) -> Result<()> {
     let payload = read_frame(&mut stream).await?;
     let request: ForkWireRequest = match serde_json::from_slice(&payload) {
@@ -1710,8 +2765,53 @@ async fn handle_connection(
             return write_wire_response(&mut stream, &response).await;
         }
     };
-    let response =
-        handle_wire_request(&request, &store, allow_templates, allow_submit_blocks).await;
+    let mutation_kind = request.method.peer_mutation_kind();
+    // Throttle by the TCP peer address before spending HMAC work or consuming
+    // replay-cache capacity. A capability holder cannot bypass this ordering.
+    let mutation_rate_limited = match mutation_kind {
+        Some(kind) if !security.allow_templates => security
+            .rate_limiter
+            .observe(peer_addr.ip(), kind, current_unix_time())
+            .is_err(),
+        _ => false,
+    };
+    let allow_mutations = if mutation_rate_limited {
+        false
+    } else if security.allow_templates || security.allow_unauthenticated_mutations {
+        true
+    } else if mutation_kind.is_some() {
+        security
+            .peer_capability
+            .as_deref()
+            .is_some_and(|capability| {
+                verify_peer_request_auth(
+                    &request,
+                    capability,
+                    &security.replay_state,
+                    current_unix_time(),
+                )
+                .is_ok()
+            })
+    } else {
+        false
+    };
+    let response = if mutation_kind.is_some() {
+        if mutation_rate_limited {
+            Ok(ForkWireResponse::error(
+                "rate_limited",
+                "fork peer request rate exceeded",
+            ))
+        } else if !allow_mutations {
+            Ok(ForkWireResponse::error(
+                "peer_authentication",
+                "fork peer mutation requires an authenticated capability",
+            ))
+        } else {
+            handle_wire_request(&request, &store, security.allow_templates, true).await
+        }
+    } else {
+        handle_wire_request(&request, &store, security.allow_templates, false).await
+    };
     let accepted_block = match (&request.method, &response) {
         (ForkWireMethod::SubmitBlock { block_hex }, Ok(response)) if response.ok => response
             .result
@@ -1721,12 +2821,52 @@ async fn handle_connection(
             .map(|_| block_hex.clone()),
         _ => None,
     };
+    let accepted_transaction = match (&request.method, &response) {
+        (ForkWireMethod::SubmitTransaction { transaction_hex }, Ok(response)) if response.ok => {
+            response
+                .result
+                .as_ref()
+                .and_then(|value| {
+                    serde_json::from_value::<ForkTransactionAcceptance>(value.clone()).ok()
+                })
+                .filter(|accepted| accepted.accepted)
+                .map(|_| transaction_hex.clone())
+        }
+        _ => None,
+    };
     let response = response
         .unwrap_or_else(|err| ForkWireResponse::error("consensus_rejected", format!("{err:#}")));
     write_wire_response(&mut stream, &response).await?;
     if let Some(block_hex) = accepted_block {
-        let activation_id = store.read().await.manifest().activation_id.clone();
-        tokio::spawn(broadcast_block(peers, activation_id, block_hex));
+        let (activation_id, transaction_upgrade_id) = {
+            let store = store.read().await;
+            (
+                store.manifest().activation_id.clone(),
+                store.transaction_upgrade_id(),
+            )
+        };
+        tokio::spawn(broadcast_block(
+            peers,
+            activation_id,
+            transaction_upgrade_id,
+            security.peer_capability.clone(),
+            block_hex,
+        ));
+    } else if let Some(transaction_hex) = accepted_transaction {
+        let (activation_id, transaction_upgrade_id) = {
+            let store = store.read().await;
+            (
+                store.manifest().activation_id.clone(),
+                store.transaction_upgrade_id(),
+            )
+        };
+        tokio::spawn(broadcast_transaction(
+            peers,
+            activation_id,
+            transaction_upgrade_id,
+            security.peer_capability.clone(),
+            transaction_hex,
+        ));
     }
     Ok(())
 }
@@ -1735,7 +2875,7 @@ async fn handle_wire_request(
     request: &ForkWireRequest,
     store: &Arc<RwLock<ForkChainStore>>,
     allow_templates: bool,
-    allow_submit_blocks: bool,
+    allow_mutations: bool,
 ) -> Result<ForkWireResponse> {
     if request.protocol_version != FORK_PROTOCOL_VERSION {
         return Ok(ForkWireResponse::error(
@@ -1748,6 +2888,15 @@ async fn handle_wire_request(
         return Ok(ForkWireResponse::error(
             "activation_mismatch",
             "peer uses a different fork activation",
+        ));
+    }
+    let expected_upgrade = store.read().await.transaction_upgrade_id();
+    if (!allow_templates || request.transaction_upgrade_id.is_some())
+        && request.transaction_upgrade_id != expected_upgrade
+    {
+        return Ok(ForkWireResponse::error(
+            "transaction_upgrade_mismatch",
+            "peer uses a different fork transaction upgrade",
         ));
     }
     match &request.method {
@@ -1771,13 +2920,39 @@ async fn handle_wire_request(
             "method_not_allowed",
             "work-template validation is available only on loopback control RPC",
         )),
-        ForkWireMethod::SubmitBlock { block_hex } if allow_submit_blocks => {
+        ForkWireMethod::ValidateShare { template, share } if allow_templates => {
+            ForkWireResponse::success(store.read().await.validate_share(
+                template,
+                share.as_ref(),
+                current_unix_time(),
+            )?)
+        }
+        ForkWireMethod::ValidateShare { .. } => Ok(ForkWireResponse::error(
+            "method_not_allowed",
+            "share validation is available only on loopback control RPC",
+        )),
+        ForkWireMethod::SubmitBlock { block_hex } if allow_mutations => {
             let result = store.write().await.submit_block(block_hex)?;
             ForkWireResponse::success(result)
         }
         ForkWireMethod::SubmitBlock { .. } => Ok(ForkWireResponse::error(
-            "peer_not_configured",
-            "block submission is limited to loopback control RPC and configured peer IPs",
+            "peer_authentication",
+            "block submission requires loopback control RPC or authenticated fork P2P",
+        )),
+        ForkWireMethod::SubmitTransaction { transaction_hex } if allow_mutations => {
+            let result = store.write().await.submit_transaction(transaction_hex)?;
+            ForkWireResponse::success(result)
+        }
+        ForkWireMethod::SubmitTransaction { .. } => Ok(ForkWireResponse::error(
+            "peer_authentication",
+            "transaction submission requires loopback control RPC or authenticated fork P2P",
+        )),
+        ForkWireMethod::MempoolTransactions if allow_mutations => {
+            ForkWireResponse::success(store.read().await.mempool_transactions())
+        }
+        ForkWireMethod::MempoolTransactions => Ok(ForkWireResponse::error(
+            "peer_authentication",
+            "mempool relay requires loopback control RPC or authenticated fork P2P",
         )),
         ForkWireMethod::ActiveBlockHash { height } => {
             ForkWireResponse::success(store.read().await.active_block_hash(*height))
@@ -1830,13 +3005,17 @@ async fn handle_wire_request(
             *cursor,
             usize::from(*limit),
         )?),
+        ForkWireMethod::UnspentOutput { txid, vout } if allow_templates => {
+            ForkWireResponse::success(store.read().await.unspent_output(txid, *vout)?)
+        }
         ForkWireMethod::BlockPage { .. }
         | ForkWireMethod::BlockSummary { .. }
         | ForkWireMethod::BlockTransactions { .. }
         | ForkWireMethod::TransactionDetail { .. }
         | ForkWireMethod::AddressSummary { .. }
         | ForkWireMethod::AddressTransactions { .. }
-        | ForkWireMethod::AddressUtxos { .. } => Ok(ForkWireResponse::error(
+        | ForkWireMethod::AddressUtxos { .. }
+        | ForkWireMethod::UnspentOutput { .. } => Ok(ForkWireResponse::error(
             "method_not_allowed",
             "explorer queries are available only on loopback control RPC",
         )),
@@ -1846,6 +3025,7 @@ async fn handle_wire_request(
 async fn peer_sync_loop(
     store: Arc<RwLock<ForkChainStore>>,
     peers: Arc<Vec<SocketAddr>>,
+    peer_capability: Option<Arc<Vec<u8>>>,
     cadence: Duration,
 ) -> Result<()> {
     let mut ticker = interval(cadence);
@@ -1853,18 +3033,36 @@ async fn peer_sync_loop(
     loop {
         ticker.tick().await;
         for peer in peers.iter().copied() {
-            if let Err(err) = sync_from_peer(&store, peer).await {
+            if let Err(err) = sync_from_peer(&store, peer, peer_capability.clone()).await {
                 eprintln!("fork-chain peer sync from {peer} failed: {err:#}");
             }
         }
     }
 }
 
-async fn sync_from_peer(store: &Arc<RwLock<ForkChainStore>>, peer: SocketAddr) -> Result<()> {
-    let activation_id = store.read().await.manifest().activation_id.clone();
-    let client = ForkChainClient::new(peer, activation_id, true)?;
+async fn sync_from_peer(
+    store: &Arc<RwLock<ForkChainStore>>,
+    peer: SocketAddr,
+    peer_capability: Option<Arc<Vec<u8>>>,
+) -> Result<()> {
+    let (activation_id, transaction_upgrade_id) = {
+        let store = store.read().await;
+        (
+            store.manifest().activation_id.clone(),
+            store.transaction_upgrade_id(),
+        )
+    };
+    let client = ForkChainClient::new_peer(
+        peer,
+        activation_id,
+        transaction_upgrade_id.clone(),
+        peer_capability,
+    )?;
     let remote = client.status().await?;
     let local = store.read().await.status();
+    if remote.transaction_upgrade_id != transaction_upgrade_id {
+        bail!("peer uses a different fork transaction upgrade");
+    }
     let shared_floor = local.inherited_tip_height;
     let mut low = shared_floor;
     let mut high = local.tip_height.min(remote.tip_height);
@@ -1884,15 +3082,51 @@ async fn sync_from_peer(store: &Arc<RwLock<ForkChainStore>>, peer: SocketAddr) -
         };
         store.write().await.submit_block(&block_hex)?;
     }
+    for transaction_hex in client.mempool_transactions().await? {
+        if let Err(err) = store.write().await.submit_transaction(&transaction_hex) {
+            eprintln!("fork-chain rejected relayed mempool transaction: {err:#}");
+        }
+    }
     Ok(())
 }
 
-async fn broadcast_block(peers: Arc<Vec<SocketAddr>>, activation_id: String, block_hex: String) {
+async fn broadcast_block(
+    peers: Arc<Vec<SocketAddr>>,
+    activation_id: String,
+    transaction_upgrade_id: Option<String>,
+    peer_capability: Option<Arc<Vec<u8>>>,
+    block_hex: String,
+) {
     for peer in peers.iter().copied() {
-        let Ok(client) = ForkChainClient::new(peer, activation_id.clone(), true) else {
+        let Ok(client) = ForkChainClient::new_peer(
+            peer,
+            activation_id.clone(),
+            transaction_upgrade_id.clone(),
+            peer_capability.clone(),
+        ) else {
             continue;
         };
         let _ = client.submit_block(&block_hex).await;
+    }
+}
+
+async fn broadcast_transaction(
+    peers: Arc<Vec<SocketAddr>>,
+    activation_id: String,
+    transaction_upgrade_id: Option<String>,
+    peer_capability: Option<Arc<Vec<u8>>>,
+    transaction_hex: String,
+) {
+    for peer in peers.iter().copied() {
+        let Ok(client) = ForkChainClient::new_peer(
+            peer,
+            activation_id.clone(),
+            transaction_upgrade_id.clone(),
+            peer_capability.clone(),
+        ) else {
+            continue;
+        };
+        let _ = client.submit_transaction(&transaction_hex).await;
     }
 }
 
@@ -1962,6 +3196,35 @@ pub(crate) fn read_activation_manifest(path: &Path) -> Result<ForkActivationMani
     Ok(manifest)
 }
 
+pub(crate) fn read_transaction_upgrade_manifest(
+    path: &Path,
+) -> Result<ForkTransactionUpgradeManifest> {
+    let mut file = open_readonly_regular_file(path, "fork transaction upgrade manifest")?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_TRANSACTION_UPGRADE_MANIFEST_BYTES {
+        bail!("fork transaction upgrade manifest exceeds size limit");
+    }
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_TRANSACTION_UPGRADE_MANIFEST_BYTES + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| {
+            format!(
+                "failed to read fork transaction upgrade manifest {}",
+                path.display()
+            )
+        })?;
+    if raw.len() as u64 > MAX_TRANSACTION_UPGRADE_MANIFEST_BYTES {
+        bail!("fork transaction upgrade manifest exceeds size limit");
+    }
+    let manifest: ForkTransactionUpgradeManifest = serde_json::from_slice(&raw)
+        .context("fork transaction upgrade manifest is invalid JSON")?;
+    manifest
+        .validate()
+        .context("fork transaction upgrade manifest failed integrity validation")?;
+    Ok(manifest)
+}
+
 fn decode_block(block_hex: &str) -> Result<Block> {
     let bytes = hex::decode(block_hex).context("fork block is invalid hex")?;
     if bytes.len() > MAX_BLOCK_BYTES {
@@ -1972,6 +3235,160 @@ fn decode_block(block_hex: &str) -> Result<Block> {
         bail!("fork block encoding is not canonical");
     }
     Ok(block)
+}
+
+fn decode_transaction(transaction_hex: &str) -> Result<Transaction> {
+    let bytes = hex::decode(transaction_hex).context("fork transaction is invalid hex")?;
+    if bytes.len() > MAX_BLOCK_BYTES {
+        bail!("fork transaction exceeds serialized size limit");
+    }
+    let transaction: Transaction =
+        deserialize(&bytes).context("fork transaction is not Bitcoin consensus data")?;
+    if serialize(&transaction) != bytes {
+        bail!("fork transaction encoding is not canonical");
+    }
+    Ok(transaction)
+}
+
+fn add_transaction_outputs(
+    state: &mut ForkBranchState,
+    transaction: &Transaction,
+    height: u64,
+) -> Result<()> {
+    let txid = transaction.compute_txid();
+    for (vout, output) in transaction.output.iter().enumerate() {
+        let vout = u32::try_from(vout).context("fork transaction output index exceeds u32")?;
+        let replaced = state.utxos.insert(
+            OutPoint { txid, vout },
+            IndexedForkOutput {
+                output: output.clone(),
+                height,
+                coinbase: transaction.is_coinbase(),
+            },
+        );
+        if replaced.is_some() {
+            bail!("fork transaction output collision for {txid}:{vout}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_segwit_keypath_signatures(transaction: &Transaction, prevouts: &[TxOut]) -> Result<()> {
+    if prevouts.len() != transaction.input.len() {
+        bail!("fork transaction previous-output count mismatch");
+    }
+    let secp = Secp256k1::verification_only();
+    let all_prevouts = Prevouts::All(prevouts);
+    for (input_index, (input, previous)) in
+        transaction.input.iter().zip(prevouts.iter()).enumerate()
+    {
+        if previous.script_pubkey.is_p2tr() {
+            if input.witness.len() != 1 {
+                bail!("fork P2TR input {input_index} must contain exactly one key-path signature");
+            }
+            let signature_bytes = input
+                .witness
+                .nth(0)
+                .expect("P2TR witness length was checked");
+            if signature_bytes.len() != 64 {
+                bail!("fork P2TR input {input_index} requires a 64-byte SIGHASH_DEFAULT signature");
+            }
+            let signature = taproot::Signature::from_slice(signature_bytes)
+                .with_context(|| format!("fork P2TR input {input_index} signature is invalid"))?;
+            if signature.sighash_type != TapSighashType::Default {
+                bail!("fork P2TR input {input_index} must use SIGHASH_DEFAULT");
+            }
+            let script = previous.script_pubkey.as_bytes();
+            let output_key = XOnlyPublicKey::from_slice(&script[2..34])
+                .context("fork P2TR output key is invalid")?;
+            let sighash = SighashCache::new(transaction)
+                .taproot_key_spend_signature_hash(
+                    input_index,
+                    &all_prevouts,
+                    TapSighashType::Default,
+                )
+                .with_context(|| {
+                    format!("failed to compute fork P2TR input {input_index} sighash")
+                })?;
+            secp.verify_schnorr(&signature.signature, &Message::from(sighash), &output_key)
+                .with_context(|| {
+                    format!("fork P2TR input {input_index} signature verification failed")
+                })?;
+        } else if previous.script_pubkey.is_p2wpkh() {
+            if input.witness.len() != 2 {
+                bail!("fork P2WPKH input {input_index} must contain a signature and public key");
+            }
+            let signature = ecdsa::Signature::from_slice(
+                input
+                    .witness
+                    .nth(0)
+                    .expect("P2WPKH witness length was checked"),
+            )
+            .with_context(|| format!("fork P2WPKH input {input_index} signature is invalid"))?;
+            if signature.sighash_type != bitcoin::EcdsaSighashType::All {
+                bail!("fork P2WPKH input {input_index} must use SIGHASH_ALL");
+            }
+            let public_key = CompressedPublicKey::from_slice(
+                input
+                    .witness
+                    .nth(1)
+                    .expect("P2WPKH witness length was checked"),
+            )
+            .with_context(|| format!("fork P2WPKH input {input_index} public key is invalid"))?;
+            let expected_script = bitcoin::ScriptBuf::new_p2wpkh(&public_key.wpubkey_hash());
+            if expected_script != previous.script_pubkey {
+                bail!("fork P2WPKH input {input_index} public key does not match its output");
+            }
+            let sighash = SighashCache::new(transaction)
+                .p2wpkh_signature_hash(
+                    input_index,
+                    &previous.script_pubkey,
+                    previous.value,
+                    bitcoin::EcdsaSighashType::All,
+                )
+                .with_context(|| {
+                    format!("failed to compute fork P2WPKH input {input_index} sighash")
+                })?;
+            public_key
+                .verify(&secp, &Message::from(sighash), &signature)
+                .with_context(|| {
+                    format!("fork P2WPKH input {input_index} signature verification failed")
+                })?;
+        } else {
+            bail!(
+                "fork input {input_index} spends an unsupported script; segwit-keypath-v1 permits only P2WPKH and P2TR key-path outputs"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn witness_commitment_script(transactions: &[Transaction]) -> Result<String> {
+    if transactions.is_empty() {
+        bail!("fork witness commitment requires at least one non-coinbase transaction");
+    }
+    let mut level = Vec::with_capacity(transactions.len() + 1);
+    level.push([0u8; 32]);
+    for transaction in transactions {
+        level.push(transaction.compute_wtxid().to_byte_array());
+    }
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let left = pair[0];
+            let right = pair.get(1).copied().unwrap_or(left);
+            let mut payload = Vec::with_capacity(64);
+            payload.extend_from_slice(&left);
+            payload.extend_from_slice(&right);
+            next.push(sha256d::Hash::hash(&payload).to_byte_array());
+        }
+        level = next;
+    }
+    let mut payload = Vec::with_capacity(64);
+    payload.extend_from_slice(&level[0]);
+    payload.extend_from_slice(&[0u8; 32]);
+    let commitment = sha256d::Hash::hash(&payload).to_byte_array();
+    Ok(format!("6a24aa21a9ed{}", hex::encode(commitment)))
 }
 
 fn pohw_commitment_hash(block: &Block) -> Option<String> {
@@ -2205,6 +3622,29 @@ fn normalize_block_hex(raw: &str) -> Result<String> {
     Ok(raw.to_ascii_lowercase())
 }
 
+fn normalize_transaction_hex(raw: &str) -> Result<String> {
+    if raw.is_empty()
+        || raw.len() % 2 != 0
+        || raw.len() > MAX_MEMPOOL_TRANSACTION_BYTES.saturating_mul(2)
+    {
+        bail!("fork transaction hex length is outside allowed bounds");
+    }
+    if !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("fork transaction contains non-hex characters");
+    }
+    Ok(raw.to_ascii_lowercase())
+}
+
+fn checked_mempool_bytes(current: usize, transaction_bytes: usize) -> Result<usize> {
+    let next = current
+        .checked_add(transaction_bytes)
+        .context("fork transaction mempool byte count overflow")?;
+    if next > MAX_MEMPOOL_BYTES {
+        bail!("fork transaction mempool byte limit exceeded");
+    }
+    Ok(next)
+}
+
 fn validate_coinbase_height(coinbase: &bitcoin::Transaction, height: u64) -> Result<()> {
     let input = coinbase
         .input
@@ -2227,7 +3667,11 @@ fn validate_coinbase_height(coinbase: &bitcoin::Transaction, height: u64) -> Res
     Ok(())
 }
 
-fn validate_coinbase_reward(coinbase: &bitcoin::Transaction, height: u64) -> Result<()> {
+fn validate_coinbase_reward(
+    coinbase: &bitcoin::Transaction,
+    height: u64,
+    fees_sats: u64,
+) -> Result<()> {
     let mut total = 0u64;
     for output in &coinbase.output {
         let amount = output.value.to_sat();
@@ -2238,9 +3682,11 @@ fn validate_coinbase_reward(coinbase: &bitcoin::Transaction, height: u64) -> Res
             .checked_add(amount)
             .context("fork coinbase output sum overflow")?;
     }
-    let subsidy = block_subsidy_sats(height);
-    if total > subsidy {
-        bail!("fork coinbase pays {total} sats but subsidy is only {subsidy} sats");
+    let allowed = block_subsidy_sats(height)
+        .checked_add(fees_sats)
+        .context("fork coinbase subsidy plus fees overflow")?;
+    if total > allowed {
+        bail!("fork coinbase pays {total} sats but subsidy plus fees are only {allowed} sats");
     }
     Ok(())
 }
@@ -2598,12 +4044,17 @@ mod tests {
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version as BlockVersion};
     use bitcoin::hashes::Hash;
+    use bitcoin::key::TapTweak;
+    use bitcoin::secp256k1::{Keypair, SecretKey};
     use bitcoin::transaction::Version as TransactionVersion;
     use bitcoin::{
         Amount, OutPoint, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
     };
     use chrono::{TimeZone, Utc};
-    use pohw_core::fork::{ForkConfig, ForkPoint, MainnetBlockRef};
+    use pohw_core::fork::{
+        ForkConfig, ForkPoint, ForkTransactionConsensus, ForkTransactionUpgradeManifest,
+        MainnetBlockRef,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_dir(label: &str) -> PathBuf {
@@ -2655,7 +4106,31 @@ mod tests {
         path
     }
 
+    fn write_transaction_upgrade(
+        dir: &Path,
+        activation: &ForkActivationManifest,
+        activation_height: u64,
+        coinbase_maturity: u64,
+    ) -> PathBuf {
+        let manifest = ForkTransactionUpgradeManifest::new(
+            &activation.activation_id,
+            activation_height,
+            ForkTransactionConsensus::SegwitKeypathV1,
+            coinbase_maturity,
+            1_000,
+            400_000,
+        )
+        .unwrap();
+        let path = dir.join("fork-transaction-upgrade.json");
+        fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        path
+    }
+
     fn coinbase(height: u64, amount: u64) -> Transaction {
+        coinbase_to_script(height, amount, ScriptBuf::new_op_return([]))
+    }
+
+    fn coinbase_to_script(height: u64, amount: u64, script_pubkey: ScriptBuf) -> Transaction {
         let height_number = minimal_script_number(height);
         let mut script = vec![height_number.len() as u8];
         script.extend_from_slice(&height_number);
@@ -2671,7 +4146,7 @@ mod tests {
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(amount),
-                script_pubkey: ScriptBuf::new_op_return([]),
+                script_pubkey,
             }],
         }
     }
@@ -2704,6 +4179,67 @@ mod tests {
             block.header.nonce = block.header.nonce.wrapping_add(1);
         }
         block
+    }
+
+    fn mine_block_to_script(
+        previous: BlockHash,
+        height: u64,
+        time: u32,
+        amount: u64,
+        script_pubkey: ScriptBuf,
+    ) -> Block {
+        let tx = coinbase_to_script(height, amount, script_pubkey);
+        let mut block = Block {
+            header: Header {
+                version: BlockVersion::from_consensus(FORK_BLOCK_VERSION),
+                prev_blockhash: previous,
+                merkle_root: tx.compute_txid().to_raw_hash().into(),
+                time,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: test_nonce_seed(time, 0x207f_ffff),
+            },
+            txdata: vec![tx],
+        };
+        let target = Target::from_compact(block.header.bits);
+        while !target.is_met_by(block.block_hash()) {
+            block.header.nonce = block.header.nonce.wrapping_add(1);
+        }
+        block
+    }
+
+    fn signed_p2tr_spend(
+        keypair: &Keypair,
+        previous_output: OutPoint,
+        previous_txout: TxOut,
+        output_value_sats: u64,
+    ) -> Transaction {
+        let secp = Secp256k1::new();
+        let mut transaction = Transaction {
+            version: TransactionVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_value_sats),
+                script_pubkey: previous_txout.script_pubkey.clone(),
+            }],
+        };
+        let prevouts = [previous_txout];
+        let sighash = SighashCache::new(&transaction)
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .unwrap();
+        let tweaked = keypair.tap_tweak(&secp, None);
+        let signature =
+            secp.sign_schnorr_no_aux_rand(&Message::from(sighash), tweaked.as_keypair());
+        transaction.input[0].witness = Witness::p2tr_key_spend(&taproot::Signature {
+            signature,
+            sighash_type: TapSighashType::Default,
+        });
+        transaction
     }
 
     fn test_nonce_seed(time: u32, bits: u32) -> u32 {
@@ -2753,6 +4289,120 @@ mod tests {
         }
         let reopened = ForkChainStore::open(&chain_dir, &manifest_path).unwrap();
         assert_eq!(reopened.status().tip_hash, first.block_hash().to_string());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn transaction_upgrade_spends_fork_created_p2tr_utxo_and_replays() {
+        let dir = test_dir("pohw-fork-chain-transactions");
+        let activation = manifest();
+        let manifest_path = write_manifest_value(&dir, &activation);
+        let upgrade_path = write_transaction_upgrade(&dir, &activation, 957_776, 1);
+        let chain_dir = dir.join("chain");
+        let inherited = BlockHash::from_str(&activation.fork_point.inherited_tip_hash).unwrap();
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let internal_key = keypair.x_only_public_key().0;
+        let vault_script = ScriptBuf::new_p2tr(&secp, internal_key, None);
+        let first = mine_block_to_script(
+            inherited,
+            957_775,
+            1_783_900_801,
+            50_000,
+            vault_script.clone(),
+        );
+        let first_txid = first.txdata[0].compute_txid();
+        let previous_txout = first.txdata[0].output[0].clone();
+
+        {
+            let mut store = ForkChainStore::open_with_transaction_upgrade(
+                &chain_dir,
+                &manifest_path,
+                Some(&upgrade_path),
+            )
+            .unwrap();
+            store.submit_block(&hex::encode(serialize(&first))).unwrap();
+            assert_eq!(store.status().transaction_activation_height, Some(957_776));
+
+            let mut invalid = signed_p2tr_spend(
+                &keypair,
+                OutPoint::new(first_txid, 0),
+                previous_txout.clone(),
+                48_999,
+            );
+            let mut invalid_signature = invalid.input[0].witness.nth(0).unwrap().to_vec();
+            invalid_signature[0] ^= 1;
+            invalid.input[0].witness = Witness::from_slice(&[invalid_signature]);
+            assert!(store
+                .submit_transaction(&hex::encode(serialize(&invalid)))
+                .unwrap_err()
+                .to_string()
+                .contains("signature verification failed"));
+
+            let spend = signed_p2tr_spend(
+                &keypair,
+                OutPoint::new(first_txid, 0),
+                previous_txout,
+                49_000,
+            );
+            let accepted = store
+                .submit_transaction(&hex::encode(serialize(&spend)))
+                .unwrap();
+            assert!(accepted.accepted);
+            assert_eq!(accepted.fee_sats, 1_000);
+            assert_eq!(store.status().mempool_transaction_count, 1);
+
+            let material = store.mining_template(1_783_900_802).unwrap();
+            assert_eq!(material.height, 957_776);
+            assert_eq!(
+                material.transaction_hashes,
+                vec![spend.compute_txid().to_string()]
+            );
+            assert_eq!(
+                material.coinbase_value_sats,
+                block_subsidy_sats(material.height) + 1_000
+            );
+            assert!(material.default_witness_commitment.is_some());
+            let job = build_stratum_job_from_template(&material, 4).unwrap().job;
+            let candidate = build_stratum_block_candidate(
+                &job, "01020304", "05060708", &job.ntime, "00000000", 4, false,
+            )
+            .unwrap();
+            let mut block = decode_block(candidate.block_hex.as_deref().unwrap()).unwrap();
+            let target = Target::from_compact(block.header.bits);
+            while !target.is_met_by(block.block_hash()) {
+                block.header.nonce = block.header.nonce.wrapping_add(1);
+            }
+            store.submit_block(&hex::encode(serialize(&block))).unwrap();
+            assert_eq!(store.status().mempool_transaction_count, 0);
+            assert!(store
+                .unspent_output(&first_txid.to_string(), 0)
+                .unwrap()
+                .is_none());
+            let spend_output = store
+                .unspent_output(&spend.compute_txid().to_string(), 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(spend_output.value_sats, 49_000);
+            assert_eq!(spend_output.confirmations, 1);
+        }
+
+        let reopened = ForkChainStore::open_with_transaction_upgrade(
+            &chain_dir,
+            &manifest_path,
+            Some(&upgrade_path),
+        )
+        .unwrap();
+        assert_eq!(reopened.status().active_fork_block_count, 2);
+        drop(reopened);
+        let legacy_open_error = match ForkChainStore::open(&chain_dir, &manifest_path) {
+            Ok(_) => panic!("legacy store unexpectedly opened upgraded fork history"),
+            Err(error) => error,
+        };
+        assert!(legacy_open_error
+            .to_string()
+            .contains("exactly one coinbase"));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2839,6 +4489,11 @@ mod tests {
         let manifest_path = write_manifest(&dir);
         let chain_dir = dir.join("chain");
         fs::create_dir_all(&chain_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&chain_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let log_path = chain_dir.join("fork-blocks.ndjson");
         fs::write(&log_path, b"not-json\n").unwrap();
         #[cfg(unix)]
@@ -3365,7 +5020,7 @@ mod tests {
     fn live_stratum_template_is_admissible_against_fork_consensus() {
         let dir = test_dir("pohw-fork-chain-template-admission");
         let manifest_path = write_manifest(&dir);
-        let store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
+        let mut store = ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap();
         let material = store.mining_template(1_783_900_801).unwrap();
         let job = build_stratum_job_from_template(&material, 4).unwrap().job;
         let runtime_seed = SystemTime::now()
@@ -3397,7 +5052,205 @@ mod tests {
             .unwrap();
         assert_eq!(admitted.height, material.height);
         assert_eq!(admitted.previous_block_hash, material.previous_block_hash);
+
+        let current_share = Share {
+            miner_id: "alice".to_string(),
+            bitcoin_header_hex: candidate.bitcoin_header_hex.clone(),
+            bitcoin_template_hash: template.template_hash.clone(),
+            nonce_hex: candidate.bitcoin_header_hex[152..].to_string(),
+            work_hash: candidate.block_hash.clone(),
+            target: "7f".repeat(32),
+            idena_snapshot_id: "2026-07-14".to_string(),
+            idena_snapshot_proof_root: "11".repeat(32),
+            hashrate_score_delta: 1,
+            parent_share_hash: "00".repeat(32),
+            mining_signature_hex: String::new(),
+        };
+        let share_admission = store
+            .validate_share(&template, &current_share, u64::from(material.curtime))
+            .unwrap();
+        assert_eq!(share_admission.work_status, "current-active-tip-share");
+
+        let inherited = BlockHash::from_str(&material.previous_block_hash).unwrap();
+        let block = mine_block(inherited, material.height, material.curtime, 0);
+        store
+            .submit_block_at_time(&hex::encode(serialize(&block)), u64::from(material.curtime))
+            .unwrap();
+        assert!(store
+            .validate_share(&template, &current_share, u64::from(material.curtime))
+            .unwrap_err()
+            .to_string()
+            .contains("not the exact active-chain block"));
+
+        let block_header_hex = hex::encode(serialize(&block.header));
+        let historical_template = BitcoinWorkTemplate::from_bitcoin_header_hex(
+            "alice",
+            &block_header_hex,
+            i64::from(block.header.time),
+        )
+        .unwrap();
+        let historical_share = Share {
+            miner_id: "alice".to_string(),
+            bitcoin_header_hex: block_header_hex.clone(),
+            bitcoin_template_hash: historical_template.template_hash.clone(),
+            nonce_hex: block_header_hex[152..].to_string(),
+            work_hash: block.block_hash().to_string(),
+            target: "7f".repeat(32),
+            idena_snapshot_id: "2026-07-14".to_string(),
+            idena_snapshot_proof_root: "11".repeat(32),
+            hashrate_score_delta: 1,
+            parent_share_hash: "00".repeat(32),
+            mining_signature_hex: String::new(),
+        };
+        let historical = store
+            .validate_share(
+                &historical_template,
+                &historical_share,
+                u64::from(block.header.time),
+            )
+            .unwrap();
+        assert_eq!(historical.work_status, "historical-exact-active-block");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mempool_byte_budget_rejects_oversize_transactions_and_aggregate_growth() {
+        assert_eq!(
+            checked_mempool_bytes(MAX_MEMPOOL_BYTES - 1, 1).unwrap(),
+            MAX_MEMPOOL_BYTES
+        );
+        assert!(checked_mempool_bytes(MAX_MEMPOOL_BYTES, 1).is_err());
+        assert!(checked_mempool_bytes(usize::MAX, 1).is_err());
+        assert!(normalize_transaction_hex(&"00".repeat(MAX_MEMPOOL_TRANSACTION_BYTES)).is_ok());
+        assert!(
+            normalize_transaction_hex(&"00".repeat(MAX_MEMPOOL_TRANSACTION_BYTES + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn peer_capability_auth_rejects_wrong_keys_expiry_and_replay() {
+        let capability = vec![0x41; MIN_FORK_P2P_CAPABILITY_BYTES];
+        let now = current_unix_time();
+        let mut request = ForkWireRequest {
+            protocol_version: FORK_PROTOCOL_VERSION,
+            activation_id: manifest().activation_id,
+            transaction_upgrade_id: None,
+            auth: None,
+            method: ForkWireMethod::SubmitTransaction {
+                transaction_hex: "00".to_string(),
+            },
+        };
+        request.auth = Some(create_peer_request_auth(&request, &capability).unwrap());
+        let replay = StdMutex::new(ForkPeerReplayState::default());
+        verify_peer_request_auth(&request, &capability, &replay, now).unwrap();
+        assert!(verify_peer_request_auth(&request, &capability, &replay, now).is_err());
+
+        let wrong_key_replay = StdMutex::new(ForkPeerReplayState::default());
+        assert!(verify_peer_request_auth(
+            &request,
+            &[0x42; MIN_FORK_P2P_CAPABILITY_BYTES],
+            &wrong_key_replay,
+            now,
+        )
+        .is_err());
+
+        let expired_timestamp = now.saturating_sub(FORK_P2P_AUTH_WINDOW_SECONDS + 1);
+        let nonce_hex = "11".repeat(16);
+        request.auth = Some(ForkWireAuth {
+            timestamp_unix: expired_timestamp,
+            nonce_hex: nonce_hex.clone(),
+            mac_hex: peer_request_mac(&request, expired_timestamp, &nonce_hex, &capability)
+                .unwrap(),
+        });
+        assert!(verify_peer_request_auth(
+            &request,
+            &capability,
+            &StdMutex::new(ForkPeerReplayState::default()),
+            now,
+        )
+        .is_err());
+
+        let uppercase_nonce = "AB".repeat(16);
+        request.auth = Some(ForkWireAuth {
+            timestamp_unix: now,
+            nonce_hex: uppercase_nonce.clone(),
+            mac_hex: peer_request_mac(&request, now, &uppercase_nonce, &capability).unwrap(),
+        });
+        let error = verify_peer_request_auth(
+            &request,
+            &capability,
+            &StdMutex::new(ForkPeerReplayState::default()),
+            now,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("canonical lowercase hex"));
+
+        let replay = StdMutex::new(ForkPeerReplayState {
+            nonces: (0..MAX_P2P_AUTH_NONCES)
+                .map(|index| (format!("{index:032x}"), now))
+                .collect(),
+        });
+        let unused_nonce = "ff".repeat(16);
+        request.auth = Some(ForkWireAuth {
+            timestamp_unix: now,
+            nonce_hex: unused_nonce.clone(),
+            mac_hex: peer_request_mac(&request, now, &unused_nonce, &capability).unwrap(),
+        });
+        let error = verify_peer_request_auth(&request, &capability, &replay, now).unwrap_err();
+        assert!(error.to_string().contains("replay cache capacity"));
+    }
+
+    #[test]
+    fn peer_mutation_rate_limiter_is_per_ip_and_per_operation() {
+        let limiter = ForkPeerRateLimiter::default();
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        for _ in 0..MAX_P2P_BLOCK_SUBMISSIONS_PER_WINDOW {
+            limiter
+                .observe(first, ForkPeerMutationKind::Block, 100)
+                .unwrap();
+        }
+        assert!(limiter
+            .observe(first, ForkPeerMutationKind::Block, 100)
+            .is_err());
+        limiter
+            .observe(second, ForkPeerMutationKind::Block, 100)
+            .unwrap();
+        limiter
+            .observe(
+                first,
+                ForkPeerMutationKind::Block,
+                100 + FORK_P2P_RATE_WINDOW_SECONDS,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn peer_mutation_rate_limiter_caps_and_expires_ip_state() {
+        let limiter = ForkPeerRateLimiter::default();
+        {
+            let mut peers = limiter.by_ip.lock().unwrap();
+            for index in 0..MAX_P2P_RATE_LIMIT_IPS {
+                peers.insert(
+                    IpAddr::V6(std::net::Ipv6Addr::from(index as u128)),
+                    ForkPeerRateWindow {
+                        started_at_unix: 100,
+                        ..ForkPeerRateWindow::default()
+                    },
+                );
+            }
+        }
+        let new_peer = IpAddr::V6(std::net::Ipv6Addr::from(u128::MAX));
+        assert!(limiter
+            .observe(new_peer, ForkPeerMutationKind::Transaction, 100)
+            .is_err());
+        limiter
+            .observe(
+                new_peer,
+                ForkPeerMutationKind::Transaction,
+                100 + FORK_P2P_RATE_WINDOW_SECONDS,
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3415,6 +5268,8 @@ mod tests {
             Arc::clone(&store),
             Arc::new(Vec::new()),
             true,
+            true,
+            None,
         ));
         let activation_id = manifest().activation_id;
         let client = ForkChainClient::new(addr, activation_id, false).unwrap();
@@ -3448,6 +5303,8 @@ mod tests {
         let request = ForkWireRequest {
             protocol_version: FORK_PROTOCOL_VERSION,
             activation_id: manifest.activation_id,
+            transaction_upgrade_id: None,
+            auth: None,
             method: ForkWireMethod::SubmitBlock {
                 block_hex: hex::encode(serialize(&block)),
             },
@@ -3457,7 +5314,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!denied.ok);
-        assert_eq!(denied.error_code.as_deref(), Some("peer_not_configured"));
+        assert_eq!(denied.error_code.as_deref(), Some("peer_authentication"));
         assert_eq!(store.read().await.status().active_fork_block_count, 0);
 
         let accepted = handle_wire_request(&request, &store, false, true)
@@ -3465,6 +5322,49 @@ mod tests {
             .unwrap();
         assert!(accepted.ok);
         assert_eq!(store.read().await.status().active_fork_block_count, 1);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn p2p_mutation_requires_the_configured_capability_on_the_wire() {
+        let dir = test_dir("pohw-fork-chain-p2p-capability");
+        let manifest = manifest();
+        let manifest_path = write_manifest_value(&dir, &manifest);
+        let store = Arc::new(RwLock::new(
+            ForkChainStore::open(&dir.join("chain"), &manifest_path).unwrap(),
+        ));
+        let capability = Arc::new(vec![0x51; MIN_FORK_P2P_CAPABILITY_BYTES]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(serve_listener(
+            listener,
+            Arc::clone(&store),
+            Arc::new(Vec::new()),
+            false,
+            false,
+            Some(Arc::clone(&capability)),
+        ));
+        let inherited = BlockHash::from_str(&manifest.fork_point.inherited_tip_hash).unwrap();
+        let block = mine_block(inherited, 957_775, 1_783_900_801, 0);
+        let block_hex = hex::encode(serialize(&block));
+
+        let unauthenticated =
+            ForkChainClient::new_peer(addr, manifest.activation_id.clone(), None, None).unwrap();
+        let error = unauthenticated.submit_block(&block_hex).await.unwrap_err();
+        assert!(error.to_string().contains("peer_authentication"));
+        assert_eq!(store.read().await.status().active_fork_block_count, 0);
+
+        let authenticated =
+            ForkChainClient::new_peer(addr, manifest.activation_id, None, Some(capability))
+                .unwrap();
+        assert_eq!(
+            authenticated.submit_block(&block_hex).await.unwrap().status,
+            "accepted"
+        );
+        assert_eq!(store.read().await.status().active_fork_block_count, 1);
+
+        task.abort();
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -3480,6 +5380,8 @@ mod tests {
         let request = ForkWireRequest {
             protocol_version: FORK_PROTOCOL_VERSION,
             activation_id: manifest.activation_id,
+            transaction_upgrade_id: None,
+            auth: None,
             method: ForkWireMethod::BlockPage {
                 cursor: None,
                 limit: 25,
@@ -3523,10 +5425,12 @@ mod tests {
         let task = tokio::spawn(serve_listener(
             listener,
             Arc::clone(&source),
-            Arc::new(Vec::new()),
+            Arc::new(vec![addr]),
             false,
+            true,
+            None,
         ));
-        sync_from_peer(&destination, addr).await.unwrap();
+        sync_from_peer(&destination, addr, None).await.unwrap();
         assert_eq!(
             destination.read().await.status().tip_hash,
             first.block_hash().to_string()

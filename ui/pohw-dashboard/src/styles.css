@@ -2299,6 +2299,10 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.capture-final .explorer-search input.capture-search-mask {
+  -webkit-text-security: disc;
+}
+
 .explorer-search button,
 .icon-action {
   display: grid;

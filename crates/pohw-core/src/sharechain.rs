@@ -1,4 +1,7 @@
 use crate::commitment::PohwCommitment;
+use crate::idena_anchor::{
+    validate_experiment_id, IdenaBlockAnchorV1, MinerRegistryAnchorV1, SharechainCheckpointAnchorV1,
+};
 use crate::payout::PayoutSchedule;
 use crate::withdrawal::{WithdrawalBatch, WithdrawalRequest};
 use crate::{canonical_json, hash_hex, sha256_tagged, Score};
@@ -30,23 +33,62 @@ const BITCOIN_NONCE_BYTES: usize = 4;
 const BITCOIN_NONCE_HEX_LEN: usize = BITCOIN_NONCE_BYTES * 2;
 pub const MAX_ACCEPTED_SHARE_TARGET_HEX: &str =
     "7fffff0000000000000000000000000000000000000000000000000000000000";
+pub const LEGACY_BITCOIN_WORK_TEMPLATE_VERSION: u16 = 1;
+pub const TARGET_BOUND_BITCOIN_WORK_TEMPLATE_VERSION: u16 = 2;
+pub const IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION: u16 = 3;
+pub const LEGACY_MINER_REGISTRATION_VERSION: u16 = 1;
+pub const IDENA_ANCHORED_MINER_REGISTRATION_VERSION: u16 = 2;
+
+fn legacy_miner_registration_version() -> u16 {
+    LEGACY_MINER_REGISTRATION_VERSION
+}
+
+fn is_legacy_miner_registration_version(version: &u16) -> bool {
+    *version == LEGACY_MINER_REGISTRATION_VERSION
+}
+
+fn legacy_bitcoin_work_template_version() -> u16 {
+    LEGACY_BITCOIN_WORK_TEMPLATE_VERSION
+}
+
+fn is_legacy_bitcoin_work_template_version(version: &u16) -> bool {
+    *version == LEGACY_BITCOIN_WORK_TEMPLATE_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MinerRegistration {
+    #[serde(
+        default = "legacy_miner_registration_version",
+        skip_serializing_if = "is_legacy_miner_registration_version"
+    )]
+    pub version: u16,
     pub miner_id: String,
     pub idena_address: String,
     pub btc_payout_script_hex: String,
     pub claim_owner_pubkey_hex: String,
     pub mining_pubkey_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_anchor: Option<MinerRegistryAnchorV1>,
     pub idena_signature_hex: String,
     pub mining_signature_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitcoinWorkTemplate {
+    #[serde(
+        default = "legacy_bitcoin_work_template_version",
+        skip_serializing_if = "is_legacy_bitcoin_work_template_version"
+    )]
+    pub version: u16,
     pub miner_id: String,
     pub header_prefix_hex: String,
     pub template_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_share_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idena_anchor: Option<IdenaBlockAnchorV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idena_anchor_policy_hash: Option<String>,
     pub created_at_unix: i64,
     pub mining_signature_hex: String,
 }
@@ -81,6 +123,7 @@ pub enum SharechainMessage {
     MinerRegistration(MinerRegistration),
     BitcoinWorkTemplate(BitcoinWorkTemplate),
     Share(Share),
+    SharechainCheckpoint(SharechainCheckpointAnchorV1),
     SnapshotVote(SnapshotVote),
     PayoutSchedule(PayoutSchedule),
     WithdrawalRequest(WithdrawalRequest),
@@ -119,6 +162,38 @@ pub enum SharechainError {
     ZeroShareTarget,
     #[error("share target is easier than the maximum accepted share target")]
     ShareTargetAboveLimit,
+    #[error("unsupported Bitcoin work template version {0}")]
+    UnsupportedBitcoinWorkTemplateVersion(u16),
+    #[error("unsupported miner registration version {0}")]
+    UnsupportedMinerRegistrationVersion(u16),
+    #[error("legacy miner registration must not carry a registry anchor")]
+    UnexpectedMinerRegistryAnchor,
+    #[error("Idena-anchored miner registration is missing its registry anchor")]
+    MissingMinerRegistryAnchor,
+    #[error("miner registry commitment does not match the registration keys and payout policy")]
+    MinerRegistryCommitmentMismatch,
+    #[error("invalid miner registry anchor: {0}")]
+    InvalidMinerRegistryAnchor(String),
+    #[error("legacy Bitcoin work template must not carry an assigned share target")]
+    UnexpectedAssignedShareTarget,
+    #[error("target-bound Bitcoin work template is missing its assigned share target")]
+    MissingAssignedShareTarget,
+    #[error("legacy or target-bound Bitcoin work template must not carry an Idena block anchor")]
+    UnexpectedIdenaBlockAnchor,
+    #[error("Idena-anchored Bitcoin work template is missing its block anchor")]
+    MissingIdenaBlockAnchor,
+    #[error(
+        "legacy or target-bound Bitcoin work template must not carry an Idena anchor policy hash"
+    )]
+    UnexpectedIdenaAnchorPolicyHash,
+    #[error("Idena-anchored Bitcoin work template is missing its policy hash")]
+    MissingIdenaAnchorPolicyHash,
+    #[error("invalid Idena block anchor: {0}")]
+    InvalidIdenaBlockAnchor(String),
+    #[error("Bitcoin work template must use target-bound version 2")]
+    TargetBoundBitcoinWorkTemplateRequired,
+    #[error("share target {actual} does not match template-assigned target {expected}")]
+    AssignedShareTargetMismatch { expected: String, actual: String },
     #[error("share Bitcoin template hash {actual} does not match header prefix hash {expected}")]
     ShareTemplateHashMismatch { expected: String, actual: String },
     #[error("share nonce {actual} does not match Bitcoin header nonce {expected}")]
@@ -133,6 +208,21 @@ pub enum SharechainError {
 
 #[derive(Debug, Clone, Serialize)]
 struct MinerRegistrationSigningPayload {
+    #[serde(skip_serializing_if = "is_legacy_miner_registration_version")]
+    version: u16,
+    miner_id: String,
+    idena_address: String,
+    btc_payout_script_hex: String,
+    claim_owner_pubkey_hex: String,
+    mining_pubkey_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_anchor: Option<MinerRegistryAnchorV1>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MinerRegistryCommitmentPayload {
+    schema_version: u16,
+    experiment_id: String,
     miner_id: String,
     idena_address: String,
     btc_payout_script_hex: String,
@@ -142,10 +232,34 @@ struct MinerRegistrationSigningPayload {
 
 #[derive(Debug, Clone, Serialize)]
 struct BitcoinWorkTemplateSigningPayload {
+    #[serde(skip_serializing_if = "is_legacy_bitcoin_work_template_version")]
+    version: u16,
     miner_id: String,
     header_prefix_hex: String,
     template_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_share_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idena_anchor: Option<IdenaBlockAnchorV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idena_anchor_policy_hash: Option<String>,
     created_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TargetBoundBitcoinWorkTemplateHashPayload {
+    version: u16,
+    header_prefix_hex: String,
+    assigned_share_target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IdenaAnchoredBitcoinWorkTemplateHashPayload {
+    version: u16,
+    header_prefix_hex: String,
+    assigned_share_target: String,
+    idena_anchor: IdenaBlockAnchorV1,
+    idena_anchor_policy_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,22 +291,105 @@ impl MinerRegistration {
         self.btc_payout_script_hex = self.btc_payout_script_hex.to_ascii_lowercase();
         self.claim_owner_pubkey_hex = self.claim_owner_pubkey_hex.to_ascii_lowercase();
         self.mining_pubkey_hex = self.mining_pubkey_hex.to_ascii_lowercase();
+        self.registry_anchor = self.registry_anchor.map(MinerRegistryAnchorV1::normalized);
         self.idena_signature_hex = self.idena_signature_hex.to_ascii_lowercase();
         self.mining_signature_hex = self.mining_signature_hex.to_ascii_lowercase();
         self
     }
 
     pub fn signing_hash(&self) -> [u8; 32] {
+        let tag = if self.version == LEGACY_MINER_REGISTRATION_VERSION {
+            b"POHW1_MINER_REGISTRATION".as_slice()
+        } else {
+            b"POHW2_MINER_REGISTRATION".as_slice()
+        };
         sha256_tagged(
-            b"POHW1_MINER_REGISTRATION",
+            tag,
             &canonical_json(&MinerRegistrationSigningPayload {
+                version: self.version,
+                miner_id: self.miner_id.to_ascii_lowercase(),
+                idena_address: self.idena_address.to_ascii_lowercase(),
+                btc_payout_script_hex: self.btc_payout_script_hex.to_ascii_lowercase(),
+                claim_owner_pubkey_hex: self.claim_owner_pubkey_hex.to_ascii_lowercase(),
+                mining_pubkey_hex: self.mining_pubkey_hex.to_ascii_lowercase(),
+                registry_anchor: self
+                    .registry_anchor
+                    .clone()
+                    .map(MinerRegistryAnchorV1::normalized),
+            }),
+        )
+    }
+
+    pub fn registry_commitment_hash(&self, experiment_id: &str) -> Result<String, SharechainError> {
+        let experiment_id = experiment_id.to_ascii_lowercase();
+        validate_experiment_id(&experiment_id)
+            .map_err(|err| SharechainError::InvalidMinerRegistryAnchor(err.to_string()))?;
+        Ok(hash_hex(sha256_tagged(
+            b"POHW_MINER_REGISTRY_COMMITMENT_V1",
+            &canonical_json(&MinerRegistryCommitmentPayload {
+                schema_version: 1,
+                experiment_id,
                 miner_id: self.miner_id.to_ascii_lowercase(),
                 idena_address: self.idena_address.to_ascii_lowercase(),
                 btc_payout_script_hex: self.btc_payout_script_hex.to_ascii_lowercase(),
                 claim_owner_pubkey_hex: self.claim_owner_pubkey_hex.to_ascii_lowercase(),
                 mining_pubkey_hex: self.mining_pubkey_hex.to_ascii_lowercase(),
             }),
-        )
+        )))
+    }
+
+    pub fn attach_registry_anchor(
+        mut self,
+        anchor: MinerRegistryAnchorV1,
+    ) -> Result<Self, SharechainError> {
+        let anchor = anchor.normalized();
+        anchor
+            .validate()
+            .map_err(|err| SharechainError::InvalidMinerRegistryAnchor(err.to_string()))?;
+        let expected = self.registry_commitment_hash(&anchor.experiment_id)?;
+        if expected != anchor.registration_commitment {
+            return Err(SharechainError::MinerRegistryCommitmentMismatch);
+        }
+        self.version = IDENA_ANCHORED_MINER_REGISTRATION_VERSION;
+        self.registry_anchor = Some(anchor);
+        Ok(self)
+    }
+
+    pub fn require_registry_anchor(&self) -> Result<&MinerRegistryAnchorV1, SharechainError> {
+        self.validate_registry_anchor()?;
+        self.registry_anchor
+            .as_ref()
+            .ok_or(SharechainError::MissingMinerRegistryAnchor)
+    }
+
+    fn validate_registry_anchor(&self) -> Result<(), SharechainError> {
+        match self.version {
+            LEGACY_MINER_REGISTRATION_VERSION => {
+                if self.registry_anchor.is_some() {
+                    return Err(SharechainError::UnexpectedMinerRegistryAnchor);
+                }
+            }
+            IDENA_ANCHORED_MINER_REGISTRATION_VERSION => {
+                let anchor = self
+                    .registry_anchor
+                    .as_ref()
+                    .ok_or(SharechainError::MissingMinerRegistryAnchor)?;
+                anchor
+                    .validate()
+                    .map_err(|err| SharechainError::InvalidMinerRegistryAnchor(err.to_string()))?;
+                if self.registry_commitment_hash(&anchor.experiment_id)?
+                    != anchor.registration_commitment
+                {
+                    return Err(SharechainError::MinerRegistryCommitmentMismatch);
+                }
+            }
+            version => {
+                return Err(SharechainError::UnsupportedMinerRegistrationVersion(
+                    version,
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn idena_ownership_challenge(&self) -> String {
@@ -220,6 +417,7 @@ impl MinerRegistration {
     pub fn verify_mining_signature(&self) -> Result<(), SharechainError> {
         validate_miner_id("miner_id", &self.miner_id)?;
         validate_idena_address(&self.idena_address)?;
+        self.validate_registry_anchor()?;
         decode_recoverable_idena_signature(&self.idena_signature_hex)
             .map_err(SharechainError::InvalidIdenaSignature)?;
         validate_direct_payout_script(&self.btc_payout_script_hex)?;
@@ -238,6 +436,13 @@ impl BitcoinWorkTemplate {
         self.miner_id = self.miner_id.to_ascii_lowercase();
         self.header_prefix_hex = self.header_prefix_hex.to_ascii_lowercase();
         self.template_hash = self.template_hash.to_ascii_lowercase();
+        self.assigned_share_target = self
+            .assigned_share_target
+            .map(|target| target.to_ascii_lowercase());
+        self.idena_anchor = self.idena_anchor.map(IdenaBlockAnchorV1::normalized);
+        self.idena_anchor_policy_hash = self
+            .idena_anchor_policy_hash
+            .map(|hash| hash.to_ascii_lowercase());
         self.mining_signature_hex = self.mining_signature_hex.to_ascii_lowercase();
         self
     }
@@ -250,9 +455,75 @@ impl BitcoinWorkTemplate {
         let header_prefix_hex = header_prefix_hex.into();
         let template_hash = Self::template_hash_for_header_prefix_hex(&header_prefix_hex)?;
         Ok(Self {
+            version: LEGACY_BITCOIN_WORK_TEMPLATE_VERSION,
             miner_id: miner_id.into(),
             header_prefix_hex,
             template_hash,
+            assigned_share_target: None,
+            idena_anchor: None,
+            idena_anchor_policy_hash: None,
+            created_at_unix,
+            mining_signature_hex: String::new(),
+        })
+    }
+
+    pub fn new_target_bound_unsigned(
+        miner_id: impl Into<String>,
+        header_prefix_hex: impl Into<String>,
+        assigned_share_target: impl Into<String>,
+        created_at_unix: i64,
+    ) -> Result<Self, SharechainError> {
+        let header_prefix_hex = header_prefix_hex.into();
+        let assigned_share_target = assigned_share_target.into().to_ascii_lowercase();
+        validate_share_target_hex(&assigned_share_target)?;
+        let template_hash = Self::target_bound_template_hash_for_header_prefix_hex(
+            &header_prefix_hex,
+            &assigned_share_target,
+        )?;
+        Ok(Self {
+            version: TARGET_BOUND_BITCOIN_WORK_TEMPLATE_VERSION,
+            miner_id: miner_id.into(),
+            header_prefix_hex,
+            template_hash,
+            assigned_share_target: Some(assigned_share_target),
+            idena_anchor: None,
+            idena_anchor_policy_hash: None,
+            created_at_unix,
+            mining_signature_hex: String::new(),
+        })
+    }
+
+    pub fn new_idena_anchored_target_bound_unsigned(
+        miner_id: impl Into<String>,
+        header_prefix_hex: impl Into<String>,
+        assigned_share_target: impl Into<String>,
+        idena_anchor: IdenaBlockAnchorV1,
+        idena_anchor_policy_hash: impl Into<String>,
+        created_at_unix: i64,
+    ) -> Result<Self, SharechainError> {
+        let header_prefix_hex = header_prefix_hex.into();
+        let assigned_share_target = assigned_share_target.into().to_ascii_lowercase();
+        let idena_anchor = idena_anchor.normalized();
+        let idena_anchor_policy_hash = idena_anchor_policy_hash.into().to_ascii_lowercase();
+        validate_share_target_hex(&assigned_share_target)?;
+        validate_hex_32("idena_anchor_policy_hash", &idena_anchor_policy_hash)?;
+        idena_anchor
+            .validate()
+            .map_err(|err| SharechainError::InvalidIdenaBlockAnchor(err.to_string()))?;
+        let template_hash = Self::idena_anchored_template_hash_for_header_prefix_hex(
+            &header_prefix_hex,
+            &assigned_share_target,
+            &idena_anchor,
+            &idena_anchor_policy_hash,
+        )?;
+        Ok(Self {
+            version: IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION,
+            miner_id: miner_id.into(),
+            header_prefix_hex,
+            template_hash,
+            assigned_share_target: Some(assigned_share_target),
+            idena_anchor: Some(idena_anchor),
+            idena_anchor_policy_hash: Some(idena_anchor_policy_hash),
             created_at_unix,
             mining_signature_hex: String::new(),
         })
@@ -271,6 +542,40 @@ impl BitcoinWorkTemplate {
         )
     }
 
+    pub fn from_bitcoin_header_hex_with_share_target(
+        miner_id: impl Into<String>,
+        bitcoin_header_hex: impl AsRef<str>,
+        assigned_share_target: impl Into<String>,
+        created_at_unix: i64,
+    ) -> Result<Self, SharechainError> {
+        let header = decode_bitcoin_header_hex(bitcoin_header_hex.as_ref())?;
+        Self::new_target_bound_unsigned(
+            miner_id,
+            hex::encode(&header[..BITCOIN_TEMPLATE_PREFIX_BYTES]),
+            assigned_share_target,
+            created_at_unix,
+        )
+    }
+
+    pub fn from_bitcoin_header_hex_with_share_target_and_idena_anchor(
+        miner_id: impl Into<String>,
+        bitcoin_header_hex: impl AsRef<str>,
+        assigned_share_target: impl Into<String>,
+        idena_anchor: IdenaBlockAnchorV1,
+        idena_anchor_policy_hash: impl Into<String>,
+        created_at_unix: i64,
+    ) -> Result<Self, SharechainError> {
+        let header = decode_bitcoin_header_hex(bitcoin_header_hex.as_ref())?;
+        Self::new_idena_anchored_target_bound_unsigned(
+            miner_id,
+            hex::encode(&header[..BITCOIN_TEMPLATE_PREFIX_BYTES]),
+            assigned_share_target,
+            idena_anchor,
+            idena_anchor_policy_hash,
+            created_at_unix,
+        )
+    }
+
     pub fn template_hash_for_header_prefix_hex(
         header_prefix_hex: &str,
     ) -> Result<String, SharechainError> {
@@ -278,6 +583,50 @@ impl BitcoinWorkTemplate {
         Ok(hash_hex(sha256_tagged(
             b"POHW1_BTC_TEMPLATE",
             &header_prefix,
+        )))
+    }
+
+    pub fn target_bound_template_hash_for_header_prefix_hex(
+        header_prefix_hex: &str,
+        assigned_share_target: &str,
+    ) -> Result<String, SharechainError> {
+        let header_prefix = decode_bitcoin_header_prefix_hex(header_prefix_hex)?;
+        let assigned_share_target = assigned_share_target.to_ascii_lowercase();
+        validate_share_target_hex(&assigned_share_target)?;
+        Ok(hash_hex(sha256_tagged(
+            b"POHW2_BTC_TEMPLATE",
+            &canonical_json(&TargetBoundBitcoinWorkTemplateHashPayload {
+                version: TARGET_BOUND_BITCOIN_WORK_TEMPLATE_VERSION,
+                header_prefix_hex: hex::encode(header_prefix),
+                assigned_share_target,
+            }),
+        )))
+    }
+
+    pub fn idena_anchored_template_hash_for_header_prefix_hex(
+        header_prefix_hex: &str,
+        assigned_share_target: &str,
+        idena_anchor: &IdenaBlockAnchorV1,
+        idena_anchor_policy_hash: &str,
+    ) -> Result<String, SharechainError> {
+        let header_prefix = decode_bitcoin_header_prefix_hex(header_prefix_hex)?;
+        let assigned_share_target = assigned_share_target.to_ascii_lowercase();
+        let idena_anchor_policy_hash = idena_anchor_policy_hash.to_ascii_lowercase();
+        validate_share_target_hex(&assigned_share_target)?;
+        validate_hex_32("idena_anchor_policy_hash", &idena_anchor_policy_hash)?;
+        let idena_anchor = idena_anchor.clone().normalized();
+        idena_anchor
+            .validate()
+            .map_err(|err| SharechainError::InvalidIdenaBlockAnchor(err.to_string()))?;
+        Ok(hash_hex(sha256_tagged(
+            b"POHW3_BTC_TEMPLATE",
+            &canonical_json(&IdenaAnchoredBitcoinWorkTemplateHashPayload {
+                version: IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION,
+                header_prefix_hex: hex::encode(header_prefix),
+                assigned_share_target,
+                idena_anchor,
+                idena_anchor_policy_hash,
+            }),
         )))
     }
 
@@ -289,7 +638,61 @@ impl BitcoinWorkTemplate {
                 reason: "must be greater than zero".to_string(),
             });
         }
-        let expected = Self::template_hash_for_header_prefix_hex(&self.header_prefix_hex)?;
+        let expected = match self.version {
+            LEGACY_BITCOIN_WORK_TEMPLATE_VERSION => {
+                if self.assigned_share_target.is_some() {
+                    return Err(SharechainError::UnexpectedAssignedShareTarget);
+                }
+                if self.idena_anchor.is_some() {
+                    return Err(SharechainError::UnexpectedIdenaBlockAnchor);
+                }
+                if self.idena_anchor_policy_hash.is_some() {
+                    return Err(SharechainError::UnexpectedIdenaAnchorPolicyHash);
+                }
+                Self::template_hash_for_header_prefix_hex(&self.header_prefix_hex)?
+            }
+            TARGET_BOUND_BITCOIN_WORK_TEMPLATE_VERSION => {
+                if self.idena_anchor.is_some() {
+                    return Err(SharechainError::UnexpectedIdenaBlockAnchor);
+                }
+                if self.idena_anchor_policy_hash.is_some() {
+                    return Err(SharechainError::UnexpectedIdenaAnchorPolicyHash);
+                }
+                let assigned_share_target = self
+                    .assigned_share_target
+                    .as_deref()
+                    .ok_or(SharechainError::MissingAssignedShareTarget)?;
+                Self::target_bound_template_hash_for_header_prefix_hex(
+                    &self.header_prefix_hex,
+                    assigned_share_target,
+                )?
+            }
+            IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION => {
+                let assigned_share_target = self
+                    .assigned_share_target
+                    .as_deref()
+                    .ok_or(SharechainError::MissingAssignedShareTarget)?;
+                let idena_anchor = self
+                    .idena_anchor
+                    .as_ref()
+                    .ok_or(SharechainError::MissingIdenaBlockAnchor)?;
+                let idena_anchor_policy_hash = self
+                    .idena_anchor_policy_hash
+                    .as_deref()
+                    .ok_or(SharechainError::MissingIdenaAnchorPolicyHash)?;
+                Self::idena_anchored_template_hash_for_header_prefix_hex(
+                    &self.header_prefix_hex,
+                    assigned_share_target,
+                    idena_anchor,
+                    idena_anchor_policy_hash,
+                )?
+            }
+            version => {
+                return Err(SharechainError::UnsupportedBitcoinWorkTemplateVersion(
+                    version,
+                ));
+            }
+        };
         if !self.template_hash.eq_ignore_ascii_case(&expected) {
             return Err(SharechainError::ShareTemplateHashMismatch {
                 expected,
@@ -303,12 +706,95 @@ impl BitcoinWorkTemplate {
         sha256_tagged(
             b"POHW1_BITCOIN_WORK_TEMPLATE",
             &canonical_json(&BitcoinWorkTemplateSigningPayload {
+                version: self.version,
                 miner_id: self.miner_id.to_ascii_lowercase(),
                 header_prefix_hex: self.header_prefix_hex.to_ascii_lowercase(),
                 template_hash: self.template_hash.to_ascii_lowercase(),
+                assigned_share_target: self
+                    .assigned_share_target
+                    .as_ref()
+                    .map(|target| target.to_ascii_lowercase()),
+                idena_anchor: self
+                    .idena_anchor
+                    .clone()
+                    .map(IdenaBlockAnchorV1::normalized),
+                idena_anchor_policy_hash: self
+                    .idena_anchor_policy_hash
+                    .as_ref()
+                    .map(|hash| hash.to_ascii_lowercase()),
                 created_at_unix: self.created_at_unix,
             }),
         )
+    }
+
+    pub fn is_target_bound(&self) -> bool {
+        matches!(
+            self.version,
+            TARGET_BOUND_BITCOIN_WORK_TEMPLATE_VERSION
+                | IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION
+        ) && self.assigned_share_target.is_some()
+    }
+
+    pub fn is_idena_anchored(&self) -> bool {
+        self.version == IDENA_ANCHORED_BITCOIN_WORK_TEMPLATE_VERSION
+            && self.idena_anchor.is_some()
+            && self.idena_anchor_policy_hash.is_some()
+    }
+
+    pub fn bitcoin_header_version(&self) -> Result<u32, SharechainError> {
+        let prefix = decode_bitcoin_header_prefix_hex(&self.header_prefix_hex)?;
+        Ok(u32::from_le_bytes(prefix[..4].try_into().expect(
+            "validated Bitcoin header prefix always contains a version",
+        )))
+    }
+
+    pub fn require_idena_anchor(&self) -> Result<&IdenaBlockAnchorV1, SharechainError> {
+        self.verify_template_hash()?;
+        if !self.is_idena_anchored() {
+            return Err(SharechainError::MissingIdenaBlockAnchor);
+        }
+        self.idena_anchor
+            .as_ref()
+            .ok_or(SharechainError::MissingIdenaBlockAnchor)
+    }
+
+    pub fn require_idena_anchor_policy_hash(&self) -> Result<&str, SharechainError> {
+        self.verify_template_hash()?;
+        if !self.is_idena_anchored() {
+            return Err(SharechainError::MissingIdenaAnchorPolicyHash);
+        }
+        self.idena_anchor_policy_hash
+            .as_deref()
+            .ok_or(SharechainError::MissingIdenaAnchorPolicyHash)
+    }
+
+    pub fn require_target_bound(&self) -> Result<(), SharechainError> {
+        self.verify_template_hash()?;
+        if !self.is_target_bound() {
+            return Err(SharechainError::TargetBoundBitcoinWorkTemplateRequired);
+        }
+        Ok(())
+    }
+
+    pub fn verify_assigned_share_target(
+        &self,
+        claimed_target: &str,
+    ) -> Result<(), SharechainError> {
+        self.verify_template_hash()?;
+        if self.version == LEGACY_BITCOIN_WORK_TEMPLATE_VERSION {
+            return Ok(());
+        }
+        let expected = self
+            .assigned_share_target
+            .as_deref()
+            .ok_or(SharechainError::MissingAssignedShareTarget)?
+            .to_ascii_lowercase();
+        let actual = claimed_target.to_ascii_lowercase();
+        validate_share_target_hex(&actual)?;
+        if actual != expected {
+            return Err(SharechainError::AssignedShareTargetMismatch { expected, actual });
+        }
+        Ok(())
     }
 
     pub fn verify_mining_signature(&self, mining_pubkey_hex: &str) -> Result<(), SharechainError> {
@@ -362,6 +848,26 @@ impl Share {
         BitcoinWorkTemplate::template_hash_for_header_prefix_hex(&self.bitcoin_header_prefix_hex()?)
     }
 
+    pub fn recomputed_target_bound_bitcoin_template_hash(&self) -> Result<String, SharechainError> {
+        BitcoinWorkTemplate::target_bound_template_hash_for_header_prefix_hex(
+            &self.bitcoin_header_prefix_hex()?,
+            &self.target,
+        )
+    }
+
+    pub fn recomputed_idena_anchored_bitcoin_template_hash(
+        &self,
+        anchor: &IdenaBlockAnchorV1,
+        policy_hash: &str,
+    ) -> Result<String, SharechainError> {
+        BitcoinWorkTemplate::idena_anchored_template_hash_for_header_prefix_hex(
+            &self.bitcoin_header_prefix_hex()?,
+            &self.target,
+            anchor,
+            policy_hash,
+        )
+    }
+
     pub fn bitcoin_header_prefix_hex(&self) -> Result<String, SharechainError> {
         let header = decode_bitcoin_header_hex(&self.bitcoin_header_hex)?;
         Ok(hex::encode(&header[..BITCOIN_TEMPLATE_PREFIX_BYTES]))
@@ -380,6 +886,53 @@ impl Share {
     }
 
     pub fn verify_mining_signature(&self, mining_pubkey_hex: &str) -> Result<(), SharechainError> {
+        self.validate_fields()?;
+        self.verify_bitcoin_header_binding()?;
+        self.verify_nonce_binding()?;
+        self.verify_work_score()?;
+        verify_mining_signature(
+            mining_pubkey_hex,
+            &self.mining_signature_hex,
+            self.signing_hash(),
+        )
+    }
+
+    pub fn verify_mining_signature_for_template(
+        &self,
+        mining_pubkey_hex: &str,
+        template: &BitcoinWorkTemplate,
+    ) -> Result<(), SharechainError> {
+        self.validate_fields()?;
+        template.verify_template_hash()?;
+        if !self
+            .bitcoin_template_hash
+            .eq_ignore_ascii_case(&template.template_hash)
+        {
+            return Err(SharechainError::ShareTemplateHashMismatch {
+                expected: template.template_hash.to_ascii_lowercase(),
+                actual: self.bitcoin_template_hash.to_ascii_lowercase(),
+            });
+        }
+        if !self
+            .bitcoin_header_prefix_hex()?
+            .eq_ignore_ascii_case(&template.header_prefix_hex)
+        {
+            return Err(SharechainError::ShareTemplateHashMismatch {
+                expected: template.template_hash.to_ascii_lowercase(),
+                actual: self.bitcoin_template_hash.to_ascii_lowercase(),
+            });
+        }
+        template.verify_assigned_share_target(&self.target)?;
+        self.verify_nonce_binding()?;
+        self.verify_work_score()?;
+        verify_mining_signature(
+            mining_pubkey_hex,
+            &self.mining_signature_hex,
+            self.signing_hash(),
+        )
+    }
+
+    fn validate_fields(&self) -> Result<(), SharechainError> {
         validate_miner_id("miner_id", &self.miner_id)?;
         validate_bitcoin_header_hex(&self.bitcoin_header_hex)?;
         validate_hex_32("bitcoin_template_hash", &self.bitcoin_template_hash)?;
@@ -392,12 +945,7 @@ impl Share {
         if self.hashrate_score_delta == 0 {
             return Err(SharechainError::ZeroShareScore);
         }
-        self.verify_work_score()?;
-        verify_mining_signature(
-            mining_pubkey_hex,
-            &self.mining_signature_hex,
-            self.signing_hash(),
-        )
+        Ok(())
     }
 
     pub fn expected_hashrate_score_delta(&self) -> Result<Score, SharechainError> {
@@ -411,7 +959,6 @@ impl Share {
     }
 
     fn verify_work_score(&self) -> Result<(), SharechainError> {
-        self.verify_bitcoin_header_binding()?;
         let expected_work_hash = self.recomputed_work_hash()?;
         if !self.work_hash.eq_ignore_ascii_case(&expected_work_hash) {
             return Err(SharechainError::ShareWorkHashMismatch {
@@ -440,22 +987,30 @@ impl Share {
         Ok(())
     }
 
-    fn verify_bitcoin_header_binding(&self) -> Result<(), SharechainError> {
-        let expected_template_hash = self.recomputed_bitcoin_template_hash()?;
-        if !self
-            .bitcoin_template_hash
-            .eq_ignore_ascii_case(&expected_template_hash)
-        {
-            return Err(SharechainError::ShareTemplateHashMismatch {
-                expected: expected_template_hash,
-                actual: self.bitcoin_template_hash.to_ascii_lowercase(),
-            });
-        }
+    fn verify_nonce_binding(&self) -> Result<(), SharechainError> {
         let expected_nonce = self.recomputed_nonce_hex()?;
         if !self.nonce_hex.eq_ignore_ascii_case(&expected_nonce) {
             return Err(SharechainError::ShareNonceMismatch {
                 expected: expected_nonce,
                 actual: self.nonce_hex.to_ascii_lowercase(),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_bitcoin_header_binding(&self) -> Result<(), SharechainError> {
+        let legacy_template_hash = self.recomputed_bitcoin_template_hash()?;
+        let target_bound_template_hash = self.recomputed_target_bound_bitcoin_template_hash()?;
+        if !self
+            .bitcoin_template_hash
+            .eq_ignore_ascii_case(&legacy_template_hash)
+            && !self
+                .bitcoin_template_hash
+                .eq_ignore_ascii_case(&target_bound_template_hash)
+        {
+            return Err(SharechainError::ShareTemplateHashMismatch {
+                expected: target_bound_template_hash,
+                actual: self.bitcoin_template_hash.to_ascii_lowercase(),
             });
         }
         Ok(())
@@ -523,6 +1078,9 @@ impl SharechainMessage {
             }
             SharechainMessage::Share(share) => {
                 *share = share.clone().normalized();
+            }
+            SharechainMessage::SharechainCheckpoint(checkpoint) => {
+                *checkpoint = checkpoint.clone().normalized();
             }
             SharechainMessage::SnapshotVote(vote) => {
                 *vote = vote.clone().normalized();
@@ -814,6 +1372,17 @@ fn max_share_target_bytes() -> [u8; 32] {
     Target::MAX_ATTAINABLE_REGTEST.to_be_bytes()
 }
 
+fn validate_share_target_hex(target_hex: &str) -> Result<(), SharechainError> {
+    let target = decode_hex_32("target", target_hex)?;
+    if target.iter().all(|byte| *byte == 0) {
+        return Err(SharechainError::ZeroShareTarget);
+    }
+    if target > max_share_target_bytes() {
+        return Err(SharechainError::ShareTargetAboveLimit);
+    }
+    Ok(())
+}
+
 fn share_score_from_target(target: &[u8; 32]) -> Result<Score, SharechainError> {
     if target.iter().all(|byte| *byte == 0) {
         return Err(SharechainError::ZeroShareTarget);
@@ -861,6 +1430,7 @@ mod tests {
             &SecretKey::from_slice(&[12; 32]).unwrap(),
         );
         let mut registration = MinerRegistration {
+            version: LEGACY_MINER_REGISTRATION_VERSION,
             miner_id: "miner".to_string(),
             idena_address: idena_address_from_pubkey(&PublicKey::from_secret_key(
                 &Secp256k1::new(),
@@ -870,6 +1440,7 @@ mod tests {
                 "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
             claim_owner_pubkey_hex: claim_keypair.x_only_public_key().0.to_string(),
             mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            registry_anchor: None,
             idena_signature_hex: String::new(),
             mining_signature_hex: String::new(),
         };
@@ -975,6 +1546,190 @@ mod tests {
             share.recomputed_work_hash().unwrap(),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
         );
+    }
+
+    #[test]
+    fn legacy_work_template_wire_encoding_is_unchanged_and_defaults_to_v1() {
+        let share = mined_test_share(MAX_SHARE_TARGET_HEX, 1);
+        let template = BitcoinWorkTemplate::new_unsigned(
+            "miner",
+            share.bitcoin_header_prefix_hex().unwrap(),
+            1,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&template).unwrap();
+
+        assert_eq!(template.version, LEGACY_BITCOIN_WORK_TEMPLATE_VERSION);
+        assert!(!json.as_object().unwrap().contains_key("version"));
+        assert!(!json
+            .as_object()
+            .unwrap()
+            .contains_key("assigned_share_target"));
+        assert_eq!(
+            serde_json::from_value::<BitcoinWorkTemplate>(json)
+                .unwrap()
+                .version,
+            LEGACY_BITCOIN_WORK_TEMPLATE_VERSION
+        );
+    }
+
+    #[test]
+    fn legacy_miner_registration_wire_and_signing_hash_are_stable() {
+        let registration = MinerRegistration {
+            version: LEGACY_MINER_REGISTRATION_VERSION,
+            miner_id: "miner".to_string(),
+            idena_address: "0x1111111111111111111111111111111111111111".to_string(),
+            btc_payout_script_hex:
+                "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            claim_owner_pubkey_hex:
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
+            mining_pubkey_hex: "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .to_string(),
+            registry_anchor: None,
+            idena_signature_hex: "00".to_string(),
+            mining_signature_hex: "00".to_string(),
+        };
+        let json = serde_json::to_value(&registration).unwrap();
+
+        assert!(!json.as_object().unwrap().contains_key("version"));
+        assert!(!json.as_object().unwrap().contains_key("registry_anchor"));
+        assert_eq!(
+            hex::encode(registration.signing_hash()),
+            "7def8d1e61bff415f662f53d3a957831e517cf5886f9f5e13c895edaf954085c"
+        );
+        assert_eq!(
+            serde_json::from_value::<MinerRegistration>(json)
+                .unwrap()
+                .version,
+            LEGACY_MINER_REGISTRATION_VERSION
+        );
+    }
+
+    #[test]
+    fn registry_commitment_binds_identity_keys_and_payout_policy() {
+        let idena_secret = SecretKey::from_slice(&[13; 32]).unwrap();
+        let registration = registration_for_idena(&idena_secret);
+        let commitment = registration
+            .registry_commitment_hash("p2poolbtc-experiment-1")
+            .unwrap();
+        let anchor = MinerRegistryAnchorV1 {
+            contract_address: format!("0x{}", "21".repeat(20)),
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            registration_sequence: 1,
+            registration_block: 100,
+            registration_epoch: 7,
+            registration_timestamp: 1_700_000_000,
+            registration_commitment: commitment,
+        };
+
+        let anchored = registration
+            .clone()
+            .attach_registry_anchor(anchor.clone())
+            .unwrap();
+        assert_eq!(anchored.version, IDENA_ANCHORED_MINER_REGISTRATION_VERSION);
+        let mut tampered = registration;
+        tampered.btc_payout_script_hex =
+            "51201111111111111111111111111111111111111111111111111111111111111111".to_string();
+        assert!(matches!(
+            tampered.attach_registry_anchor(anchor),
+            Err(SharechainError::MinerRegistryCommitmentMismatch)
+        ));
+    }
+
+    #[test]
+    fn idena_anchored_template_binds_anchor_and_verifies_share_with_template() {
+        let keypair = mining_keypair();
+        let mining_pubkey = keypair.x_only_public_key().0.to_string();
+        let anchor = IdenaBlockAnchorV1 {
+            height: 101,
+            hash: format!("0x{}", "31".repeat(32)),
+        };
+        let policy_hash = "ab".repeat(32);
+        let mut share = mined_test_share(MAX_SHARE_TARGET_HEX, 1);
+        share.bitcoin_template_hash = share
+            .recomputed_idena_anchored_bitcoin_template_hash(&anchor, &policy_hash)
+            .unwrap();
+        share.mining_signature_hex = sign(share.signing_hash(), &keypair);
+        let mut template = BitcoinWorkTemplate::new_idena_anchored_target_bound_unsigned(
+            "miner",
+            share.bitcoin_header_prefix_hex().unwrap(),
+            MAX_SHARE_TARGET_HEX,
+            anchor.clone(),
+            policy_hash.clone(),
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign(template.signing_hash(), &keypair);
+
+        share
+            .verify_mining_signature_for_template(&mining_pubkey, &template)
+            .unwrap();
+        assert!(share.verify_mining_signature(&mining_pubkey).is_err());
+
+        let substituted = IdenaBlockAnchorV1 {
+            height: 102,
+            hash: format!("0x{}", "32".repeat(32)),
+        };
+        assert_ne!(
+            template.template_hash,
+            BitcoinWorkTemplate::idena_anchored_template_hash_for_header_prefix_hex(
+                &template.header_prefix_hex,
+                MAX_SHARE_TARGET_HEX,
+                &substituted,
+                &policy_hash,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            template.template_hash,
+            BitcoinWorkTemplate::idena_anchored_template_hash_for_header_prefix_hex(
+                &template.header_prefix_hex,
+                MAX_SHARE_TARGET_HEX,
+                &anchor,
+                &"cd".repeat(32),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn target_bound_work_template_commits_to_assigned_target() {
+        let share = mined_test_share(MAX_SHARE_TARGET_HEX, 1);
+        let prefix = share.bitcoin_header_prefix_hex().unwrap();
+        let easy = BitcoinWorkTemplate::new_target_bound_unsigned(
+            "miner",
+            &prefix,
+            MAX_SHARE_TARGET_HEX,
+            1,
+        )
+        .unwrap();
+        let harder_target = "3fffff0000000000000000000000000000000000000000000000000000000000";
+        let harder =
+            BitcoinWorkTemplate::new_target_bound_unsigned("miner", prefix, harder_target, 1)
+                .unwrap();
+
+        assert_ne!(easy.template_hash, harder.template_hash);
+        assert_ne!(easy.signing_hash(), harder.signing_hash());
+        assert!(easy.is_target_bound());
+        easy.verify_assigned_share_target(MAX_SHARE_TARGET_HEX)
+            .unwrap();
+        assert!(matches!(
+            easy.verify_assigned_share_target(harder_target),
+            Err(SharechainError::AssignedShareTargetMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn target_bound_share_header_uses_target_bound_template_hash() {
+        let keypair = mining_keypair();
+        let mining_pubkey = keypair.x_only_public_key().0.to_string();
+        let mut share = mined_test_share(MAX_SHARE_TARGET_HEX, 1);
+        share.bitcoin_template_hash = share
+            .recomputed_target_bound_bitcoin_template_hash()
+            .unwrap();
+        share.mining_signature_hex = sign(share.signing_hash(), &keypair);
+
+        share.verify_mining_signature(&mining_pubkey).unwrap();
     }
 
     #[test]

@@ -11,6 +11,10 @@ This implementation is safe only for local, no-value testing.
   test discovered and removed unsupported bulk-memory instructions. This is
   still not an exhaustive maximum-state gas proof, cross-architecture run, or
   external runtime audit.
+- The production integration test lives in P2poolBTC rather than the pinned
+  idena-go commit. Its exact path, target, size, SHA-256, and raw CID are locked,
+  and Go injects it as a read-only build overlay. This adds test code only; it
+  does not patch production runtime code or make the prototype a release.
 - The contract parameter CID is compiled in and exact, but changing parameters
   requires a separately reviewed contract migration proposal. There is no
   upgradeable admin proxy.
@@ -45,6 +49,14 @@ This implementation is safe only for local, no-value testing.
   artifact CID. An availability attestation's own CID is necessarily excluded
   from its recursively described set; its canonical bytes are instead checked
   directly at submission. No finite attestation proves future persistence.
+- Bitcoin Core build evidence records a distinct checksummed dependency-fetch
+  phase and a sealed `depends` prefix, but it cannot portably enforce network
+  isolation for the later dependency build. Independent builders must apply
+  that boundary externally. Host compilers, SDKs, platform signing, and
+  notarization can still make native packages differ, so no release is
+  reproducible until the required builders report matching deterministic-core
+  digests. The deterministic core uses stable source/build prefix maps and
+  stripped install artifacts rather than raw debug-bearing build outputs.
 - The current idena-go database does not retain enough direct author-to-final-
   qualification history for an authenticated pre-integration replay. The
   offline `governance-reindex` command therefore fails closed instead of
@@ -80,15 +92,17 @@ This implementation is safe only for local, no-value testing.
   profile.
 - Source CIDs for the five legacy-pinned components are exact, but public CAR
   replication and independent availability attestations have not been run.
-- The contract artifact in the fork lock was built from an uncommitted local
+- The contract artifact in the fork lock is bound to a committed experimental
   prototype. It is explicitly unauthorized and not a release.
 - Exact locked Rust 1.97.0 and Go 1.26.5 builds must be performed by attested
   clean-room builders. A local development build with different versions is
   non-attested and its tool versions must be reported.
 - `pohw-governance-runtime-gate.py --require-locked-sources` intentionally
-  fails while the fork lock identifies uncommitted prototype source or any
+  fails while the fork lock is not marked `canonical-locked-source` or any
   component is dirty/revision-mismatched. The local production-runtime pass is
-  not a clean-room or independent-builder attestation.
+  not a clean-room or independent-builder attestation. Normal CI verifies that
+  such a prototype remains inactive and unauthorized, then skips the release-
+  grade invocation; this skip is not release evidence.
 - A deterministic build-evidence generator and SBOM workflow exist and have
   local fixture coverage. No independent clean-room builder attestations,
   reviewer attestations, public evidence replication, or external security

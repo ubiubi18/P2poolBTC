@@ -40,7 +40,10 @@ proposal after all gates, challenge period, and timelock pass.
 9. The production-runtime gate verifies the exact contract CID and SHA-256,
    confirms idena-go resolves the locked native binding, deploys twice through
    the real `WasmVM`, compares deterministic outputs/gas, and rejects unlocked
-   source evidence in release mode.
+   source evidence in release mode. The cross-repository Go test is itself
+   path-, size-, SHA-256-, and CID-bound by the governance-fork lock and is
+   injected with Go's read-only build overlay; it does not modify or silently
+   reinterpret the pinned idena-go source tree.
 
 ## Four Independent Gates
 

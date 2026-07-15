@@ -1,0 +1,43 @@
+{
+  "schema_version": "pohw-experiment-launch-policy/v1",
+  "experiment_id": "pohw-experiment-1-full-consensus",
+  "activation_id": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+  "fork_manifest_path": "compatibility/experiment-1-full-consensus.json",
+  "fork_manifest_sha256": "a9036ba5ffd72906cf0c05c66efb2cedb170375b8160c1683bc09fcf20954915",
+  "status": "blocked-pending-idena-registry-deployment",
+  "idena_anchor_policy_schema": 2,
+  "required_handoff_version_bit": 27,
+  "required_runtime_gates": {
+    "idena_anchor_policy_required": true,
+    "peer_work_template_admission_required": true,
+    "registry_deployment_verification_required": true,
+    "registry_registration_identity_callback_required": true,
+    "checkpoint_vote_identity_callback_required": true,
+    "production_idena_wasm_runtime_gate_required": true,
+    "bound_policy_replacement_allowed": false
+  },
+  "registry_source_candidate": {
+    "path": "compatibility/experiment-1-miner-registry-candidate.json",
+    "sha256": "91247d97f239d90f95e674133e6c9b1a2eb9562ae2f01ef4de64a610e7432126",
+    "contract_schema_version": 3,
+    "contract_version": "0.3.0",
+    "wasm_sha256": "7f5cbf0daeded9bc3ca04ade914e37688edccaa0a8ad025bb74842ec788ad601",
+    "wasm_cid": "bafkreid7ls7q3lw63g6dzick32iu4n3ir3omvifivubfxn2iilwhrcwwae",
+    "deployment_authorized": false
+  },
+  "registry_deployment": null,
+  "activation_requirements": [
+    "Run the emulator, ABI check, and production idena-go runtime identity-gate test against the exact candidate bytes.",
+    "Obtain at least two independent matching builds and compare SHA-256 and raw CID.",
+    "Deploy the reviewed bytes with the exact experiment ID, ecosystem CID, and minimum burn.",
+    "Publish a V2 policy containing the real deployment transaction, payload, code, WASM, and immutable parameter commitments.",
+    "Verify the deployment and finalized activation block through local Idena RPC before binding the policy.",
+    "Publish a replacement launch-policy sidecar with status ready only after independent review."
+  ],
+  "notes": [
+    "This sidecar does not alter or reinterpret the existing fork activation manifest or its first block.",
+    "Null deployment data is an intentional launch interlock, not a placeholder contract address.",
+    "The source candidate passed one local production-runtime build only and is not deployment authorization.",
+    "No contract deployment or live-chain transaction is performed by repository tooling."
+  ]
+}

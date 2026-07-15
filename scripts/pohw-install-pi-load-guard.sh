@@ -11,6 +11,7 @@ fi
 for source in \
   "$ROOT_DIR/deploy/systemd/idena-pi-resource.conf" \
   "$ROOT_DIR/deploy/systemd/bitcoind-mainnet-remote-only.conf" \
+  "$ROOT_DIR/deploy/systemd/pohw-pi-observer-only.conf" \
   "$ROOT_DIR/deploy/systemd/pohw-zram.service" \
   "$ROOT_DIR/scripts/pohw-zram.sh"
 do
@@ -33,8 +34,25 @@ install -D -m 0755 "$ROOT_DIR/scripts/pohw-zram.sh" /usr/local/libexec/pohw-zram
 
 mkdir -p /etc/pohw
 rm -f /etc/pohw/enable-local-bitcoin
+rm -f \
+  /etc/pohw/enable-experiment-0-fork \
+  /etc/pohw/enable-experiment-0-mining \
+  /etc/pohw/enable-experiment-1-mining \
+  /etc/pohw/enable-pi-local-pohw-runtime
 
-systemctl disable --now bitcoind-mainnet.service >/dev/null 2>&1 || true
+observer_only_units=(
+  bitcoind-mainnet.service
+  bitcoind-pohw-experiment-1.service
+  pohw-fork-chain-node.service
+  pohw-gossip-mesh.service
+  pohw-mining-adapter.service
+)
+systemctl disable --now "${observer_only_units[@]}" >/dev/null 2>&1 || true
+for unit in "${observer_only_units[@]}"; do
+  install -D -m 0644 \
+    "$ROOT_DIR/deploy/systemd/pohw-pi-observer-only.conf" \
+    "/etc/systemd/system/${unit}.d/90-pi-observer-only.conf"
+done
 systemctl disable --now \
   pohw-auto-bootstrap.timer \
   pohw-bitcoin-pressure-guard.timer \
@@ -58,4 +76,5 @@ if systemctl is-active --quiet idena.service; then
 fi
 
 echo "Pi load guard installed."
-echo "Local Bitcoin remains blocked until /etc/pohw/enable-local-bitcoin exists."
+echo "Pi observer-only mode is active; local Bitcoin, fork, gossip, and mining units are gated."
+echo "Use Hetzner for Experiment 1 and create no local-runtime marker without a capacity review."

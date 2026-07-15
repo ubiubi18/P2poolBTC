@@ -1,8 +1,11 @@
 import importlib.util
+import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,11 +57,96 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
 
     def test_repository_lock_is_valid_json(self):
         lock = MODULE.load_json(ROOT / "compatibility" / "governance-fork-lock.json")
-        artifact = lock["governancePrototype"]["contractArtifact"]
+        prototype = lock["governancePrototype"]
+        self.assertEqual(prototype["sourceStatus"], "committed-experimental-prototype")
+        subprocess.run(
+            ["git", "cat-file", "-e", prototype["baseCommit"] + "^{commit}"],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        artifact = prototype["contractArtifact"]
         self.assertEqual(set(artifact), {"name", "size", "cid", "sha256"})
         self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
         self.assertGreater(artifact["size"], 0)
         self.assertEqual(MODULE.raw_cid(artifact["sha256"]), artifact["cid"])
+        overlay = prototype["runtimeIntegrationTestOverlay"]
+        self.assertEqual(
+            set(overlay),
+            {"path", "targetPath", "testName", "size", "cid", "sha256"},
+        )
+        source, payload, target, test_name = MODULE.verify_runtime_test_overlay(ROOT, lock)
+        self.assertEqual(source.stat().st_size, overlay["size"])
+        self.assertEqual(len(payload), overlay["size"])
+        self.assertEqual(target, MODULE.RUNTIME_TEST_TARGET)
+        self.assertEqual(test_name, MODULE.RUNTIME_TEST_NAME)
+
+    def test_runtime_overlay_content_is_digest_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "runtime_test.go"
+            source.write_bytes(b"package wasm\n")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            lock = {
+                "governancePrototype": {
+                    "runtimeIntegrationTestOverlay": {
+                        "path": source.name,
+                        "targetPath": MODULE.RUNTIME_TEST_TARGET,
+                        "testName": MODULE.RUNTIME_TEST_NAME,
+                        "size": source.stat().st_size,
+                        "cid": MODULE.raw_cid(digest),
+                        "sha256": digest,
+                    }
+                }
+            }
+            MODULE.verify_runtime_test_overlay(root, lock)
+            source.write_bytes(b"package substituted\n")
+            with self.assertRaisesRegex(MODULE.GateError, "size does not match"):
+                MODULE.verify_runtime_test_overlay(root, lock)
+
+    def test_runtime_overlay_path_escape_is_rejected(self):
+        lock = {
+            "governancePrototype": {
+                "runtimeIntegrationTestOverlay": {
+                    "path": "../outside.go",
+                    "targetPath": MODULE.RUNTIME_TEST_TARGET,
+                    "testName": MODULE.RUNTIME_TEST_NAME,
+                    "size": 1,
+                    "cid": MODULE.raw_cid("0" * 64),
+                    "sha256": "0" * 64,
+                }
+            }
+        }
+        with self.assertRaisesRegex(MODULE.GateError, "path is unsafe"):
+            MODULE.verify_runtime_test_overlay(ROOT, lock)
+
+    def test_runtime_environment_drops_secrets_and_pins_toolchain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": "/usr/bin",
+                    "OPENAI_API_KEY": "must-not-cross-runtime-boundary",
+                },
+                clear=True,
+            ):
+                environment = MODULE.runtime_test_environment(
+                    Path(temporary), "/verified/module-cache", "go1.26.5"
+                )
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertEqual(environment["GOTOOLCHAIN"], "go1.26.5")
+        self.assertEqual(environment["GOMODCACHE"], "/verified/module-cache")
+
+    def test_build_plan_contract_artifact_matches_fork_lock(self):
+        lock = MODULE.load_json(ROOT / "compatibility" / "governance-fork-lock.json")
+        plan = MODULE.load_json(ROOT / "compatibility" / "governance-build-plan-v1.json")
+        target = next(item for item in plan["targets"] if item["id"] == "governance-contract")
+        artifact = next(item for item in target["artifacts"] if item["name"] == "idena-code-governance.wasm")
+        locked = lock["governancePrototype"]["contractArtifact"]
+        self.assertEqual(artifact["expectedCid"], locked["cid"])
+        self.assertEqual(artifact["expectedSha256"], locked["sha256"])
+        self.assertEqual(artifact["expectedSize"], locked["size"])
 
     def test_built_contract_matches_repository_lock(self):
         lock = MODULE.load_json(ROOT / "compatibility" / "governance-fork-lock.json")

@@ -25,6 +25,7 @@ import {
   Users,
   Wallet
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import "./styles.css";
 
 type ServiceState = "connected" | "syncing" | "pending" | "warning";
@@ -36,6 +37,8 @@ type ExplorerTab = "overview" | "bitcoin" | "fork" | "sharechain" | "idena";
 type ExplorerLoadState = "loading" | "ready" | "unavailable";
 
 const SATS_PER_BTC = 100_000_000;
+const README_CAPTURE_MODE = new URLSearchParams(window.location.search).get("capture") === "final";
+const CAPTURE_MASK = "[masked]";
 
 interface ServiceStatus {
   label: string;
@@ -594,7 +597,6 @@ declare global {
 const dashboardEnv =
   (import.meta as unknown as {
     env?: {
-      VITE_POHW_DASHBOARD_API_TOKEN?: string;
       VITE_POHW_DASHBOARD_API_URL?: string;
       VITE_POHW_DASHBOARD_DEMO?: string;
       VITE_POHW_EXPLORER_API_BASE?: string;
@@ -605,8 +607,7 @@ const dashboardEnv =
 const runtimeDashboardConfig = window.__POHW_DASHBOARD_CONFIG__ ?? {};
 const dashboardApiUrl =
   runtimeDashboardConfig.apiUrl ?? dashboardEnv.VITE_POHW_DASHBOARD_API_URL ?? "http://127.0.0.1:40407/dashboard.json";
-const dashboardApiToken =
-  runtimeDashboardConfig.apiToken?.trim() || dashboardEnv.VITE_POHW_DASHBOARD_API_TOKEN?.trim() || undefined;
+const dashboardApiToken = runtimeDashboardConfig.apiToken?.trim() || undefined;
 const dashboardDemoMode = ["1", "true", "yes"].includes(
   (runtimeDashboardConfig.demo ?? dashboardEnv.VITE_POHW_DASHBOARD_DEMO ?? "").toLowerCase()
 );
@@ -1094,7 +1095,10 @@ function App() {
 
   return (
     <DashboardDataContext.Provider value={dashboardData}>
-      <main className="app-shell">
+      <main
+        className={README_CAPTURE_MODE ? "app-shell capture-final" : "app-shell"}
+        data-capture={README_CAPTURE_MODE ? "final" : undefined}
+      >
         <Navigation
           activeSection={activeSection}
           activeView={activeView}
@@ -1205,19 +1209,19 @@ function GovernanceWorkspace({
           <section className="governance-canonical">
             <div>
               <span>Canonical ecosystem CID</span>
-              <code title={data.currentCanonicalEcosystemCid ?? undefined}>
-                {data.currentCanonicalEcosystemCid ?? "Unavailable"}
+              <code title={captureSafeTitle(data.currentCanonicalEcosystemCid)}>
+                {captureIdentifier(data.currentCanonicalEcosystemCid, "Unavailable")}
               </code>
             </div>
             <div>
               <span>Contract</span>
-              <code title={data.governanceContractAddress ?? undefined}>
-                {data.governanceContractAddress ?? "Not deployed"}
+              <code title={captureSafeTitle(data.governanceContractAddress)}>
+                {captureIdentifier(data.governanceContractAddress, "Not deployed")}
               </code>
             </div>
             <div>
               <span>Identity metrics</span>
-              <code title={data.identityMetrics?.metricsRoot}>
+              <code title={captureSafeTitle(data.identityMetrics?.metricsRoot)}>
                 {data.identityMetrics
                   ? shortHash(data.identityMetrics.metricsRoot) + " / "
                     + data.identityMetrics.independentAttestors + "/"
@@ -1246,7 +1250,11 @@ function GovernanceWorkspace({
                   {data.repositories.map((repository) => (
                     <tr key={repository.name}>
                       <td data-label="Repository"><strong>{repository.name}</strong></td>
-                      <td data-label="Canonical source CID"><code title={repository.sourceTreeCid}>{repository.sourceTreeCid}</code></td>
+                      <td data-label="Canonical source CID">
+                        <code title={captureSafeTitle(repository.sourceTreeCid)}>
+                          {captureIdentifier(repository.sourceTreeCid)}
+                        </code>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1310,7 +1318,7 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
         <div>
           <span className={"risk-label " + proposal.riskClass}>{proposal.riskClass}</span>
           <h3>{proposal.diffSummary}</h3>
-          <code title={proposal.proposalId}>{shortHash(proposal.proposalId)}</code>
+          <code title={captureSafeTitle(proposal.proposalId)}>{shortHash(proposal.proposalId)}</code>
         </div>
         <div className="proposal-state">
           <strong>{proposal.state}</strong>
@@ -1318,8 +1326,8 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
         </div>
       </header>
       <div className="proposal-cids">
-        <span>Candidate <code title={proposal.candidateEcosystemCid}>{shortHash(proposal.candidateEcosystemCid)}</code></span>
-        <span>Review round <code title={proposal.reviewRoundId}>{shortHash(proposal.reviewRoundId)}</code> <strong>{proposal.reviewRoundState}</strong></span>
+        <span>Candidate <code title={captureSafeTitle(proposal.candidateEcosystemCid)}>{shortHash(proposal.candidateEcosystemCid)}</code></span>
+        <span>Review round <code title={captureSafeTitle(proposal.reviewRoundId)}>{shortHash(proposal.reviewRoundId)}</code> <strong>{proposal.reviewRoundState}</strong></span>
         <span>Repositories <strong>{proposal.affectedRepositories.join(", ")}</strong></span>
       </div>
       <div className="governance-gates">
@@ -1559,12 +1567,13 @@ function ExplorerWorkspace({
 
   const forkStatus = overview?.fork.status ?? null;
   const idena = overview?.idena ?? null;
+  const maskSearchQuery = README_CAPTURE_MODE && query !== "" && !/^\d+$/.test(query);
 
   return (
     <div className="explorer-workspace">
       <header className="explorer-header">
         <div>
-          <span className="eyebrow">PoHW testnet</span>
+          <span className="eyebrow">{getExplorerNetworkLabel(overview)}</span>
           <h1>Network Explorer</h1>
           <p>Fork transactions, inherited Bitcoin history, sharechain and Idena state</p>
         </div>
@@ -1573,9 +1582,11 @@ function ExplorerWorkspace({
             <Search aria-hidden="true" size={17} />
             <input
               aria-label="Search by height, block hash, transaction ID, share hash or Bitcoin address"
+              className={maskSearchQuery ? "capture-search-mask" : undefined}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Height, hash, txid or address"
               spellCheck={false}
+              type={maskSearchQuery ? "password" : "text"}
               value={query}
             />
             <button aria-label="Search explorer" title="Search" type="submit">
@@ -1677,14 +1688,43 @@ function ExplorerOverviewView({
 }) {
   const sharechain = overview?.sharechain;
   const idena = overview?.idena;
-  const metrics = [
+  let participantMetric: readonly [string, string, LucideIcon];
+  let snapshotMetric: readonly [string, string, LucideIcon];
+  if (sharechain?.mainnetHandoffParticipantCount != null) {
+    participantMetric = [
+      "Mainnet handoff",
+      `${formatInt(sharechain.mainnetHandoffParticipantCount)} / ${formatInt(sharechain.mainnetHandoffParticipantThreshold)}`,
+      Users
+    ];
+    snapshotMetric = [
+      "Handoff snapshot quorum",
+      sharechain.snapshotVoterIdenaCount == null
+        ? "Unavailable"
+        : `${formatInt(sharechain.snapshotVoterIdenaCount)} / ${formatInt(sharechain.mainnetHandoffSnapshotVoterThreshold)}`,
+      ShieldCheck
+    ];
+  } else {
+    participantMetric = [
+      "Pool miners",
+      sharechain ? formatInt(sharechain.registeredMinerCount) : "Unavailable",
+      Users
+    ];
+    snapshotMetric = [
+      "Snapshot voters",
+      sharechain?.snapshotVoterIdenaCount == null
+        ? "Unavailable"
+        : formatInt(sharechain.snapshotVoterIdenaCount),
+      ShieldCheck
+    ];
+  }
+  const metrics: ReadonlyArray<readonly [string, string, LucideIcon]> = [
     ["Fork height", forkStatus ? formatInt(forkStatus.tipHeight) : "Not connected", Blocks],
     ["Bitcoin index", overview?.bitcoinHistory?.indexedTipHeight == null ? "Not ready" : formatInt(overview.bitcoinHistory.indexedTipHeight), Database],
     ["Active shares", sharechain ? formatInt(sharechain.activeShareCount) : "Unavailable", GitBranch],
-    ["Mainnet handoff", sharechain?.mainnetHandoffParticipantCount == null ? "Unavailable" : `${formatInt(sharechain.mainnetHandoffParticipantCount)} / ${formatInt(sharechain.mainnetHandoffParticipantThreshold)}`, Users],
-    ["Snapshot quorum", sharechain?.snapshotVoterIdenaCount == null ? "Unavailable" : `${formatInt(sharechain.snapshotVoterIdenaCount)} / ${formatInt(sharechain.mainnetHandoffSnapshotVoterThreshold)}`, ShieldCheck],
+    participantMetric,
+    snapshotMetric,
     ["Eligible identities", idena ? formatInt(idena.eligibleIdentityCount) : "Unavailable", ShieldCheck]
-  ] as const;
+  ];
   return (
     <section className="explorer-view" aria-label="Combined chain overview">
       <div className="explorer-metrics">
@@ -1746,7 +1786,7 @@ function ExplorerOverviewView({
           </div>
           <ExplorerDefinitionList
             rows={[
-              ["Chain", forkStatus?.chainName ?? "Not configured"],
+              ["Chain", getExplorerChainLabel(overview)],
               ["Difficulty phase", forkStatus?.difficultyPhase ?? "Unavailable"],
               ["Estimated hashrate", formatHashrate(forkStatus?.estimatedHashrateHps)],
               ["Active blocks", formatInt(forkStatus?.activeForkBlockCount ?? 0)],
@@ -1792,13 +1832,13 @@ function ExplorerOverviewView({
       {overview?.limitations.map((limitation) => (
         <div className="explorer-limitation" key={limitation}>
           <AlertTriangle size={15} />
-          <span>{limitation}</span>
+          <span>{maskIdentifierLikeText(limitation)}</span>
         </div>
       ))}
       {overview?.safetyBoundaries.map((boundary) => (
         <div className="explorer-boundary" key={boundary}>
           <ShieldCheck size={15} />
-          <span>{boundary}</span>
+          <span>{maskIdentifierLikeText(boundary)}</span>
         </div>
       ))}
     </section>
@@ -1977,10 +2017,10 @@ function SharechainExplorerView({
                   <td>{formatInt(share.height)}</td>
                   <td><ExplorerStateBadge state={share.active ? "active" : "inactive"} /></td>
                   <td><button className="hash-button" onClick={() => onInspect(share)} type="button">{shortHash(share.shareHash)}</button></td>
-                  <td>{share.minerId}</td>
+                  <td>{captureIdentifier(share.minerId)}</td>
                   <td>{formatIntegerString(share.hashrateScoreDelta)}</td>
                   <td><code>{shortHash(share.bitcoinTemplateHash)}</code></td>
-                  <td>{share.idenaSnapshotId}</td>
+                  <td>{captureIdentifier(share.idenaSnapshotId)}</td>
                 </tr>
               ))}
             </tbody>
@@ -2064,20 +2104,20 @@ function ExplorerSearchPanel({
     return (
       <section className="explorer-detail">
         <div className="explorer-section-heading">
-          <div><h2>Fork block {formatInt(block.height)}</h2><code>{block.blockHash}</code></div>
+          <div><h2>Fork block {formatInt(block.height)}</h2><code>{captureIdentifier(block.blockHash)}</code></div>
           <ExplorerStateBadge state={block.active ? "active" : "orphan"} />
         </div>
         <ExplorerDefinitionList rows={[
-          ["Previous block", block.previousBlockHash],
+          ["Previous block", captureIdentifier(block.previousBlockHash)],
           ["Timestamp", formatUnixTime(block.timestamp, true)],
           ["Difficulty", `${formatStateLabel(block.difficultyPhase)} / ${block.bits}`],
-          ["Cumulative work", block.cumulativeWork],
+          ["Cumulative work", captureIdentifier(block.cumulativeWork)],
           ["Transactions", formatInt(block.transactionCount)],
-          ["Coinbase txid", block.coinbaseTxid],
+          ["Coinbase txid", captureIdentifier(block.coinbaseTxid)],
           ["Coinbase", `${formatSats(block.coinbaseValueSats)} sats / ${block.coinbaseOutputCount} outputs`],
-          ["PoHW commitment", block.pohwCommitmentHash ?? "Not present"],
+          ["PoHW commitment", captureIdentifier(block.pohwCommitmentHash, "Not present")],
           ["Size", `${formatInt(block.sizeBytes)} bytes / ${formatInt(block.weightWu)} WU`],
-          ["Merkle root", block.merkleRoot]
+          ["Merkle root", captureIdentifier(block.merkleRoot)]
         ]} longValues />
         <div className="explorer-section-heading subsection-heading">
           <h3>Transactions</h3>
@@ -2112,11 +2152,11 @@ function ExplorerSearchPanel({
     return (
       <section className="explorer-detail">
         <div className="explorer-section-heading">
-          <div><h2>Fork transaction</h2><code>{transaction.txid}</code></div>
+          <div><h2>Fork transaction</h2><code>{captureIdentifier(transaction.txid)}</code></div>
           <ExplorerStateBadge state={transaction.active ? "active" : "orphan"} />
         </div>
         <ExplorerDefinitionList rows={[
-          ["Block", `${formatInt(transaction.height)} / ${transaction.blockHash}`],
+          ["Block", `${formatInt(transaction.height)} / ${captureIdentifier(transaction.blockHash)}`],
           ["Type", transaction.coinbase ? "Coinbase" : "Standard transaction"],
           ["Version / locktime", `${transaction.version} / ${transaction.lockTime}`],
           ["Inputs / outputs", `${formatInt(transaction.inputCount)} / ${formatInt(transaction.outputCount)}`],
@@ -2124,7 +2164,7 @@ function ExplorerSearchPanel({
           ["Output value", `${formatSats(transaction.totalOutputSats)} sats`],
           ["Fee", transaction.feeSats == null ? "Not applicable" : `${formatSats(transaction.feeSats)} sats`],
           ["Size", `${formatInt(transaction.sizeBytes)} bytes / ${formatInt(transaction.weightWu)} WU`],
-          ["Witness txid", transaction.wtxid]
+          ["Witness txid", captureIdentifier(transaction.wtxid)]
         ]} longValues />
         <div className="explorer-section-heading subsection-heading">
           <h3>Inputs</h3>
@@ -2139,7 +2179,15 @@ function ExplorerSearchPanel({
                   <td>{input.vin}</td>
                   <td>{input.coinbase ? "Coinbase" : <button className="hash-button" onClick={() => { if (input.previousTxid) onInspect(input.previousTxid); }} type="button">{shortHash(input.previousTxid)}:{input.previousVout}</button>}</td>
                   <td>{input.previousOutput ? `${formatSats(input.previousOutput.valueSats)} sats` : "N/A"}</td>
-                  <td><code>{input.previousOutput?.address ?? input.previousOutput?.scriptHash ?? shortHash(input.scriptSigHex)}</code></td>
+                  <td>
+                    <code>
+                      {captureIdentifier(
+                        input.previousOutput?.address
+                          ?? input.previousOutput?.scriptHash
+                          ?? shortHash(input.scriptSigHex)
+                      )}
+                    </code>
+                  </td>
                   <td>{formatInt(input.witness.length)} items</td>
                 </tr>
               ))}
@@ -2159,7 +2207,7 @@ function ExplorerSearchPanel({
                   <td>{output.vout}</td>
                   <td>{formatSats(output.valueSats)} sats</td>
                   <td>{formatStateLabel(output.scriptType)}</td>
-                  <td><code>{output.address ?? output.scriptHash}</code></td>
+                  <td><code>{captureIdentifier(output.address ?? output.scriptHash)}</code></td>
                   <td><ExplorerStateBadge state={output.spentBy ? "spent" : "unspent"} /></td>
                 </tr>
               ))}
@@ -2174,16 +2222,16 @@ function ExplorerSearchPanel({
     return (
       <section className="explorer-detail">
         <div className="explorer-section-heading">
-          <div><h2>Bitcoin history block {formatInt(block.data.height)}</h2><code>{block.data.id}</code></div>
+          <div><h2>Bitcoin history block {formatInt(block.data.height)}</h2><code>{captureIdentifier(block.data.id)}</code></div>
           <ExplorerStateBadge state={block.forkRelation} />
         </div>
         <ExplorerDefinitionList rows={[
-          ["Previous block", block.data.previousblockhash ?? "Genesis"],
+          ["Previous block", captureIdentifier(block.data.previousblockhash, "Genesis")],
           ["Timestamp", formatUnixTime(block.data.timestamp, true)],
           ["Transactions", formatInt(block.data.tx_count)],
           ["Version / nonce", `${block.data.version} / ${block.data.nonce}`],
           ["Size", `${formatInt(block.data.size)} bytes / ${formatInt(block.data.weight)} WU`],
-          ["Merkle root", block.data.merkle_root]
+          ["Merkle root", captureIdentifier(block.data.merkle_root)]
         ]} longValues />
         <div className="explorer-section-heading subsection-heading">
           <h3>Transactions</h3>
@@ -2218,12 +2266,12 @@ function ExplorerSearchPanel({
     return (
       <section className="explorer-detail">
         <div className="explorer-section-heading">
-          <div><h2>Bitcoin history transaction</h2><code>{transaction.data.txid}</code></div>
+          <div><h2>Bitcoin history transaction</h2><code>{captureIdentifier(transaction.data.txid)}</code></div>
           <ExplorerStateBadge state={transaction.forkRelation} />
         </div>
         <ExplorerDefinitionList rows={[
           ["Confirmation", transaction.data.status.confirmed ? `Height ${formatInt(transaction.data.status.block_height ?? 0)}` : "Unconfirmed"],
-          ["Block", transaction.data.status.block_hash ?? "Not confirmed"],
+          ["Block", captureIdentifier(transaction.data.status.block_hash, "Not confirmed")],
           ["Version / locktime", `${transaction.data.version} / ${transaction.data.locktime}`],
           ["Inputs / outputs", `${formatInt(transaction.data.vin.length)} / ${formatInt(transaction.data.vout.length)}`],
           ["Fee", `${formatSats(transaction.data.fee)} sats`],
@@ -2242,7 +2290,14 @@ function ExplorerSearchPanel({
                   <td>{index}</td>
                   <td>{input.is_coinbase ? "Coinbase" : <button className="hash-button" onClick={() => { if (input.txid) onInspect(input.txid); }} type="button">{shortHash(input.txid)}:{input.vout}</button>}</td>
                   <td>{input.prevout ? `${formatSats(input.prevout.value)} sats` : "N/A"}</td>
-                  <td><code>{input.prevout?.scriptpubkey_address ?? shortHash(input.prevout?.scriptpubkey ?? input.scriptsig)}</code></td>
+                  <td>
+                    <code>
+                      {captureIdentifier(
+                        input.prevout?.scriptpubkey_address
+                          ?? shortHash(input.prevout?.scriptpubkey ?? input.scriptsig)
+                      )}
+                    </code>
+                  </td>
                   <td>{formatInt(input.witness?.length ?? 0)} items</td>
                 </tr>
               ))}
@@ -2262,7 +2317,7 @@ function ExplorerSearchPanel({
                   <td>{index}</td>
                   <td>{formatSats(output.value)} sats</td>
                   <td>{formatStateLabel(output.scriptpubkey_type)}</td>
-                  <td><code>{output.scriptpubkey_address ?? shortHash(output.scriptpubkey)}</code></td>
+                  <td><code>{captureIdentifier(output.scriptpubkey_address ?? shortHash(output.scriptpubkey))}</code></td>
                   <td><ExplorerStateBadge state={result.outspends ? (result.outspends.items[index]?.spent ? "spent" : "unspent") : "unknown"} /></td>
                 </tr>
               ))}
@@ -2277,7 +2332,7 @@ function ExplorerSearchPanel({
     return (
       <section className="explorer-detail">
         <div className="explorer-section-heading">
-          <div><h2>Bitcoin address</h2><code>{result.address}</code></div>
+          <div><h2>Bitcoin address</h2><code>{captureIdentifier(result.address)}</code></div>
           <ExplorerStateBadge state={result.fork ? "fork_activity" : result.bitcoin?.forkRelation ?? "not_found"} />
         </div>
         <div className="idena-explorer-grid">
@@ -2400,19 +2455,19 @@ function ExplorerSearchPanel({
   return (
     <section className="explorer-detail">
       <div className="explorer-section-heading">
-        <div><h2>Share {formatInt(share.height)}</h2><code>{share.shareHash}</code></div>
+        <div><h2>Share {formatInt(share.height)}</h2><code>{captureIdentifier(share.shareHash)}</code></div>
         <ExplorerStateBadge state={share.active ? "active" : "inactive"} />
       </div>
       <ExplorerDefinitionList rows={[
-        ["Miner", share.minerId],
-        ["Parent share", share.parentShareHash],
-        ["Bitcoin template", share.bitcoinTemplateHash],
-        ["Work hash", share.workHash],
-        ["Target", share.target],
+        ["Miner", captureIdentifier(share.minerId)],
+        ["Parent share", captureIdentifier(share.parentShareHash)],
+        ["Bitcoin template", captureIdentifier(share.bitcoinTemplateHash)],
+        ["Work hash", captureIdentifier(share.workHash)],
+        ["Target", captureIdentifier(share.target)],
         ["Score delta", formatIntegerString(share.hashrateScoreDelta)],
         ["Cumulative score", formatIntegerString(share.cumulativeScore ?? "0")],
-        ["Idena snapshot", share.idenaSnapshotId],
-        ["Snapshot proof root", share.idenaSnapshotProofRoot]
+        ["Idena snapshot", captureIdentifier(share.idenaSnapshotId)],
+        ["Snapshot proof root", captureIdentifier(share.idenaSnapshotProofRoot)]
       ]} longValues />
     </section>
   );
@@ -2424,7 +2479,7 @@ function ExplorerDefinitionList({ rows, longValues = false }: { rows: [string, s
       {rows.map(([label, value]) => (
         <div key={label}>
           <dt>{label}</dt>
-          <dd>{value}</dd>
+          <dd>{maskIdentifierLikeText(value)}</dd>
         </div>
       ))}
     </dl>
@@ -2527,7 +2582,7 @@ function SourceNotice({ source }: { source: string }) {
           {demo
             ? "Numbers are sample data. Disable VITE_POHW_DASHBOARD_DEMO for verification."
             : auth
-              ? "Set VITE_POHW_DASHBOARD_API_TOKEN before trusting payout, pledge, or sync status."
+              ? "Start the loopback dashboard UI wrapper with its runtime token file before trusting payout, pledge, or sync status."
               : "Start the local dashboard API before trusting payout, pledge, or sync status."}
         </span>
       </div>
@@ -2781,7 +2836,7 @@ function TopBar({
           <div className="service-pill" key={status.label}>
             <span className={`state-dot ${status.state}`} />
             <span className="service-label">{status.label}</span>
-            <span className="service-detail">{status.detail}</span>
+            <span className="service-detail">{maskIdentifierLikeText(status.detail)}</span>
           </div>
         ))}
       </div>
@@ -3039,7 +3094,7 @@ function IdentityHeader() {
         <ShieldCheck size={22} />
       </div>
       <div>
-        <strong>{account.identity.idenaAddress}</strong>
+        <strong>{captureIdentifier(account.identity.idenaAddress)}</strong>
         <span>
           {account.identity.status} identity, snapshot {account.identity.snapshotDay}
         </span>
@@ -3243,7 +3298,7 @@ function DetailsPanel({
             rows={[
               ["Formula", account.idenaAccounting.formula],
               ["Snapshot height", formatInt(account.identity.snapshotHeight)],
-              ["Snapshot root", account.identity.snapshotRoot],
+              ["Snapshot root", captureIdentifier(account.identity.snapshotRoot)],
               ["Source", account.idenaAccounting.source],
               ["Excluded", `${formatScore(account.idenaAccounting.invitationScoreIgnored)} invitation score`]
             ]}
@@ -3465,7 +3520,7 @@ function VaultContext() {
   const { account } = useDashboardData();
   const rows: [string, string][] = [
     ["Signers", `${account.pool.thresholdCount} of ${account.pool.signerCount} required`],
-    ["Vault key", account.pool.vaultKey],
+    ["Vault key", captureIdentifier(account.pool.vaultKey)],
     ["Rotation", `weekly, last ${account.pool.lastVaultRotation}`],
     ["Pending", `${account.pool.pendingWithdrawals} withdrawal requests`],
     ["Risk", "if threshold is offline, withdrawals wait"]
@@ -3600,8 +3655,48 @@ function getRewardView(account: PoolSnapshot, prospectMode: ProspectMode): Rewar
   };
 }
 
+function isConnectedExperimentOne(overview: ExplorerOverview | null) {
+  return overview?.fork.state === "connected"
+    && overview.fork.status?.chainName.trim().toLowerCase() === "pohw";
+}
+
+function getExplorerNetworkLabel(overview: ExplorerOverview | null) {
+  return isConnectedExperimentOne(overview) ? "PoHW Experiment 1" : "PoHW testnet";
+}
+
+function getExplorerChainLabel(overview: ExplorerOverview | null) {
+  const chainName = overview?.fork.status?.chainName;
+  if (!chainName) return "Not configured";
+  return isConnectedExperimentOne(overview) ? `Experiment 1 (${chainName})` : chainName;
+}
+
+function isIdentifierStatus(value: string) {
+  return /^(?:genesis|n\/a|not (?:available|configured|connected|confirmed|deployed|found|present)|unavailable|unknown)$/i
+    .test(value.trim());
+}
+
+function captureIdentifier(value?: string | null, fallback = "Not available") {
+  if (!value) return fallback;
+  if (!README_CAPTURE_MODE || isIdentifierStatus(value)) return value;
+  return CAPTURE_MASK;
+}
+
+function captureSafeTitle(value?: string | null) {
+  return README_CAPTURE_MODE ? undefined : value ?? undefined;
+}
+
+function maskIdentifierLikeText(value: string) {
+  if (!README_CAPTURE_MODE) return value;
+  return value
+    .replace(/\b(?:bc1[ac-hj-np-z02-9]{11,87}|[13][1-9A-HJ-NP-Za-km-z]{25,34})\b/gi, CAPTURE_MASK)
+    .replace(/\b(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[a-z2-7]{20,})\b/g, CAPTURE_MASK)
+    .replace(/\b(?:0x[0-9a-f]{16,}|(?=[0-9a-f]{32,}\b)(?=[0-9a-f]*[a-f])[0-9a-f]{32,})\b/gi, CAPTURE_MASK)
+    .replace(/\b(?:0x)?[0-9a-f]{4,}\.\.\.[0-9a-f]{4,}\b/gi, CAPTURE_MASK);
+}
+
 function shortHash(value?: string | null) {
   if (!value) return "Not available";
+  if (README_CAPTURE_MODE && !isIdentifierStatus(value)) return CAPTURE_MASK;
   if (value.length <= 18) return value;
   return `${value.slice(0, 10)}...${value.slice(-8)}`;
 }
@@ -3644,6 +3739,7 @@ function formatHashrate(value?: string | null) {
   if (numeric >= 1e12) return `${(numeric / 1e12).toFixed(2)} TH/s`;
   if (numeric >= 1e9) return `${(numeric / 1e9).toFixed(2)} GH/s`;
   if (numeric >= 1e6) return `${(numeric / 1e6).toFixed(2)} MH/s`;
+  if (numeric > 0 && numeric < 1) return "<1 H/s";
   return `${formatInt(Math.round(numeric))} H/s`;
 }
 

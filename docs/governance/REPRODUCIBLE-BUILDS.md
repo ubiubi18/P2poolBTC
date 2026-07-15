@@ -33,6 +33,23 @@ commands use offline mode, and the worker must enforce network isolation at the
 operating-system or container boundary. A Boolean claim in a result record is
 not a substitute for that isolation.
 
+The Experiment 1 Bitcoin Core builder follows the same separation. Build
+evidence v4 first hashes a byte-identical working copy of the immutable
+snapshot's `depends` subtree, then records the exact `download-one` and
+`install` commands. It seals the resulting prefix, hashes every normalized path
+and byte, binds the generated `toolchain.cmake`, and rejects CMake
+configurations that did not use it. The evidence also records the CMake
+compiler configuration and executable digests. The shell script does not
+provide a portable network sandbox; clean-room operators must disable network
+access after `depends_fetch`. Tests execute the unstripped build outputs first;
+the deterministic artifact set comes from a separately recorded CMake install
+with stripping. The recorded C and C++ flags map source and build roots to
+stable `/pohw/source` and `/pohw/build` paths so dependency headers and
+generated sources cannot embed a builder's scratch directory. On Darwin the
+recorded configure environment also disables the path-sensitive Mach-O UUID,
+which makes the linker-generated ad-hoc code signature deterministic for
+identical bytes. Apple notarization is not part of that deterministic core.
+
 The evidence generator never executes source-controlled commands. It verifies
 the plan, source CID bindings through a digest-pinned verifier and source CAR,
 exact dependency locks, declared toolchains, successful command records,
@@ -101,7 +118,10 @@ Those commands are development checks. A governance build attestation is valid
 only when its exact plan target is run in an independent clean room with the
 locked toolchain and its generated evidence is publicly retrievable by CID.
 The governance-contract target also runs the same exact artifact through
-idena-go's production `WasmVM`. Its release command adds
+idena-go's production `WasmVM`. The integration test is a deterministic
+P2poolBTC source artifact bound in `governance-fork-lock.json`; the gate checks
+its raw CID and digest, then overlays it into the otherwise clean pinned Go
+package without writing to that checkout. Its release command adds
 `--require-locked-sources` and every component path, and fails unless all source
 worktrees are clean at the fork-lock revisions. The compiler disables
 `bulk-memory` because that instruction set is unsupported by the pinned
@@ -136,7 +156,7 @@ signing envelopes, notarization tickets, or tool-specific ordering. Those
 differences must be documented. Apple notarization and Windows signing remain
 external centralized constraints and are not solved by IPFS or DAO approval.
 
-The local fork lock records an exact contract artifact, but labels it
-`committed-experimental-prototype` and `canonicalAuthorization: none`. It is not a
-release. No installer or release is authorized until independent clean-room
-attestations and all governance gates exist.
+The fork lock records an exact contract artifact, but labels it
+`committed-experimental-prototype` and `canonicalAuthorization: none`. It is
+not a release. No installer or release is authorized until independent
+clean-room attestations and all governance gates exist.

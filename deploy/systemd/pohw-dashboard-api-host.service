@@ -1,12 +1,13 @@
 [Unit]
 Description=PoHW combined dashboard and public explorer API
-Wants=network-online.target
-After=network-online.target pohw-fork-chain-node.service
+Wants=network-online.target bitcoind-pohw-experiment-1.service
+After=network-online.target bitcoind-pohw-experiment-1.service
 
 [Service]
 Type=simple
 User=pohw
 Group=pohw
+SupplementaryGroups=bitcoin-pohw-rpc
 WorkingDirectory=/opt/p2pool
 EnvironmentFile=/etc/pohw/explorer.env
 LoadCredential=dashboard-api.token:/etc/pohw/dashboard-api.token

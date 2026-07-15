@@ -48,11 +48,15 @@ proposal voting threshold.
 
 ## Objective slashing only
 
-Reviewer bonds may be slashed for a forged signature, wrong source or artifact
-digest, a duplicate owner presented as independent, unavailable or malformed
-attestation content, or a claim that a command passed when its attached result
-proves failure. Subjective disagreement, a false positive, or failure to find
-an unknown bug is not slashable.
+The current contract may slash reviewer bonds only when the attestation claims
+that tests passed and its exact committed raw result is `{"passed":false}`.
+Builder test claims and availability probe claims have equivalent explicitly
+implemented challenge types. Wrong bindings, duplicate owners, malformed
+content, and forged caller ownership fail during submission or gate evaluation;
+they are not post-vote slashing predicates in this prototype. Adding one requires
+a separately specified, bounded, objectively verifiable challenge format.
+Subjective disagreement, a false positive, or failure to find an unknown bug is
+not slashable.
 
 Hosted models can be compromised, collude, change behavior, or share a common
 failure mode. Diversity gates reduce correlated failure but do not make AI a

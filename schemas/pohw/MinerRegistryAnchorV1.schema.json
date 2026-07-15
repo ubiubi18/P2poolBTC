@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.invalid/schemas/pohw/MinerRegistryAnchorV1.schema.json",
+  "title": "MinerRegistryAnchorV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_address",
+    "experiment_id",
+    "registration_sequence",
+    "registration_block",
+    "registration_epoch",
+    "registration_timestamp",
+    "registration_commitment"
+  ],
+  "properties": {
+    "contract_address": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "experiment_id": {"type": "string", "pattern": "^[a-z0-9._:/-]{1,64}$"},
+    "registration_sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+    "registration_block": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "registration_epoch": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "registration_timestamp": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "registration_commitment": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
+

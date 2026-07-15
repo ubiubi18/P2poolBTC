@@ -1,0 +1,87 @@
+name: Experiment 1 bug report
+description: Report a reproducible full-consensus fork problem without publishing secrets.
+title: "[Experiment 1] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is public. Do not include keys, seed phrases, API keys, RPC cookies, wallet data, identity addresses, peer endpoints, IP addresses, hostnames, usernames, `.env` files, raw logs, block hashes, or unreviewed archives.
+
+        Experiment 1 permits inherited Bitcoin UTXO spends, and Idena remains a live chain. Stop before signing if a transaction, identity action, or replay rule is not exactly what you expected. Use private vulnerability reporting for a security or privacy issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - Bitcoin Core build or startup
+        - Fork consensus or replay protection
+        - Wallet, PSBT, transaction, or script handling
+        - P2Pool Stratum or block submission
+        - Sharechain or payout evidence
+        - Idena eligibility or snapshot accounting
+        - FROST vault
+        - Explorer or dashboard
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Exact P2poolBTC Git commit
+      description: Paste only the 40-character public commit ID.
+      placeholder: 0123456789abcdef0123456789abcdef01234567
+    validations:
+      required: true
+  - type: input
+    id: core_commit
+    attributes:
+      label: Exact Bitcoin Core source commit
+      description: Use the public commit from the Experiment 1 manifest.
+    validations:
+      required: true
+  - type: input
+    id: activation
+    attributes:
+      label: Experiment activation ID
+      description: Use the public activation ID; do not include peer or block identifiers.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04, x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal sanitized reproduction
+      description: Replace local paths, addresses, transaction IDs, block hashes, and endpoints with placeholders.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include only a minimal redacted error, never a raw log or transaction containing your addresses.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I verified that RPC reported `chain=pohw`, not `main`.
+          required: true
+        - label: I reviewed this report and every attachment for secrets and identifying data.
+          required: true
+        - label: I stopped before signing or rebroadcasting any unexpected Bitcoin or Idena action.
+          required: true

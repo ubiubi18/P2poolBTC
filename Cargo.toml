@@ -5,6 +5,7 @@ members = [
     "crates/p2pool-node",
     "crates/governance-core",
     "crates/governance-cli",
+    "crates/pohw-agent",
 ]
 resolver = "2"
 

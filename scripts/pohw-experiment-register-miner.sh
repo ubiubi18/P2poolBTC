@@ -11,13 +11,16 @@ registration after the Idena signature is supplied.
 Options:
   --idena-address ADDRESS       Idena address to bind to this miner
   --idena-signature-hex HEX     Signature over the printed ownership challenge
+  --registry-experiment-id ID   Prepare an ownerless Idena registry commitment
+  --registry-anchor-file PATH   Finalized public MinerRegistryAnchorV1 receipt
   --output-dir PATH             Output directory for local registration artifacts
   --no-append                   Do not append the signed registration locally
   --no-gossip                   Do not send the signed registration to configured peers
   -h, --help                    Show this help
 
-First run without --idena-signature-hex. Sign the printed
-idena_ownership_challenge in Idena, then rerun with --idena-signature-hex.
+Without registry mode, first run without --idena-signature-hex. With registry
+mode, first generate the commitment, register it in the public Idena contract,
+then rerun with --registry-anchor-file. Sign only the anchored challenge.
 EOF
 }
 
@@ -29,6 +32,8 @@ fi
 
 IDENA_ADDRESS=""
 IDENA_SIGNATURE_HEX=""
+REGISTRY_EXPERIMENT_ID=""
+REGISTRY_ANCHOR_FILE=""
 OUTPUT_DIR=""
 APPEND="true"
 GOSSIP="true"
@@ -41,6 +46,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --idena-signature-hex)
       IDENA_SIGNATURE_HEX="${2:?missing value for --idena-signature-hex}"
+      shift 2
+      ;;
+    --registry-experiment-id)
+      REGISTRY_EXPERIMENT_ID="${2:?missing value for --registry-experiment-id}"
+      shift 2
+      ;;
+    --registry-anchor-file)
+      REGISTRY_ANCHOR_FILE="${2:?missing value for --registry-anchor-file}"
       shift 2
       ;;
     --output-dir)
@@ -169,6 +182,8 @@ MINER_ID="${POHW_MINER_ID:-}"
 PEER_ADDRS="${POHW_PEER_ADDRS:-}"
 IDENA_ADDRESS="${IDENA_ADDRESS:-${POHW_IDENA_ADDRESS:-${POHW_DASHBOARD_IDENA_ADDRESS:-}}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/experiment-registration-$(date -u +%Y%m%dT%H%M%SZ)}"
+REGISTRY_EXPERIMENT_ID="${REGISTRY_EXPERIMENT_ID:-${POHW_MINER_REGISTRY_EXPERIMENT_ID:-}}"
+REGISTRY_ANCHOR_FILE="${REGISTRY_ANCHOR_FILE:-${POHW_MINER_REGISTRY_ANCHOR_FILE:-}}"
 
 if [[ -z "$MINER_ID" ]]; then
   echo "POHW_MINER_ID is required. Run scripts/pohw-experiment-init.sh first." >&2
@@ -180,6 +195,14 @@ if [[ -z "$IDENA_ADDRESS" ]]; then
 fi
 if [[ "$IDENA_ADDRESS" =~ [[:space:]] ]]; then
   echo "Idena address must not contain whitespace." >&2
+  exit 1
+fi
+if [[ -n "$REGISTRY_ANCHOR_FILE" && -z "$REGISTRY_EXPERIMENT_ID" ]]; then
+  echo "--registry-anchor-file requires --registry-experiment-id (or POHW_MINER_REGISTRY_EXPERIMENT_ID)." >&2
+  exit 1
+fi
+if [[ -n "$REGISTRY_EXPERIMENT_ID" && -z "$REGISTRY_ANCHOR_FILE" && -n "$IDENA_SIGNATURE_HEX" ]]; then
+  echo "Do not sign before the finalized registry anchor is available; the anchor changes the ownership challenge." >&2
   exit 1
 fi
 
@@ -297,6 +320,18 @@ ensure_local_dir() {
   mkdir -p "$dir"
 }
 
+if [[ -n "$REGISTRY_ANCHOR_FILE" ]]; then
+  if [[ -L "$REGISTRY_ANCHOR_FILE" || ! -f "$REGISTRY_ANCHOR_FILE" ]]; then
+    echo "Registry anchor must be a regular non-symlink file: $REGISTRY_ANCHOR_FILE" >&2
+    exit 1
+  fi
+  reject_symlink_ancestor "$(dirname "$REGISTRY_ANCHOR_FILE")"
+  if (( $(wc -c < "$REGISTRY_ANCHOR_FILE") > 65536 )); then
+    echo "Registry anchor file exceeds 65536 bytes: $REGISTRY_ANCHOR_FILE" >&2
+    exit 1
+  fi
+fi
+
 ensure_local_dir "$DATADIR" "datadir"
 create_output_dir "$OUTPUT_DIR"
 raw_out="$OUTPUT_DIR/registration-local-private.json"
@@ -316,6 +351,13 @@ args=(
   --miner-id "$MINER_ID"
   --idena-address "$IDENA_ADDRESS"
 )
+
+if [[ -n "$REGISTRY_EXPERIMENT_ID" ]]; then
+  args+=(--registry-experiment-id "$REGISTRY_EXPERIMENT_ID")
+fi
+if [[ -n "$REGISTRY_ANCHOR_FILE" ]]; then
+  args+=(--registry-anchor-file "$REGISTRY_ANCHOR_FILE")
+fi
 
 if [[ -n "$IDENA_SIGNATURE_HEX" ]]; then
   args+=(--idena-signature-hex "$IDENA_SIGNATURE_HEX")
@@ -348,8 +390,30 @@ write_public_view "$raw_out" "$public_out"
 cat "$public_out"
 echo "Local private registration output written: registration-local-private.json" >&2
 echo "Public registration output written: registration-public.json" >&2
-if [[ -z "$IDENA_SIGNATURE_HEX" ]]; then
-  echo "Next: sign idena_ownership_challenge in Idena, then rerun this script with --idena-signature-hex." >&2
-else
-  echo "Next: run scripts/pohw-experiment-preflight.sh ${ENV_FILE:-.pohw-experiment.env}" >&2
-fi
+status="$(python3 - "$raw_out" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(data.get("status", ""))
+PY
+)"
+case "$status" in
+  needs_registry_transaction)
+    echo "Next: call registerMiner with the printed miner_id and registration_commitment, wait for finality, then create and supply MinerRegistryAnchorV1 JSON." >&2
+    ;;
+  needs_idena_signature)
+    echo "Next: sign idena_ownership_challenge in Idena, then rerun this script with --idena-signature-hex." >&2
+    ;;
+  registration_ready)
+    echo "Next: run scripts/pohw-experiment-preflight.sh ${ENV_FILE:-.pohw-experiment.env}" >&2
+    ;;
+  *)
+    if [[ -n "$IDENA_SIGNATURE_HEX" ]]; then
+      echo "Next: run scripts/pohw-experiment-preflight.sh ${ENV_FILE:-.pohw-experiment.env}" >&2
+    else
+      echo "Next: inspect the registration status above before continuing." >&2
+    fi
+    ;;
+esac

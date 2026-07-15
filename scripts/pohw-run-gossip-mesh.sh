@@ -17,6 +17,35 @@ MAX_ENVELOPES_PER_WINDOW="${POHW_MAX_ENVELOPES_PER_WINDOW:-120}"
 MAX_READ_REQUESTS_PER_WINDOW="${POHW_MAX_READ_REQUESTS_PER_WINDOW:-600}"
 RATE_WINDOW_SECONDS="${POHW_RATE_WINDOW_SECONDS:-60}"
 ADMIT_PEER_WORK_TEMPLATES="${POHW_ADMIT_PEER_WORK_TEMPLATES:-false}"
+GOSSIP_NETWORK_ID="${POHW_GOSSIP_NETWORK_ID:-}"
+IDENA_ANCHOR_POLICY="${POHW_IDENA_ANCHOR_POLICY:-}"
+REQUIRE_IDENA_ANCHOR_POLICY="${POHW_REQUIRE_IDENA_ANCHOR_POLICY:-false}"
+
+case "$REQUIRE_IDENA_ANCHOR_POLICY" in
+  true|false) ;;
+  *)
+    echo "POHW_REQUIRE_IDENA_ANCHOR_POLICY must be true or false." >&2
+    exit 1
+    ;;
+esac
+if [[ "$REQUIRE_IDENA_ANCHOR_POLICY" == "true" && -z "$IDENA_ANCHOR_POLICY" ]]; then
+  echo "POHW_IDENA_ANCHOR_POLICY is required by this launch profile." >&2
+  exit 1
+fi
+if [[ "$REQUIRE_IDENA_ANCHOR_POLICY" == "true" && "$ADMIT_PEER_WORK_TEMPLATES" != "true" ]]; then
+  echo "POHW_ADMIT_PEER_WORK_TEMPLATES=true is required with mandatory Idena anchor policy." >&2
+  exit 1
+fi
+
+if [[ -n "$GOSSIP_NETWORK_ID" ]]; then
+  if ! [[ "$GOSSIP_NETWORK_ID" =~ ^([0-9a-fA-F]{64})$ ]]; then
+    echo "POHW_GOSSIP_NETWORK_ID must be 32 bytes encoded as 64 hex characters." >&2
+    exit 1
+  fi
+  "$BIN" initialize-gossip-network \
+    --datadir "$DATADIR" \
+    --network-id "$GOSSIP_NETWORK_ID" >/dev/null
+fi
 
 args=(
   run-gossip-mesh
@@ -72,6 +101,23 @@ if [[ "$ADMIT_PEER_WORK_TEMPLATES" == "true" ]]; then
       args+=(--max-template-time-drift-seconds "$POHW_MAX_TEMPLATE_TIME_DRIFT_SECONDS")
     fi
   fi
+  if [[ -n "$IDENA_ANCHOR_POLICY" ]]; then
+    if [[ -z "${IDENA_API_KEY_FILE:-}" ]]; then
+      echo "IDENA_API_KEY_FILE is required when POHW_IDENA_ANCHOR_POLICY is set." >&2
+      exit 1
+    fi
+    args+=(
+      --idena-anchor-policy "$IDENA_ANCHOR_POLICY"
+      --idena-rpc-url "${IDENA_RPC_URL:-http://127.0.0.1:9009}"
+      --idena-api-key-file "$IDENA_API_KEY_FILE"
+    )
+    if [[ "${POHW_IDENA_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
+      args+=(--allow-remote-idena-rpc)
+    fi
+  fi
+elif [[ -n "$IDENA_ANCHOR_POLICY" ]]; then
+  echo "POHW_IDENA_ANCHOR_POLICY requires POHW_ADMIT_PEER_WORK_TEMPLATES=true." >&2
+  exit 1
 fi
 
 if [[ -n "${POHW_PEER_ADDRS:-}" ]]; then

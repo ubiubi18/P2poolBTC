@@ -29,6 +29,14 @@ class ExplorerHostProfileTest(unittest.TestCase):
         self.assertIn("validate_explorer_environment", installer)
         self.assertIn("explorer environment contains forbidden key", installer)
         self.assertIn("must not be group/world writable", installer)
+        self.assertIn("require_root_runtime_directory", installer)
+        self.assertIn("POHW_EXPLORER_POHW_CORE_MANIFEST", installer)
+        self.assertIn("POHW_ENABLE_BITCOIN_RPC must be true", installer)
+        self.assertIn("http://127.0.0.1:40414", installer)
+        self.assertIn("/run/bitcoin-pohw-rpc/.cookie", installer)
+        self.assertIn("retired Experiment 0 fork RPC", installer)
+        self.assertIn("corepack pnpm@11.11.0", installer)
+        self.assertNotIn("corepack pnpm@10.13.1", installer)
         self.assertNotIn('chown -R', installer)
 
         result = subprocess.run(
@@ -48,6 +56,9 @@ class ExplorerHostProfileTest(unittest.TestCase):
         )
         self.assertIn("User=pohw", api)
         self.assertIn("Group=pohw", api)
+        self.assertIn("SupplementaryGroups=bitcoin-pohw-rpc", api)
+        self.assertIn("bitcoind-pohw-experiment-1.service", api)
+        self.assertNotIn("pohw-fork-chain-node.service", api)
         self.assertIn("EnvironmentFile=/etc/pohw/explorer.env", api)
         self.assertIn(
             "LoadCredential=dashboard-api.token:/etc/pohw/dashboard-api.token",
@@ -74,7 +85,13 @@ class ExplorerHostProfileTest(unittest.TestCase):
     def test_example_environment_is_loopback_only_and_contains_no_secret(self) -> None:
         config = ENV_EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("POHW_DASHBOARD_BIND_ADDR=127.0.0.1:40407", config)
-        self.assertIn("POHW_EXPLORER_FORK_CHAIN_RPC_ADDR=127.0.0.1:40408", config)
+        self.assertIn(
+            "POHW_EXPLORER_POHW_CORE_MANIFEST=/opt/p2pool/compatibility/experiment-1-full-consensus.json",
+            config,
+        )
+        self.assertIn("BITCOIN_RPC_URL=http://127.0.0.1:40414", config)
+        self.assertIn("BITCOIN_RPC_COOKIE_FILE=/run/bitcoin-pohw-rpc/.cookie", config)
+        self.assertNotIn("POHW_EXPLORER_FORK_CHAIN_RPC_ADDR", config)
         self.assertIn("POHW_EXPLORER_BITCOIN_INDEX_URL=http://127.0.0.1:3002", config)
         self.assertIn("POHW_EXPLORER_ALLOW_REMOTE_BITCOIN_INDEX=false", config)
         self.assertIn("POHW_DASHBOARD_UI_BIND_HOST=127.0.0.1", config)

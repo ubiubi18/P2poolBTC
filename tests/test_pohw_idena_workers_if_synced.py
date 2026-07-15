@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
+import py_compile
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,13 +45,12 @@ class IdenaWorkersIfSyncedTest(unittest.TestCase):
         self.assertIn("WORKER_SERVICES", source)
 
     def test_script_parses(self) -> None:
-        result = subprocess.run(
-            ["python3", "-m", "py_compile", str(SCRIPT)],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        with tempfile.TemporaryDirectory(prefix="idena-workers-compile-") as temp:
+            py_compile.compile(
+                str(SCRIPT),
+                cfile=str(Path(temp) / "pohw-idena-workers-if-synced.pyc"),
+                doraise=True,
+            )
 
 
 if __name__ == "__main__":

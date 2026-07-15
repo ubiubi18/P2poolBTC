@@ -1,0 +1,51 @@
+[Unit]
+Description=P2poolBTC Experiment 1 full-consensus Bitcoin Core fork
+Documentation=https://github.com/ubiubi18/P2poolBTC/blob/master/EXPERIMENT-1.md
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/srv/bitcoin
+ConditionPathExists=/srv/bitcoin/pohw/bitcoin.conf
+
+[Service]
+Type=simple
+User=bitcoin-pohw
+Group=bitcoin-pohw-rpc
+SupplementaryGroups=bitcoin-pohw bitcoin-chain-read
+RuntimeDirectory=bitcoin-pohw-rpc
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoind -datadir=/srv/bitcoin/pohw -chain=pohw -daemon=0 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=10min
+TimeoutStopSec=10min
+KillSignal=SIGTERM
+LimitNOFILE=65536
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadOnlyPaths=/usr/local/libexec/pohw-bitcoin-core-v31.1
+ReadWritePaths=/srv/bitcoin/pohw /run/bitcoin-pohw-rpc
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+{
+  "name": "idena-pohw-miner-registry",
+  "version": "0.3.0",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "scripts": {
+    "build": "asc assembly/index.ts --target release",
+    "check:abi": "node scripts/check-abi.mjs",
+    "test": "asc assembly/index.ts --target release && node scripts/emulator-test.mjs && node scripts/check-abi.mjs"
+  },
+  "dependencies": {
+    "as-bignum": "0.3.1"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.27.37"
+  }
+}

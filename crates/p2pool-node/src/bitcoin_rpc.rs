@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use pohw_core::commitment::PohwCommitment;
 use pohw_core::fork::MainnetBlockRef;
 use pohw_core::payout::PayoutSchedule;
-use pohw_core::sharechain::BitcoinWorkTemplate;
+use pohw_core::sharechain::{BitcoinWorkTemplate, Share};
 use pohw_core::vault::{vault_script_pubkey_hex, VaultInput, VaultSpendPlan};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ const MAX_BITCOIN_RPC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SUBMIT_BLOCK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GBT_TRANSACTION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBMIT_BLOCK_REJECT_REASON_BYTES: usize = 1024;
+pub(crate) const POHW_REPLAY_MARKER_SCRIPT_HEX: &str = "5150";
 
 #[derive(Debug, Clone)]
 pub struct BitcoinRpcClient {
@@ -47,6 +48,20 @@ pub struct BlockchainInfoResponse {
     pub verificationprogress: f64,
     #[serde(default)]
     pub pruned: bool,
+    #[serde(default)]
+    pub pohw_experiment: Option<PohwExperimentInfoResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PohwExperimentInfoResponse {
+    pub fork_height: u64,
+    pub fork_hash: String,
+    pub first_fork_hash: String,
+    pub inherited_utxo_spending: bool,
+    pub replay_protection: String,
+    pub replay_marker_activation_height: u64,
+    pub bootstrap_handoff_hashrate_hps: u64,
+    pub handoff_active: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +120,8 @@ pub struct BitcoinMiningJobTemplate {
     pub transaction_hashes: Vec<String>,
     pub transactions: Vec<BitcoinMiningJobTransaction>,
     pub default_witness_commitment: Option<String>,
+    #[serde(default)]
+    pub pohw_replay_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +148,8 @@ struct GetBlockTemplateResponse {
     coinbasevalue: Option<u64>,
     #[serde(default)]
     default_witness_commitment: Option<String>,
+    #[serde(default)]
+    pohw_replay_marker: Option<String>,
     #[serde(default)]
     mintime: Option<u32>,
     #[serde(default)]
@@ -160,9 +179,9 @@ struct GetBlockVerbose1Response {
 struct GetBlockHeaderResponse {
     hash: String,
     height: u64,
+    version: i32,
+    merkleroot: String,
     time: i64,
-    #[serde(default)]
-    mediantime: Option<i64>,
     #[serde(default)]
     bits: Option<String>,
 }
@@ -291,10 +310,25 @@ impl BitcoinRpcClient {
         template: &BitcoinWorkTemplate,
         policy: BitcoinWorkTemplateValidationPolicy,
     ) -> Result<BitcoinWorkTemplateValidation> {
+        self.validate_bitcoin_work_template_with_time_dependent_bits(template, policy, false)
+            .await
+    }
+
+    async fn validate_bitcoin_work_template_with_time_dependent_bits(
+        &self,
+        template: &BitcoinWorkTemplate,
+        policy: BitcoinWorkTemplateValidationPolicy,
+        allow_pohw_time_dependent_bits: bool,
+    ) -> Result<BitcoinWorkTemplateValidation> {
         let block_template: GetBlockTemplateResponse = self
             .call("getblocktemplate", json!([{ "rules": ["segwit"] }]))
             .await?;
-        validate_bitcoin_work_template_against_getblocktemplate(template, &block_template, &policy)
+        validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+            template,
+            &block_template,
+            &policy,
+            allow_pohw_time_dependent_bits,
+        )
     }
 
     pub async fn validate_historical_bitcoin_work_template(
@@ -332,6 +366,55 @@ impl BitcoinRpcClient {
             &next_hash,
             &next,
         )
+    }
+
+    pub async fn validate_bitcoin_share(
+        &self,
+        template: &BitcoinWorkTemplate,
+        share: &Share,
+        policy: BitcoinWorkTemplateValidationPolicy,
+        allow_pohw_time_dependent_bits: bool,
+    ) -> Result<BitcoinWorkTemplateValidation> {
+        if !share
+            .bitcoin_template_hash
+            .eq_ignore_ascii_case(&template.template_hash)
+        {
+            bail!("share references a different Bitcoin work template");
+        }
+
+        match self
+            .validate_bitcoin_work_template_with_time_dependent_bits(
+                template,
+                policy,
+                allow_pohw_time_dependent_bits,
+            )
+            .await
+        {
+            Ok(validation) => Ok(validation),
+            Err(current_error) => {
+                let validation = self
+                    .validate_historical_bitcoin_work_template(template)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Bitcoin work template is neither current nor an exact active-chain block: {current_error}"
+                        )
+                    })?;
+                let active_hash: String = self
+                    .call("getblockhash", json!([validation.height]))
+                    .await
+                    .context("failed to resolve historical share block on active chain")?;
+                let active_hash = normalize_hash_hex("historical share block", &active_hash)?;
+                let work_hash = normalize_hash_hex("share work hash", &share.work_hash)?;
+                if work_hash != active_hash {
+                    bail!(
+                        "stale share work hash {work_hash} is not the active-chain block {active_hash} at height {}",
+                        validation.height
+                    );
+                }
+                Ok(validation)
+            }
+        }
     }
 
     pub async fn mining_job_template(&self) -> Result<BitcoinMiningJobTemplate> {
@@ -519,7 +602,7 @@ impl BitcoinRpcClient {
         Ok(fresh_inputs)
     }
 
-    async fn call<T: for<'de> Deserialize<'de>>(
+    pub(crate) async fn call<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -529,11 +612,37 @@ impl BitcoinRpcClient {
             .with_context(|| format!("Bitcoin RPC response {method} result has unexpected shape"))
     }
 
+    pub(crate) async fn call_optional<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Option<T>> {
+        self.call_value_optional(method, params, &[-5])
+            .await?
+            .map(|result| {
+                serde_json::from_value(result).with_context(|| {
+                    format!("Bitcoin RPC response {method} result has unexpected shape")
+                })
+            })
+            .transpose()
+    }
+
     async fn call_value(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.call_value_optional(method, params, &[])
+            .await?
+            .ok_or_else(|| anyhow!("Bitcoin RPC {method} returned no result"))
+    }
+
+    async fn call_value_optional(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        not_found_codes: &[i64],
+    ) -> Result<Option<serde_json::Value>> {
         let body = json!({
             "jsonrpc": "1.0",
             "id": "pohw-p2pool",
@@ -547,7 +656,7 @@ impl BitcoinRpcClient {
                 .with_context(|| format!("failed to load Bitcoin RPC credentials for {method}"))?;
             request = request.basic_auth(credentials.username, Some(credentials.password));
         }
-        let response = request
+        let mut response = request
             .send()
             .await
             .with_context(|| format!("Bitcoin RPC request {method} failed"))?
@@ -559,17 +668,24 @@ impl BitcoinRpcClient {
         {
             bail!("Bitcoin RPC response {method} is too large");
         }
-        let body = response
-            .bytes()
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .with_context(|| format!("Bitcoin RPC response {method} failed while reading body"))?;
-        if body.len() > MAX_BITCOIN_RPC_RESPONSE_BYTES {
-            bail!("Bitcoin RPC response {method} is too large");
+            .with_context(|| format!("Bitcoin RPC response {method} failed while reading body"))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_BITCOIN_RPC_RESPONSE_BYTES {
+                bail!("Bitcoin RPC response {method} is too large");
+            }
+            body.extend_from_slice(&chunk);
         }
         let response: JsonRpcResponse = serde_json::from_slice(&body)
             .with_context(|| format!("Bitcoin RPC response {method} is not valid JSON"))?;
 
         if let Some(error) = response.error {
+            if not_found_codes.contains(&error.code) {
+                return Ok(None);
+            }
             return Err(anyhow!(
                 "Bitcoin RPC {method} error {}: {}",
                 error.code,
@@ -577,7 +693,7 @@ impl BitcoinRpcClient {
             ));
         }
         match response.result {
-            JsonRpcResult::Present(result) => Ok(result),
+            JsonRpcResult::Present(result) => Ok(Some(result)),
             JsonRpcResult::Missing => Err(anyhow!("Bitcoin RPC {method} returned no result")),
         }
     }
@@ -697,11 +813,10 @@ fn validate_protected_secret_file(path: &Path, label: &str) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
+        if mode != 0o600 && mode != 0o640 {
             bail!(
-                "{label} file {} is too permissive ({mode:o}); run chmod 600 {}",
+                "{label} file {} has unsupported permissions ({mode:o}); use 600 for one service or 640 with a dedicated RPC-reader group",
                 path.display(),
-                path.display()
             );
         }
     }
@@ -919,18 +1034,28 @@ fn verify_coinbase_payout_outputs(
     })
 }
 
+#[cfg(test)]
 fn validate_bitcoin_work_template_against_getblocktemplate(
     template: &BitcoinWorkTemplate,
     block_template: &GetBlockTemplateResponse,
     policy: &BitcoinWorkTemplateValidationPolicy,
 ) -> Result<BitcoinWorkTemplateValidation> {
+    validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+        template,
+        block_template,
+        policy,
+        false,
+    )
+}
+
+fn validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+    template: &BitcoinWorkTemplate,
+    block_template: &GetBlockTemplateResponse,
+    policy: &BitcoinWorkTemplateValidationPolicy,
+    allow_pohw_time_dependent_bits: bool,
+) -> Result<BitcoinWorkTemplateValidation> {
     template.verify_template_hash()?;
     let parsed = ParsedHeaderPrefix::parse(&template.header_prefix_hex)?;
-    let expected_template_hash =
-        BitcoinWorkTemplate::template_hash_for_header_prefix_hex(&template.header_prefix_hex)?;
-    if template.template_hash.to_ascii_lowercase() != expected_template_hash {
-        bail!("Bitcoin work template hash does not match header prefix");
-    }
 
     if parsed.version != block_template.version {
         bail!(
@@ -952,24 +1077,39 @@ fn validate_bitcoin_work_template_against_getblocktemplate(
         );
     }
 
-    let bits = normalize_bits_hex(&block_template.bits)?;
-    if parsed.bits != bits {
-        bail!(
-            "Bitcoin work template bits {} does not match getblocktemplate bits {}",
-            parsed.bits,
-            bits
-        );
-    }
-
-    let expected_target = target_hex_from_bits(&bits)?;
+    let current_bits = normalize_bits_hex(&block_template.bits)?;
+    let current_target = target_hex_from_bits(&current_bits)?;
     let gbt_target = normalize_hash_hex("getblocktemplate target", &block_template.target)?;
-    if expected_target != gbt_target {
+    if current_target != gbt_target {
         bail!(
             "getblocktemplate target {} does not match bits-derived target {}",
             gbt_target,
-            expected_target
+            current_target
         );
     }
+
+    let (validated_bits, validated_target) = if parsed.bits == current_bits {
+        (current_bits, current_target)
+    } else {
+        let time_is_mutable = block_template.mutable.iter().any(|value| value == "time");
+        if !allow_pohw_time_dependent_bits
+            || !policy.allow_mutable_time
+            || !time_is_mutable
+            || parsed.time > block_template.curtime
+        {
+            bail!(
+                "Bitcoin work template bits {} does not match getblocktemplate bits {}",
+                parsed.bits,
+                current_bits
+            );
+        }
+        let stale_target = target_from_bits(&parsed.bits)?;
+        let active_target = target_from_bits(&current_bits)?;
+        if stale_target > active_target {
+            bail!("time-dependent PoHW template target is easier than the current target");
+        }
+        (parsed.bits.clone(), hex::encode(stale_target.to_be_bytes()))
+    };
 
     validate_template_time(parsed.time, block_template, policy)?;
     let merkle_root_status = validate_template_merkle_root(&parsed.merkle_root_hex, policy)?;
@@ -980,8 +1120,8 @@ fn validate_bitcoin_work_template_against_getblocktemplate(
         height: block_template.height,
         header_version: parsed.version,
         header_time: parsed.time,
-        bits,
-        target: expected_target,
+        bits: validated_bits,
+        target: validated_target,
         header_merkle_root_hex: parsed.merkle_root_hex,
         merkle_root_status,
     })
@@ -1029,15 +1169,29 @@ fn validate_historical_bitcoin_work_template_against_active_chain(
             next_bits
         );
     }
-    let median_time = previous.mediantime.unwrap_or(previous.time);
-    if i64::from(parsed.time) <= median_time
-        || i64::from(parsed.time) > next.time.saturating_add(7_200)
-    {
+    if parsed.version != next.version {
         bail!(
-            "historical template time {} is outside active-chain bounds {}..{}",
+            "historical template version {} does not match active successor version {}",
+            parsed.version,
+            next.version
+        );
+    }
+    let next_time =
+        u32::try_from(next.time).context("historical successor time is out of range")?;
+    if parsed.time != next_time {
+        bail!(
+            "historical template time {} does not match active successor time {}",
             parsed.time,
-            median_time,
-            next.time.saturating_add(7_200)
+            next_time
+        );
+    }
+    let next_merkle_root =
+        display_hash_to_header_order_hex("historical successor merkle root", &next.merkleroot)?;
+    if parsed.merkle_root_hex != next_merkle_root {
+        bail!(
+            "historical template merkle root {} does not match active successor merkle root {}",
+            parsed.merkle_root_hex,
+            next_merkle_root
         );
     }
     let target = target_hex_from_bits(&next_bits)?;
@@ -1050,7 +1204,7 @@ fn validate_historical_bitcoin_work_template_against_active_chain(
         bits: next_bits,
         target,
         header_merkle_root_hex: parsed.merkle_root_hex,
-        merkle_root_status: "historical-active-chain-bits".to_string(),
+        merkle_root_status: "historical-exact-active-chain-header".to_string(),
     })
 }
 
@@ -1116,6 +1270,11 @@ fn mining_job_template_from_getblocktemplate(
         .as_deref()
         .map(normalize_witness_commitment_script_hex)
         .transpose()?;
+    let pohw_replay_marker = block_template
+        .pohw_replay_marker
+        .as_deref()
+        .map(normalize_pohw_replay_marker_script_hex)
+        .transpose()?;
     Ok(BitcoinMiningJobTemplate {
         version: block_template.version,
         previous_block_hash,
@@ -1126,6 +1285,7 @@ fn mining_job_template_from_getblocktemplate(
         transaction_hashes,
         transactions: transaction_data,
         default_witness_commitment,
+        pohw_replay_marker,
     })
 }
 
@@ -1218,17 +1378,27 @@ fn validate_template_merkle_root(
 }
 
 fn target_hex_from_bits(bits: &str) -> Result<String> {
+    Ok(hex::encode(target_from_bits(bits)?.to_be_bytes()))
+}
+
+fn target_from_bits(bits: &str) -> Result<Target> {
     let bits = normalize_bits_hex(bits)?;
     let compact =
         CompactTarget::from_unprefixed_hex(&bits).context("failed to parse compact target bits")?;
-    let target = Target::from_compact(compact);
-    Ok(hex::encode(target.to_be_bytes()))
+    Ok(Target::from_compact(compact))
 }
 
 fn reversed_display_hash(header_order_bytes: &[u8]) -> String {
     let mut bytes = header_order_bytes.to_vec();
     bytes.reverse();
     hex::encode(bytes)
+}
+
+fn display_hash_to_header_order_hex(field: &str, display_hash: &str) -> Result<String> {
+    let normalized = normalize_hash_hex(field, display_hash)?;
+    let mut bytes = hex::decode(normalized).context("normalized display hash must decode")?;
+    bytes.reverse();
+    Ok(hex::encode(bytes))
 }
 
 fn add_output_multiset(
@@ -1318,6 +1488,14 @@ fn normalize_witness_commitment_script_hex(value: &str) -> Result<String> {
     let value = normalize_script_pubkey_hex("default_witness_commitment", value)?;
     if value.len() != 38 * 2 || !value.starts_with("6a24aa21a9ed") {
         bail!("default_witness_commitment must be the BIP141 OP_RETURN witness commitment script");
+    }
+    Ok(value)
+}
+
+fn normalize_pohw_replay_marker_script_hex(value: &str) -> Result<String> {
+    let value = normalize_script_pubkey_hex("pohw_replay_marker", value)?;
+    if value != POHW_REPLAY_MARKER_SCRIPT_HEX {
+        bail!("pohw_replay_marker must be the exact fork-only replay marker script");
     }
     Ok(value)
 }
@@ -1460,6 +1638,11 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("pohw-bitcoin-rpc-{name}-{unique}"));
         fs::create_dir_all(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         path
     }
 
@@ -1501,6 +1684,7 @@ mod tests {
             height: 123,
             coinbasevalue: Some(3_125_000_000),
             default_witness_commitment: None,
+            pohw_replay_marker: None,
             mintime: None,
             mutable: Vec::new(),
             transactions: Some(Vec::new()),
@@ -1561,6 +1745,31 @@ mod tests {
     }
 
     #[test]
+    fn getblocktemplate_validation_preserves_target_bound_template_hash() {
+        let previous = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let merkle = "11".repeat(32);
+        let bits = "207fffff";
+        let prefix = header_prefix_hex(0x2000_0000, previous, &merkle, 1_700_000_000, bits);
+        let template = BitcoinWorkTemplate::new_target_bound_unsigned(
+            "miner-a",
+            prefix,
+            pohw_core::sharechain::MAX_ACCEPTED_SHARE_TARGET_HEX,
+            1,
+        )
+        .unwrap();
+
+        let validation = validate_bitcoin_work_template_against_getblocktemplate(
+            &template,
+            &gbt(previous, 1_700_000_000, bits),
+            &merkle_checked_policy(&merkle),
+        )
+        .unwrap();
+
+        assert_eq!(validation.template_hash, template.template_hash);
+        assert!(template.is_target_bound());
+    }
+
+    #[test]
     fn historical_template_validation_binds_active_chain_and_difficulty() {
         let previous_hash = "10".repeat(32);
         let next_hash = "20".repeat(32);
@@ -1575,15 +1784,17 @@ mod tests {
         let previous = GetBlockHeaderResponse {
             hash: previous_hash.clone(),
             height: 122,
+            version: 0x2000_0000,
+            merkleroot: "40".repeat(32),
             time: 1_699_999_800,
-            mediantime: Some(1_699_999_700),
             bits: Some(bits.to_string()),
         };
         let next = GetBlockHeaderResponse {
             hash: next_hash.clone(),
             height: 123,
-            time: 1_700_000_100,
-            mediantime: Some(1_699_999_800),
+            version: 0x2000_0000,
+            merkleroot: reversed_display_hash(&hex::decode(&merkle).unwrap()),
+            time: 1_700_000_000,
             bits: Some(bits.to_string()),
         };
 
@@ -1598,6 +1809,42 @@ mod tests {
 
         assert_eq!(validation.height, 123);
         assert_eq!(validation.bits, bits);
+        let mut wrong_version = next.clone();
+        wrong_version.version += 1;
+        assert!(
+            validate_historical_bitcoin_work_template_against_active_chain(
+                &template,
+                &previous_hash,
+                &previous,
+                &next_hash,
+                &wrong_version,
+            )
+            .is_err()
+        );
+        let mut wrong_merkle = next.clone();
+        wrong_merkle.merkleroot = "31".repeat(32);
+        assert!(
+            validate_historical_bitcoin_work_template_against_active_chain(
+                &template,
+                &previous_hash,
+                &previous,
+                &next_hash,
+                &wrong_merkle,
+            )
+            .is_err()
+        );
+        let mut wrong_time = next.clone();
+        wrong_time.time += 1;
+        assert!(
+            validate_historical_bitcoin_work_template_against_active_chain(
+                &template,
+                &previous_hash,
+                &previous,
+                &next_hash,
+                &wrong_time,
+            )
+            .is_err()
+        );
         let mut wrong_bits = next;
         wrong_bits.bits = Some("1d00ffff".to_string());
         assert!(
@@ -1690,6 +1937,62 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("outside allowed range"));
+    }
+
+    #[test]
+    fn pohw_validation_accepts_only_stricter_time_dependent_stale_bits() {
+        let previous = "00".repeat(32);
+        let merkle = "11".repeat(32);
+        let stale_bits = "202740d9";
+        let current_bits = "2027bbba";
+        let stale_time = 1_700_000_000;
+        let prefix = header_prefix_hex(0x2000_0000, &previous, &merkle, stale_time, stale_bits);
+        let template = BitcoinWorkTemplate::new_unsigned("miner-a", prefix, 1).unwrap();
+        let mut block_template = gbt(&previous, stale_time + 9, current_bits);
+        block_template.mintime = Some(stale_time - 1);
+        block_template.mutable = vec!["time".to_string()];
+        let policy = BitcoinWorkTemplateValidationPolicy {
+            allow_mutable_time: true,
+            max_time_drift_seconds: 60,
+            expected_header_merkle_root_hex: Some(merkle.clone()),
+            allow_unverified_merkle_root: false,
+        };
+
+        let validation = validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+            &template,
+            &block_template,
+            &policy,
+            true,
+        )
+        .unwrap();
+        assert_eq!(validation.bits, stale_bits);
+        assert_eq!(validation.target, target_hex_from_bits(stale_bits).unwrap());
+
+        assert!(
+            validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+                &template,
+                &block_template,
+                &policy,
+                false,
+            )
+            .is_err()
+        );
+
+        let easier_prefix =
+            header_prefix_hex(0x2000_0000, &previous, &merkle, stale_time, current_bits);
+        let easier_template =
+            BitcoinWorkTemplate::new_unsigned("miner-a", easier_prefix, 1).unwrap();
+        let mut stricter_current = gbt(&previous, stale_time + 9, stale_bits);
+        stricter_current.mintime = Some(stale_time - 1);
+        stricter_current.mutable = vec!["time".to_string()];
+        let error = validate_bitcoin_work_template_against_getblocktemplate_with_bits_policy(
+            &easier_template,
+            &stricter_current,
+            &policy,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("easier than the current target"));
     }
 
     #[test]
@@ -1802,6 +2105,19 @@ mod tests {
         block_template.default_witness_commitment = Some("6a".to_string());
         let err = mining_job_template_from_getblocktemplate(&block_template).unwrap_err();
         assert!(err.to_string().contains("default_witness_commitment"));
+    }
+
+    #[test]
+    fn mining_job_template_requires_exact_pohw_replay_marker() {
+        let mut block_template = gbt(&"AA".repeat(32), 1_700_000_000, "207fffff");
+        block_template.pohw_replay_marker = Some("5150".to_string());
+
+        let material = mining_job_template_from_getblocktemplate(&block_template).unwrap();
+        assert_eq!(material.pohw_replay_marker.as_deref(), Some("5150"));
+
+        block_template.pohw_replay_marker = Some("5161".to_string());
+        let err = mining_job_template_from_getblocktemplate(&block_template).unwrap_err();
+        assert!(err.to_string().contains("exact fork-only replay marker"));
     }
 
     #[test]
@@ -1925,6 +2241,26 @@ mod tests {
         fs::remove_dir_all(datadir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cookie_auth_accepts_dedicated_group_read_but_rejects_other_group_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let datadir = temp_dir("cookie-group-read");
+        let cookie = datadir.join("cookie");
+        write_secret_file(&cookie, "user:password");
+
+        fs::set_permissions(&cookie, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(BitcoinRpcAuth::from_cookie_file(&cookie).is_ok());
+
+        for unsafe_mode in [0o660, 0o644, 0o440] {
+            fs::set_permissions(&cookie, fs::Permissions::from_mode(unsafe_mode)).unwrap();
+            assert!(BitcoinRpcAuth::from_cookie_file(&cookie).is_err());
+        }
+
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
     #[test]
     fn cookie_auth_rejects_large_cookie_file_before_reading() {
         let datadir = temp_dir("cookie-large-file");
@@ -1971,13 +2307,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cookie_auth_rejects_symlink_ancestor_directory() {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{symlink, PermissionsExt};
 
         let datadir = temp_dir("cookie-symlink-ancestor");
         let real = datadir.join("real");
         let child = real.join("child");
         let link = datadir.join("link");
         fs::create_dir_all(&child).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
         symlink(&real, &link).unwrap();
         let cookie = child.join("cookie");
         write_secret_file(&cookie, "user:password");

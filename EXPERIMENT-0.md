@@ -1,8 +1,21 @@
 # Experiment 0: Multi-Node PoHW P2Pool Dry Run
 
+> [!IMPORTANT]
+> Experiment 0 is the frozen coinbase-only predecessor. It does not gain
+> transaction or inherited-UTXO support and its history is never reinterpreted.
+> New full-consensus testing belongs to [Experiment 1](EXPERIMENT-1.md).
+
+> [!WARNING]
+> Idena remains a live chain even during this no-value Bitcoin experiment.
+> Never share an Idena key or backup; delegation, stake, validation,
+> transactions, and contract calls can affect real IDNA or identity state.
+
 This is the detailed operator runbook for the first community experiment.
 
-If you are joining as a beta tester for the first time, start with [Beta Testing P2poolBTC](BETA-TESTING.md). It explains the roles, the shortest path to a first report bundle, and what feedback is useful.
+If you are joining as a beta tester for the first time, use the
+[source-first community guide](COMMUNITY-README.md). It builds locally and does
+not trust a prebuilt binary or lead-developer signature. This document is the
+advanced operator runbook.
 
 > [!IMPORTANT]
 > **The default workflow joins the canonical Experiment 0 network.** Do
@@ -23,7 +36,7 @@ If you are joining as a beta tester for the first time, start with [Beta Testing
 > accept that risk must stop their miner and leave the controller disabled.
 > See [The 20-participant mainnet handoff](README.md#the-20-participant-mainnet-handoff).
 
-The designated coordinator may bootstrap the first canonical fork seed without
+The designated first-seed operator may bootstrap the canonical fork seed without
 an upstream fork peer by initializing with `--bootstrap-first-seed`. That
 first-node exception permits only the consensus/P2P service to start. Stratum
 and block production remain stopped until at least one independently operated
@@ -55,6 +68,52 @@ Run several independent nodes that can:
 - publish miner registrations and snapshot votes,
 - dry-run FROST DKG/signing with test inputs,
 - produce shareable report bundles without leaking secrets.
+
+## Public Five-Step Join Procedure
+
+The supported community path builds locally and joins the existing Experiment
+0 activation. It neither downloads a P2poolBTC executable nor trusts a release
+signature from a repository owner.
+
+1. Clone a fresh source mirror and check out the exact 40-character commit
+   agreed through multiple participant channels. `git status --short` must be
+   empty.
+2. Obtain current gossip, fork RPC, and fork P2P transport hints from an
+   existing participant. These hints are not authority; the locally tracked
+   activation manifest remains authoritative.
+3. Build and register through the loopback wizard:
+
+   ```sh
+   scripts/pohw-community-join.sh \
+     --gossip-peer '<gossip-host:port>' \
+     --fork-rpc-peer '<fork-rpc-host:port>' \
+     --fork-p2p-peer '<fork-p2p-host:port>' \
+     --explorer-url '<optional-https-explorer-url>'
+   ```
+
+4. After registration has propagated and fork sync is opened, stop the
+   registration-phase process and rerun the same command with `--launch-phase
+   fork-sync`.
+5. Only after an independently checked Idena snapshot and positive signed-vote
+   quorum are available, rerun with `--launch-phase mining`, `--snapshot-dir`,
+   and `--snapshot-min-voters`. Connect the miner only to the loopback Stratum
+   URL shown once by the wizard.
+
+Keep the launcher running and verify local progress from another terminal:
+
+```sh
+python3 scripts/pohw-community-status.py
+```
+
+The complete copy-pasteable walkthrough, Windows command, status meanings,
+explorer checks, and privacy-safe issue-reporting procedure are in the
+[Community Experiment 0 Guide](COMMUNITY-README.md).
+
+> [!NOTE]
+> Experiment 0 fork blocks do not appear in Bitcoin Core Qt or a Bitcoin Core
+> wallet. The no-value fork is a separate `p2pool-node` chain. Bitcoin Core
+> remains on mainnet and should continue to report `chain=main`; use the PoHW
+> status command and explorer for fork blocks, coinbase outputs, and shares.
 
 ## Fork-Phase Non-Value Rule
 
@@ -95,10 +154,10 @@ network. The existing Experiment 0 network is pinned to:
 For the normal participant path:
 
 1. Use the canonical manifest tracked in this repository.
-2. Obtain current gossip and fork seed addresses from the coordinator's pinned
-   Experiment 0 announcement. Peer addresses can change; the activation ID
-   above cannot. The designated coordinator omits the fork seed only while
-   starting the first canonical seed.
+2. Obtain current gossip and fork seed addresses from several existing
+   participants. Peer addresses are transport hints and can change; the
+   activation ID above cannot. The designated first-seed operator omits the
+   fork seed only while starting the first canonical seed.
 3. Ordinary participants stop if no existing peer is reachable or if any peer
    reports a different activation ID. The first seed may wait with zero peers,
    but nobody mines until a second independent peer verifies the activation.
@@ -173,7 +232,7 @@ scripts/pohw-experiment-init.sh \
   --register-peers
 ```
 
-Only the designated coordinator starting the first canonical seed omits
+Only the designated first-seed operator starting the canonical seed omits
 `--fork-peer-addrs` and adds `--bootstrap-first-seed`. The generated temporary
 exception must be removed as soon as the second fork endpoint is known.
 
@@ -324,7 +383,7 @@ ordinary joiner. The first seed may remain online to accept its initial peer,
 but starting Stratum against that isolated tip would create a private branch
 even though the activation ID is correct.
 
-After the second endpoint is available, the coordinator sets
+After the second endpoint is available, the first-seed operator sets
 `POHW_FORK_BOOTSTRAP_FIRST_SEED=false`, configures that endpoint in
 `POHW_FORK_PEER_ADDRS`, and restarts the fork node. The runner rejects a stale
 first-seed exception when peers are configured. Configured peer IPs are also the
@@ -438,16 +497,41 @@ if someone reuses the same chain name.
 
 ## Success Criteria
 
-Experiment 0 is successful when at least three independent nodes:
+An individual participant has completed the local join path when:
+
+- the wizard and `scripts/pohw-community-status.py` verify the same local
+  source receipt, binary digest, activation manifest, and signed registration;
+- fork-sync or mining mode reports the canonical activation ID and a running
+  fork node;
+- the local fork height agrees with the public explorer or another independent
+  node after synchronization;
+- their miner reports accepted work and their public miner ID appears on an
+  active share in another node's replay or the explorer;
+- a target-meeting fork block appears as active both locally and on another
+  node, with the same height and PoHW commitment.
+
+The participant has **not** proved successful mining merely because the miner
+connected, because an aggregate share count is nonzero, or because a hosted
+explorer loaded. These observations must be tied to their public miner ID and
+confirmed by an independent replay.
+
+The network experiment is successful when at least three independent nodes:
 
 - run the same git commit,
+- independently reproduce the same source CID from that source tree,
 - reach at least one peer,
 - accept and replay the same signed registrations,
 - report matching replay summaries after sync,
 - can produce matching snapshot roots once local Idena data is ready,
-- can complete a test-only FROST DKG/signing dry run without real funds.
+- can complete a test-only FROST DKG/signing dry run without real funds,
 - independently report the same distinct active-Idena participant count and
-  the same 20-participant handoff policy.
+  the same 20-participant handoff policy,
+- converge on the same cumulative-work fork tip after blocks are exchanged.
+
+Bitcoin Core wallet balances are not a success criterion. The Experiment 0
+fork is not loaded by Bitcoin Core, and current fork outputs are deliberately
+not spendable. Fork coinbase values are inspected in the PoHW explorer or the
+fork-chain RPC only.
 
 ## Stop Conditions
 

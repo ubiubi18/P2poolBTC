@@ -242,15 +242,18 @@ add_find .github/ISSUE_TEMPLATE \
 add_find compatibility \
   \( -name '*.json' \)
 add_find crates \
-  \( -name Cargo.toml -o -path '*/src/*.rs' \)
+  \( -name Cargo.toml -o -path '*/src/*.rs' -o -path '*/assets/*.html' \
+     -o -path '*/assets/*.css' -o -path '*/assets/*.js' \)
 add_find scripts \
-  \( -name '*.sh' -o -name '*.py' -o -name '*.sql' \)
+  \( -name '*.sh' -o -name '*.ps1' -o -name '*.py' -o -name '*.sql' \)
 add_find deploy \
   \( -name '*.conf' -o -name '*.conf.example' -o -name '*.service' -o -name '*.path' \
      -o -name '*.timer' -o -name '*.json' -o -name '*.json.example' \
      -o -name '*.env.example' -o -name '*.Caddyfile.example' \)
 add_find docs \
-  \( -name '*.md' -o -name '*.png' \)
+  \( -name '*.md' -o -name '*.png' -o -name '*.jpg' \)
+add_find schemas \
+  \( -name '*.json' \)
 add_find pohw_idena_rpc \
   \( -name '*.py' \)
 add_find tests \

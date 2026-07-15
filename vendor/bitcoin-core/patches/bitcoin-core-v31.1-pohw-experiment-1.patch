@@ -1,0 +1,1431 @@
+diff --git a/src/bitcoin-cli.cpp b/src/bitcoin-cli.cpp
+index 909ed09faaca8d9082d2d5837d8e1474c099b7c7..7b879cb887bd99a706987bc9d29d0ddb8cde8111 100644
+--- a/src/bitcoin-cli.cpp
++++ b/src/bitcoin-cli.cpp
+@@ -75,6 +75,7 @@ static void SetupCliArgs(ArgsManager& argsman)
+     SetupHelpOptions(argsman);
+ 
+     const auto defaultBaseParams = CreateBaseChainParams(ChainType::MAIN);
++    const auto pohwBaseParams = CreateBaseChainParams(ChainType::POHW);
+     const auto testnetBaseParams = CreateBaseChainParams(ChainType::TESTNET);
+     const auto testnet4BaseParams = CreateBaseChainParams(ChainType::TESTNET4);
+     const auto signetBaseParams = CreateBaseChainParams(ChainType::SIGNET);
+@@ -100,7 +101,7 @@ static void SetupCliArgs(ArgsManager& argsman)
+     argsman.AddArg("-rpcconnect=<ip>", strprintf("Send commands to node running on <ip> (default: %s)", DEFAULT_RPCCONNECT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+     argsman.AddArg("-rpccookiefile=<loc>", "Location of the auth cookie. Relative paths will be prefixed by a net-specific datadir location. (default: data dir)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+     argsman.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+-    argsman.AddArg("-rpcport=<port>", strprintf("Connect to JSON-RPC on <port> (default: %u, testnet: %u, testnet4: %u, signet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), testnet4BaseParams->RPCPort(), signetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::OPTIONS);
++    argsman.AddArg("-rpcport=<port>", strprintf("Connect to JSON-RPC on <port> (default: %u, pohw: %u, testnet: %u, testnet4: %u, signet: %u, regtest: %u)", defaultBaseParams->RPCPort(), pohwBaseParams->RPCPort(), testnetBaseParams->RPCPort(), testnet4BaseParams->RPCPort(), signetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::OPTIONS);
+     argsman.AddArg("-rpcuser=<user>", "Username for JSON-RPC connections", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+     argsman.AddArg("-rpcwait", "Wait for RPC server to start", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+     argsman.AddArg("-rpcwaittimeout=<n>", strprintf("Timeout in seconds to wait for the RPC server to start, or 0 for no timeout. (default: %d)", DEFAULT_WAIT_CLIENT_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+@@ -426,6 +427,8 @@ private:
+     std::string ChainToString() const
+     {
+         switch (gArgs.GetChainType()) {
++        case ChainType::POHW:
++            return " pohw";
+         case ChainType::TESTNET4:
+             return " testnet4";
+         case ChainType::TESTNET:
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 32c3bff734820bd24bde2b3fa640b99e22328fe9..43dafae3e7c7157858d69ff2c0a678e6b14c7f44 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -119,6 +119,8 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+     switch (chain) {
+     case ChainType::MAIN:
+         return CChainParams::Main();
++    case ChainType::POHW:
++        return CChainParams::PoHW();
+     case ChainType::TESTNET:
+         return CChainParams::TestNet();
+     case ChainType::TESTNET4:
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index d816d1af91c35437fd7b47f46b27983c0e553fb7..a31cb01487460de03e61975839ec59b219a08cb7 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -6,6 +6,7 @@
+ #include <chainparamsbase.h>
+ 
+ #include <common/args.h>
++#include <pohw/experiment.h>
+ #include <tinyformat.h>
+ #include <util/chaintype.h>
+ 
+@@ -42,6 +43,8 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const ChainType chain)
+     switch (chain) {
+     case ChainType::MAIN:
+         return std::make_unique<CBaseChainParams>("", 8332);
++    case ChainType::POHW:
++        return std::make_unique<CBaseChainParams>("pohw-experiment-1", pohw::experiment1::RPC_PORT);
+     case ChainType::TESTNET:
+         return std::make_unique<CBaseChainParams>("testnet3", 18332);
+     case ChainType::TESTNET4:
+diff --git a/src/chainparamsbase.h b/src/chainparamsbase.h
+index 1407f196f3b8df79f6fed76c457d2692c0678914..fa17306bdef3aebaac745d8f581efa6382b45234 100644
+--- a/src/chainparamsbase.h
++++ b/src/chainparamsbase.h
+@@ -52,6 +52,6 @@ const CBaseChainParams& BaseParams();
+ void SelectBaseParams(ChainType chain);
+ 
+ /** List of possible chain / network names  */
+-#define LIST_CHAIN_NAMES "main, test, testnet4, signet, regtest"
++#define LIST_CHAIN_NAMES "main, pohw, test, testnet4, signet, regtest"
+ 
+ #endif // BITCOIN_CHAINPARAMSBASE_H
+diff --git a/src/common/args.cpp b/src/common/args.cpp
+index 5c8589cf4402015993c3ef1a415ac770faed8fae..c7cbaf9750eae3a4f01a1841ec2f519955ea651c 100644
+--- a/src/common/args.cpp
++++ b/src/common/args.cpp
+@@ -155,6 +155,7 @@ std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
+ {
+     // Section names to be recognized in the config file.
+     static const std::set<std::string> available_sections{
++        ChainTypeToString(ChainType::POHW),
+         ChainTypeToString(ChainType::REGTEST),
+         ChainTypeToString(ChainType::SIGNET),
+         ChainTypeToString(ChainType::TESTNET),
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 93ee071fdc16adc70e020bd6dafaadf4988174ec..f1325cbab0c392728fe37442b3c8b65f669b5c48 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -110,6 +110,14 @@ struct Params {
+     std::array<BIP9Deployment,MAX_VERSION_BITS_DEPLOYMENTS> vDeployments;
+     /** Proof of work parameters */
+     uint256 powLimit;
++    /** P2poolBTC Experiment 1 parameters; inert on every upstream chain. */
++    bool pohw_experiment{false};
++    int pohw_fork_height{std::numeric_limits<int>::max()};
++    int pohw_replay_marker_activation_height{std::numeric_limits<int>::max()};
++    uint256 pohw_fork_hash{};
++    uint256 pohw_first_fork_hash{};
++    uint256 pohw_legacy_pow_limit{};
++    uint64_t pohw_bootstrap_handoff_hashrate_hps{0};
+     bool fPowAllowMinDifficultyBlocks;
+     /**
+       * Enforce BIP94 timewarp attack mitigation. On testnet4 this also enforces
+diff --git a/src/consensus/tx_verify.cpp b/src/consensus/tx_verify.cpp
+index 4efed70fd411bf6f237f7f3a00c83de284fa8982..0b657cebe693c99e673fe26af6cb2e1a8d08f7df 100644
+--- a/src/consensus/tx_verify.cpp
++++ b/src/consensus/tx_verify.cpp
+@@ -8,12 +8,16 @@
+ #include <coins.h>
+ #include <consensus/amount.h>
+ #include <consensus/consensus.h>
++#include <consensus/params.h>
+ #include <consensus/validation.h>
++#include <pohw/replay.h>
+ #include <primitives/transaction.h>
+ #include <script/interpreter.h>
+ #include <util/check.h>
+ #include <util/moneystr.h>
+ 
++#include <optional>
++
+ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
+ {
+     if (tx.nLockTime == 0)
+@@ -161,6 +165,33 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
+     return nSigOps;
+ }
+ 
++bool Consensus::CheckPoHWForkReplayProtection(const CTransaction& tx, TxValidationState& state, const CCoinsView& inputs, int nSpendHeight, const Consensus::Params& params)
++{
++    if (!pohw::ReplayMarkerActive(nSpendHeight, params) || tx.IsCoinBase()) return true;
++
++    bool spends_inherited{false};
++    bool spends_replay_marker{false};
++    for (const CTxIn& input : tx.vin) {
++        const std::optional<Coin> coin{inputs.GetCoin(input.prevout)};
++        if (!coin || coin->IsSpent()) {
++            return true; // CheckTxInputs reports the canonical missing-input error.
++        }
++        if (coin->nHeight <= params.pohw_fork_height) {
++            spends_inherited = true;
++        } else if (coin->nHeight >= params.pohw_replay_marker_activation_height &&
++                   coin->IsCoinBase() && coin->out.nValue == 0 &&
++                   pohw::IsReplayMarkerScript(coin->out.scriptPubKey)) {
++            spends_replay_marker = true;
++        }
++    }
++
++    if (spends_inherited && !spends_replay_marker) {
++        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-pohw-replay-unprotected",
++                             "an inherited-mainnet spend must consume an activated PoHW replay marker");
++    }
++    return true;
++}
++
+ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
+ {
+     // are the actual inputs available?
+diff --git a/src/consensus/tx_verify.h b/src/consensus/tx_verify.h
+index ed44d435c1b994efd1bcd9a687baff0766a9cc27..12d998223f6ea96563b6d37d36eed954e99cd22c 100644
+--- a/src/consensus/tx_verify.h
++++ b/src/consensus/tx_verify.h
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ class CBlockIndex;
++class CCoinsView;
+ class CCoinsViewCache;
+ class CTransaction;
+ class TxValidationState;
+@@ -19,6 +20,8 @@ class TxValidationState;
+ /** Transaction validation functions */
+ 
+ namespace Consensus {
++
++struct Params;
+ /**
+  * Check whether all inputs of this transaction are valid (no double spends and amounts)
+  * This does not modify the UTXO set. This does not check scripts and sigs.
+@@ -26,6 +29,14 @@ namespace Consensus {
+  * Preconditions: tx.IsCoinBase() is false.
+  */
+ [[nodiscard]] bool CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee);
++
++/**
++ * Experiment 1 replay isolation. After the explicit marker activation, a
++ * transaction that consumes any inherited-mainnet coin must also consume an
++ * activated fork replay marker. Its exact script is invalid on Bitcoin
++ * mainnet, so even a colliding outpoint cannot make the transaction replayable.
++ */
++[[nodiscard]] bool CheckPoHWForkReplayProtection(const CTransaction& tx, TxValidationState& state, const CCoinsView& inputs, int nSpendHeight, const Params& params);
+ } // namespace Consensus
+ 
+ /** Auxiliary functions for transaction validation (ideally should not be exposed) */
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 64809a75911e03bec9ce35b08d950229e62518c2..263ede57dde67f2060c272da3ff41436b66fd979 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -12,6 +12,7 @@
+ #include <crypto/hex_base.h>
+ #include <hash.h>
+ #include <kernel/messagestartchars.h>
++#include <pohw/experiment.h>
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
+ #include <script/interpreter.h>
+@@ -205,6 +206,45 @@ public:
+     }
+ };
+ 
++/**
++ * P2poolBTC Experiment 1.
++ *
++ * The chain shares Bitcoin mainnet history through a compiled, pinned fork
++ * point and then follows the PoHW bootstrap difficulty rules. Bitcoin script,
++ * transaction, mempool, wallet, and block validation otherwise remain the
++ * upstream Bitcoin Core implementation.
++ */
++class CPoHWParams final : public CMainParams {
++public:
++    CPoHWParams()
++    {
++        m_chain_type = ChainType::POHW;
++        consensus.pohw_experiment = true;
++        consensus.pohw_fork_height = pohw::experiment1::FORK_HEIGHT;
++        consensus.pohw_replay_marker_activation_height = pohw::experiment1::REPLAY_MARKER_ACTIVATION_HEIGHT;
++        consensus.pohw_fork_hash = uint256{pohw::experiment1::FORK_HASH};
++        consensus.pohw_first_fork_hash = uint256{pohw::experiment1::FIRST_FORK_HASH};
++        consensus.pohw_legacy_pow_limit = consensus.powLimit;
++        consensus.pohw_bootstrap_handoff_hashrate_hps = pohw::experiment1::BOOTSTRAP_HANDOFF_HASHRATE_HPS;
++        consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
++
++        // P2P uses only the fork marker. Historical blk files retain the
++        // inherited mainnet marker so the pinned pre-fork history remains
++        // readable without rewriting hundreds of gigabytes in place.
++        m_legacy_block_file_message_start = pchMessageStart;
++        std::ranges::copy(pohw::experiment1::MESSAGE_START, pchMessageStart.begin());
++        nDefaultPort = pohw::experiment1::P2P_PORT;
++        vSeeds.clear();
++        vFixedSeeds.clear();
++
++        // Address encodings deliberately remain identical to mainnet so an
++        // inherited script can be located and imported. The distinct chain
++        // type, datadir, message start, P2P port, and RPC port provide network
++        // separation; mixed-input replay protection provides transaction
++        // separation after the fork point.
++    }
++};
++
+ /**
+  * Testnet (v3): public test network which is reset from time to time.
+  */
+@@ -703,6 +743,11 @@ std::unique_ptr<const CChainParams> CChainParams::Main()
+     return std::make_unique<const CMainParams>();
+ }
+ 
++std::unique_ptr<const CChainParams> CChainParams::PoHW()
++{
++    return std::make_unique<const CPoHWParams>();
++}
++
+ std::unique_ptr<const CChainParams> CChainParams::TestNet()
+ {
+     return std::make_unique<const CTestNetParams>();
+@@ -727,6 +772,7 @@ std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
+ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
+ {
+     const auto mainnet_msg = CChainParams::Main()->MessageStart();
++    const auto pohw_msg = CChainParams::PoHW()->MessageStart();
+     const auto testnet_msg = CChainParams::TestNet()->MessageStart();
+     const auto testnet4_msg = CChainParams::TestNet4()->MessageStart();
+     const auto regtest_msg = CChainParams::RegTest({})->MessageStart();
+@@ -734,6 +780,8 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
+ 
+     if (std::ranges::equal(message, mainnet_msg)) {
+         return ChainType::MAIN;
++    } else if (std::ranges::equal(message, pohw_msg)) {
++        return ChainType::POHW;
+     } else if (std::ranges::equal(message, testnet_msg)) {
+         return ChainType::TESTNET;
+     } else if (std::ranges::equal(message, testnet4_msg)) {
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index f7209bee1b068ac9956e41f19cbd1d14da57086e..f5869b8cd69c13546362bc9d6d06d5c739609168 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -88,6 +88,13 @@ public:
+ 
+     const Consensus::Params& GetConsensus() const { return consensus; }
+     const MessageStartChars& MessageStart() const { return pchMessageStart; }
++    /** Accept the active marker plus an explicitly configured inherited on-disk marker. */
++    bool IsBlockFileMessageStart(const MessageStartChars& message_start) const
++    {
++        return message_start == pchMessageStart ||
++               (m_legacy_block_file_message_start && message_start == *m_legacy_block_file_message_start);
++    }
++    const std::optional<MessageStartChars>& LegacyBlockFileMessageStart() const { return m_legacy_block_file_message_start; }
+     uint16_t GetDefaultPort() const { return nDefaultPort; }
+     std::vector<int> GetAvailableSnapshotHeights() const;
+ 
+@@ -157,6 +164,7 @@ public:
+     static std::unique_ptr<const CChainParams> RegTest(const RegTestOptions& options);
+     static std::unique_ptr<const CChainParams> SigNet(const SigNetOptions& options);
+     static std::unique_ptr<const CChainParams> Main();
++    static std::unique_ptr<const CChainParams> PoHW();
+     static std::unique_ptr<const CChainParams> TestNet();
+     static std::unique_ptr<const CChainParams> TestNet4();
+ 
+@@ -165,6 +173,7 @@ protected:
+ 
+     Consensus::Params consensus;
+     MessageStartChars pchMessageStart;
++    std::optional<MessageStartChars> m_legacy_block_file_message_start;
+     uint16_t nDefaultPort;
+     uint64_t nPruneAfterHeight;
+     uint64_t m_assumed_blockchain_size;
+diff --git a/src/node/blockstorage.cpp b/src/node/blockstorage.cpp
+index ab6d23ec074da68614685db4d60c0d6aceb33be9..8e25dff9e99584d0c0a9f3eba7e14456db87e371 100644
+--- a/src/node/blockstorage.cpp
++++ b/src/node/blockstorage.cpp
+@@ -1101,9 +1101,9 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
+ 
+         filein >> blk_start >> blk_size;
+ 
+-        if (blk_start != GetParams().MessageStart()) {
+-            LogError("Block magic mismatch for %s: %s versus expected %s while reading raw block",
+-                pos.ToString(), HexStr(blk_start), HexStr(GetParams().MessageStart()));
++        if (!GetParams().IsBlockFileMessageStart(blk_start)) {
++            LogError("Block magic mismatch for %s: %s is not an accepted on-disk marker while reading raw block",
++                pos.ToString(), HexStr(blk_start));
+             return util::Unexpected{ReadRawError::IO};
+         }
+ 
+diff --git a/src/node/miner.cpp b/src/node/miner.cpp
+index 7ea8d10b73064724ab4369aca08cc7e6e6342cd8..5ac592be680f6d5eadb9aef42af3f6812ae7daa2 100644
+--- a/src/node/miner.cpp
++++ b/src/node/miner.cpp
+@@ -20,6 +20,7 @@
+ #include <node/kernel_notifications.h>
+ #include <policy/feerate.h>
+ #include <policy/policy.h>
++#include <pohw/replay.h>
+ #include <pow.h>
+ #include <primitives/transaction.h>
+ #include <util/moneystr.h>
+@@ -56,9 +57,14 @@ int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParam
+         pblock->nTime = nNewTime;
+     }
+ 
+-    // Updating time can change work required on testnet:
+-    if (consensusParams.fPowAllowMinDifficultyBlocks) {
++    // Updating time can change work required on testnet and during the PoHW
++    // timestamp-sensitive bootstrap phase. Keep the handoff version bit bound
++    // to the refreshed target as well.
++    if (consensusParams.fPowAllowMinDifficultyBlocks || consensusParams.pohw_experiment) {
+         pblock->nBits = GetNextWorkRequired(pindexPrev, pblock, consensusParams);
++        if (consensusParams.pohw_experiment) {
++            pblock->nVersion = ComputePoHWBlockVersion(pindexPrev, pblock->nBits, consensusParams, pblock->nVersion);
++        }
+     }
+ 
+     return nNewTime - nOldTime;
+@@ -179,6 +185,12 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
+     coinbaseTx.vout[0].nValue = block_reward;
+     coinbase_tx.block_reward_remaining = block_reward;
+ 
++    if (pohw::ReplayMarkerActive(nHeight, chainparams.GetConsensus())) {
++        CTxOut marker_output{0, pohw::ReplayMarkerScript()};
++        coinbaseTx.vout.push_back(marker_output);
++        coinbase_tx.required_outputs.push_back(std::move(marker_output));
++    }
++
+     // Start the coinbase scriptSig with the block height as required by BIP34.
+     // Mining clients are expected to append extra data to this prefix, so
+     // increasing its length would reduce the space they can use and may break
+@@ -218,6 +230,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
+     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
+     UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
+     pblock->nBits          = GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
++    pblock->nVersion       = ComputePoHWBlockVersion(pindexPrev, pblock->nBits, chainparams.GetConsensus(), pblock->nVersion);
+     pblock->nNonce         = 0;
+ 
+     if (m_options.test_block_validity) {
+diff --git a/src/pohw/experiment.h b/src/pohw/experiment.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..267e57849a5180d8ac204bcd65b2a45069927af2
+--- /dev/null
++++ b/src/pohw/experiment.h
+@@ -0,0 +1,32 @@
++// Copyright (c) 2026 The P2poolBTC contributors
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_POHW_EXPERIMENT_H
++#define BITCOIN_POHW_EXPERIMENT_H
++
++#include <array>
++#include <cstdint>
++
++namespace pohw::experiment1 {
++
++inline constexpr char NETWORK_ID[] = "pohw-experiment-1-full-consensus";
++inline constexpr int FORK_HEIGHT{958016};
++// The first fork block already exists. Activate the collision-resistant replay
++// marker on its successor without reinterpreting prior chain history.
++inline constexpr int REPLAY_MARKER_ACTIVATION_HEIGHT{958018};
++inline constexpr char FORK_HASH[] =
++    "00000000000000000001d0f198da4adf33b597782a36c766685b2f217110cfc8";
++// Height 958017 predates replay-marker activation. Pinning its exact hash closes
++// the only markerless replacement slot without reinterpreting live history.
++inline constexpr char FIRST_FORK_HASH[] =
++    "64d2122b44c111f2f593869ce404117d34c6c830f4390eb70245c11dcc503d01";
++inline constexpr uint64_t BOOTSTRAP_HANDOFF_HASHRATE_HPS{1'000'000'000'000'000ULL};
++inline constexpr int32_t HANDOFF_VERSION_BIT{1 << 27};
++inline constexpr std::array<uint8_t, 4> MESSAGE_START{0xd9, 0x70, 0x38, 0xba};
++inline constexpr uint16_t P2P_PORT{40412};
++inline constexpr uint16_t RPC_PORT{40414};
++
++} // namespace pohw::experiment1
++
++#endif // BITCOIN_POHW_EXPERIMENT_H
+diff --git a/src/pohw/replay.h b/src/pohw/replay.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2525e7b4a6534a8c7196c0f1d3f5a9ebef03bdc3
+--- /dev/null
++++ b/src/pohw/replay.h
+@@ -0,0 +1,44 @@
++// Copyright (c) 2026 The P2poolBTC contributors
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_POHW_REPLAY_H
++#define BITCOIN_POHW_REPLAY_H
++
++#include <consensus/params.h>
++#include <primitives/transaction.h>
++#include <script/script.h>
++
++namespace pohw {
++
++/**
++ * Exact fork-only replay marker. OP_RESERVED makes this output unspendable on
++ * Bitcoin mainnet. The PoHW interpreter accepts only this two-byte script,
++ * with an empty scriptSig and witness, after the explicit activation height.
++ */
++inline CScript ReplayMarkerScript()
++{
++    return CScript{} << OP_1 << OP_RESERVED;
++}
++
++inline bool IsReplayMarkerScript(const CScript& script)
++{
++    return script == ReplayMarkerScript();
++}
++
++inline bool ReplayMarkerActive(int height, const Consensus::Params& params)
++{
++    return params.pohw_experiment && height >= params.pohw_replay_marker_activation_height;
++}
++
++inline bool CoinbaseHasReplayMarker(const CTransaction& coinbase)
++{
++    for (const CTxOut& output : coinbase.vout) {
++        if (output.nValue == 0 && IsReplayMarkerScript(output.scriptPubKey)) return true;
++    }
++    return false;
++}
++
++} // namespace pohw
++
++#endif // BITCOIN_POHW_REPLAY_H
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 46ec238c3b18fd1c0a5ce35f25d1b619317dafda..646375d09b65189fa9343f65fb2617cf7570a1cb 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -12,6 +12,7 @@
+ #include <consensus/consensus.h>
+ #include <consensus/validation.h>
+ #include <policy/feerate.h>
++#include <pohw/replay.h>
+ #include <primitives/transaction.h>
+ #include <script/interpreter.h>
+ #include <script/script.h>
+@@ -210,7 +211,7 @@ static bool CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inpu
+  *
+  * We also check the total number of non-witness sigops across the whole transaction, as per BIP54.
+  */
+-bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
++bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, bool allow_pohw_replay_marker)
+ {
+     if (tx.IsCoinBase()) {
+         return true; // Coinbases don't use vin normally
+@@ -223,6 +224,11 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+     for (unsigned int i = 0; i < tx.vin.size(); i++) {
+         const CTxOut& prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
+ 
++        if (allow_pohw_replay_marker && pohw::IsReplayMarkerScript(prev.scriptPubKey)) {
++            if (!tx.vin[i].scriptSig.empty() || !tx.vin[i].scriptWitness.IsNull()) return false;
++            continue;
++        }
++
+         std::vector<std::vector<unsigned char> > vSolutions;
+         TxoutType whichType = Solver(prev.scriptPubKey, vSolutions);
+         if (whichType == TxoutType::NONSTANDARD || whichType == TxoutType::WITNESS_UNKNOWN) {
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index 0bc7b32770833211913b82204f1b8fc4bdb4dfd0..61caa1ba48749e9063f6e239f5b10c0fb452276f 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -161,7 +161,7 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
+ * @param[in] mapInputs       Map of previous transactions that have outputs we're spending
+ * @return True if all inputs (scriptSigs) use only standard transaction forms
+ */
+-bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
++bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, bool allow_pohw_replay_marker = false);
+ /**
+ * Check if the transaction is over standard P2WSH resources limit:
+ * 3600bytes witnessScript size, 80bytes per witness stack element, 100 witness stack elements
+diff --git a/src/pow.cpp b/src/pow.cpp
+index 9a9f4e58178b82a6741b4f5a2a8c0ef02f89d0c7..786d295703ed4ee322a04efef368cf163dfee18d 100644
+--- a/src/pow.cpp
++++ b/src/pow.cpp
+@@ -8,13 +8,116 @@
+ #include <arith_uint256.h>
+ #include <chain.h>
+ #include <primitives/block.h>
++#include <pohw/experiment.h>
+ #include <uint256.h>
+ #include <util/check.h>
+ 
++#include <algorithm>
++
++namespace {
++
++arith_uint256 PowLimitForHeight(const Consensus::Params& params, int height)
++{
++    if (params.pohw_experiment && height <= params.pohw_fork_height) {
++        return UintToArith256(params.pohw_legacy_pow_limit);
++    }
++    return UintToArith256(params.powLimit);
++}
++
++/**
++ * Calculate floor(target * numerator / denominator) without overflowing the
++ * 256-bit intermediate. This is byte-for-byte equivalent to multiply then
++ * divide for values that do not overflow, and remains exact at the deliberately
++ * easy PoHW bootstrap target.
++ */
++arith_uint256 ScaleTarget(const arith_uint256& target, uint32_t numerator, uint32_t denominator, const arith_uint256& limit)
++{
++    assert(numerator > 0);
++    assert(denominator > 0);
++
++    const arith_uint256 divisor{denominator};
++    const arith_uint256 quotient{target / divisor};
++    const arith_uint256 remainder{target - quotient * denominator};
++
++    if (quotient > limit / arith_uint256{numerator}) return limit;
++    arith_uint256 scaled{quotient * numerator};
++    const uint64_t remainder_term{(remainder.GetLow64() * numerator) / denominator};
++    if (scaled > limit - arith_uint256{remainder_term}) return limit;
++    scaled += remainder_term;
++    return std::min(scaled, limit);
++}
++
++arith_uint256 WorkForTarget(const arith_uint256& target)
++{
++    if (target == 0) return 0;
++    return (~target / (target + 1)) + 1;
++}
++
++bool PoHWHandoffActive(const CBlockIndex* index, const Consensus::Params& params)
++{
++    return params.pohw_experiment && index != nullptr && index->nHeight > params.pohw_fork_height &&
++           (index->nVersion & pohw::experiment1::HANDOFF_VERSION_BIT) != 0;
++}
++
++} // namespace
++
++bool PoHWTargetMeetsHandoff(uint32_t nbits, const Consensus::Params& params)
++{
++    if (!params.pohw_experiment || params.pohw_bootstrap_handoff_hashrate_hps == 0) return false;
++    const auto target{DeriveTarget(nbits, params.powLimit)};
++    if (!target) return false;
++
++    arith_uint256 required_work{params.pohw_bootstrap_handoff_hashrate_hps};
++    required_work *= static_cast<uint32_t>(params.nPowTargetSpacing);
++    return WorkForTarget(*target) >= required_work;
++}
++
++int32_t ComputePoHWBlockVersion(const CBlockIndex* pindex_last, uint32_t nbits, const Consensus::Params& params, int32_t base_version)
++{
++    if (!params.pohw_experiment || pindex_last == nullptr || pindex_last->nHeight + 1 <= params.pohw_fork_height) return base_version;
++    const bool handoff{PoHWHandoffActive(pindex_last, params) || PoHWTargetMeetsHandoff(nbits, params)};
++    if (handoff) return base_version | pohw::experiment1::HANDOFF_VERSION_BIT;
++    return base_version & ~pohw::experiment1::HANDOFF_VERSION_BIT;
++}
++
++bool CheckPoHWBlockVersion(const CBlockIndex* pindex_last, uint32_t nbits, int32_t version, const Consensus::Params& params)
++{
++    if (!params.pohw_experiment || pindex_last == nullptr || pindex_last->nHeight + 1 <= params.pohw_fork_height) return true;
++    return (version & pohw::experiment1::HANDOFF_VERSION_BIT) ==
++           (ComputePoHWBlockVersion(pindex_last, nbits, params, version) & pohw::experiment1::HANDOFF_VERSION_BIT);
++}
++
+ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
+ {
+     assert(pindexLast != nullptr);
+-    unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
++    const int next_height{pindexLast->nHeight + 1};
++    const arith_uint256 pow_limit{PowLimitForHeight(params, next_height)};
++    const unsigned int nProofOfWorkLimit{pow_limit.GetCompact()};
++
++    if (params.pohw_experiment && next_height > params.pohw_fork_height) {
++        if (next_height == params.pohw_fork_height + 1) return nProofOfWorkLimit;
++
++        if (!PoHWHandoffActive(pindexLast, params)) {
++            const int64_t minimum_delta{params.nPowTargetSpacing / 4};
++            const int64_t maximum_delta{params.nPowTargetSpacing * 4};
++            const int64_t delta{std::clamp(pblock->GetBlockTime() - pindexLast->GetBlockTime(), minimum_delta, maximum_delta)};
++            arith_uint256 previous_target;
++            bool negative{false};
++            bool overflow{false};
++            previous_target.SetCompact(pindexLast->nBits, &negative, &overflow);
++            if (negative || overflow || previous_target == 0 || previous_target > pow_limit) return nProofOfWorkLimit;
++            return ScaleTarget(previous_target, static_cast<uint32_t>(delta), static_cast<uint32_t>(params.nPowTargetSpacing), pow_limit).GetCompact();
++        }
++
++        // Once the marker is active, use Bitcoin's normal global 2016-block
++        // epochs. The marker remains active even if a later retarget lowers
++        // the target-implied hashrate below the bootstrap threshold.
++        if (next_height % params.DifficultyAdjustmentInterval() != 0) return pindexLast->nBits;
++        const int first_height{pindexLast->nHeight - static_cast<int>(params.DifficultyAdjustmentInterval() - 1)};
++        const CBlockIndex* pindex_first{pindexLast->GetAncestor(first_height)};
++        assert(pindex_first);
++        return CalculateNextWorkRequired(pindexLast, pindex_first->GetBlockTime(), params);
++    }
+ 
+     // Only change once per difficulty adjustment interval
+     if ((pindexLast->nHeight+1) % params.DifficultyAdjustmentInterval() != 0)
+@@ -60,7 +163,7 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+         nActualTimespan = params.nPowTargetTimespan*4;
+ 
+     // Retarget
+-    const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
++    const arith_uint256 bnPowLimit = PowLimitForHeight(params, pindexLast->nHeight + 1);
+     arith_uint256 bnNew;
+ 
+     // Special difficulty rule for Testnet4
+@@ -75,11 +178,7 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+         bnNew.SetCompact(pindexLast->nBits);
+     }
+ 
+-    bnNew *= nActualTimespan;
+-    bnNew /= params.nPowTargetTimespan;
+-
+-    if (bnNew > bnPowLimit)
+-        bnNew = bnPowLimit;
++    bnNew = ScaleTarget(bnNew, static_cast<uint32_t>(nActualTimespan), static_cast<uint32_t>(params.nPowTargetTimespan), bnPowLimit);
+ 
+     return bnNew.GetCompact();
+ }
+@@ -88,13 +187,17 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+ // or decrease beyond the permitted limits.
+ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits)
+ {
++    // The low-cost headers-sync prefilter lacks timestamps and the persistent
++    // handoff marker's ancestry. ContextualCheckBlockHeader performs the exact
++    // PoHW calculation for every post-fork header.
++    if (params.pohw_experiment && height > params.pohw_fork_height) return true;
+     if (params.fPowAllowMinDifficultyBlocks) return true;
+ 
+     if (height % params.DifficultyAdjustmentInterval() == 0) {
+         int64_t smallest_timespan = params.nPowTargetTimespan/4;
+         int64_t largest_timespan = params.nPowTargetTimespan*4;
+ 
+-        const arith_uint256 pow_limit = UintToArith256(params.powLimit);
++        const arith_uint256 pow_limit = PowLimitForHeight(params, height);
+         arith_uint256 observed_new_target;
+         observed_new_target.SetCompact(new_nbits);
+ 
+diff --git a/src/pow.h b/src/pow.h
+index 26004c46187cb683e5418b723e58036b99e9e506..a28b3db179d9e5454ba3fbe96794a092cb87597d 100644
+--- a/src/pow.h
++++ b/src/pow.h
+@@ -29,6 +29,15 @@ std::optional<arith_uint256> DeriveTarget(unsigned int nBits, uint256 pow_limit)
+ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&);
+ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
+ 
++/** Return whether a PoHW target implies at least the configured handoff hashrate. */
++bool PoHWTargetMeetsHandoff(uint32_t nbits, const Consensus::Params& params);
++
++/** Set or clear the consensus handoff marker while preserving all other version bits. */
++int32_t ComputePoHWBlockVersion(const CBlockIndex* pindex_last, uint32_t nbits, const Consensus::Params& params, int32_t base_version);
++
++/** Verify the persistent PoHW handoff marker on a candidate block header. */
++bool CheckPoHWBlockVersion(const CBlockIndex* pindex_last, uint32_t nbits, int32_t version, const Consensus::Params& params);
++
+ /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
+ bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
+ bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params&);
+diff --git a/src/qt/guiconstants.h b/src/qt/guiconstants.h
+index a3b8cb9d9ce382090a447dd30883ad81494ded9a..d4b6ed23c6c39414dd844dc69be0f6ae99f1ddee 100644
+--- a/src/qt/guiconstants.h
++++ b/src/qt/guiconstants.h
+@@ -49,6 +49,7 @@ static const int TOOLTIP_WRAP_THRESHOLD = 80;
+ #define QAPP_ORG_NAME "Bitcoin"
+ #define QAPP_ORG_DOMAIN "bitcoin.org"
+ #define QAPP_APP_NAME_DEFAULT "Bitcoin-Qt"
++#define QAPP_APP_NAME_POHW "Bitcoin-Qt-pohw"
+ #define QAPP_APP_NAME_TESTNET "Bitcoin-Qt-testnet"
+ #define QAPP_APP_NAME_TESTNET4 "Bitcoin-Qt-testnet4"
+ #define QAPP_APP_NAME_SIGNET "Bitcoin-Qt-signet"
+diff --git a/src/qt/guiutil.cpp b/src/qt/guiutil.cpp
+index 1619227a419ffe89f48213b5aa892258cbc03b55..a0aa66e6c5bf2b2d623711bd09f1ed7ca2f92ab2 100644
+--- a/src/qt/guiutil.cpp
++++ b/src/qt/guiutil.cpp
+@@ -111,6 +111,7 @@ static std::string DummyAddress(const CChainParams &params)
+     std::string addr;
+     switch (params.GetChainType()) {
+     case ChainType::MAIN:
++    case ChainType::POHW:
+         addr = "bc1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq2jku9f";
+         break;
+     case ChainType::SIGNET:
+diff --git a/src/qt/networkstyle.cpp b/src/qt/networkstyle.cpp
+index 09d2df695819d5860b6403ad7bb13c69dfbeee0a..e1f0d782605211398521a339ac1411efe420d109 100644
+--- a/src/qt/networkstyle.cpp
++++ b/src/qt/networkstyle.cpp
+@@ -18,6 +18,7 @@ static const struct {
+     const int iconColorSaturationReduction;
+ } network_styles[] = {
+     {ChainType::MAIN, QAPP_APP_NAME_DEFAULT, 0, 0},
++    {ChainType::POHW, QAPP_APP_NAME_POHW, 190, 10},
+     {ChainType::TESTNET, QAPP_APP_NAME_TESTNET, 70, 30},
+     {ChainType::TESTNET4, QAPP_APP_NAME_TESTNET4, 70, 30},
+     {ChainType::SIGNET, QAPP_APP_NAME_SIGNET, 35, 15},
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index c631a93674aa296f74871ff7c3db3b1aa12ea741..7a826fb1095bc301aa314ec8b6a93fbc1c6f8461 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -32,6 +32,8 @@
+ #include <node/transaction.h>
+ #include <node/utxo_snapshot.h>
+ #include <node/warnings.h>
++#include <pohw/experiment.h>
++#include <pow.h>
+ #include <primitives/transaction.h>
+ #include <rpc/server.h>
+ #include <rpc/server_util.h>
+@@ -1387,6 +1389,17 @@ RPCHelpMan getblockchaininfo()
+                 {RPCResult::Type::BOOL, "automatic_pruning", /*optional=*/true, "whether automatic pruning is enabled (only present if pruning is enabled)"},
+                 {RPCResult::Type::NUM, "prune_target_size", /*optional=*/true, "the target size used by pruning (only present if automatic pruning is enabled)"},
+                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "the block challenge (aka. block script), in hexadecimal (only present if the current network is a signet)"},
++                {RPCResult::Type::OBJ, "pohw_experiment", /*optional=*/true, "P2poolBTC Experiment 1 consensus state (only present on the pohw chain)", {
++                    {RPCResult::Type::NUM, "fork_height", "last inherited Bitcoin mainnet block height"},
++                    {RPCResult::Type::STR_HEX, "fork_hash", "pinned inherited Bitcoin mainnet block hash"},
++                    {RPCResult::Type::STR_HEX, "first_fork_hash", "pinned first PoHW fork block hash"},
++                    {RPCResult::Type::BOOL, "inherited_utxo_spending", "whether inherited UTXOs may be spent under fork rules"},
++                    {RPCResult::Type::STR, "replay_protection", "fork replay-isolation rule"},
++                    {RPCResult::Type::NUM, "replay_marker_activation_height", "first height requiring the fork-only coinbase replay marker"},
++                    {RPCResult::Type::NUM, "bootstrap_handoff_hashrate_hps", "target-implied hashrate that permanently activates Bitcoin retargeting"},
++                    {RPCResult::Type::BOOL, "handoff_active", "whether the active tip carries the permanent handoff marker"},
++                    {RPCResult::Type::STR, "warning", "no-value and key-isolation warning"},
++                }},
+                 (IsDeprecatedRPCEnabled("warnings") ?
+                     RPCResult{RPCResult::Type::STR, "warnings", "any network and blockchain warnings (DEPRECATED)"} :
+                     RPCResult{RPCResult::Type::ARR, "warnings", "any network and blockchain warnings (run with `-deprecatedrpc=warnings` to return the latest warning as a single string)",
+@@ -1438,6 +1451,20 @@ RPCHelpMan getblockchaininfo()
+             chainman.GetParams().GetConsensus().signet_challenge;
+         obj.pushKV("signet_challenge", HexStr(signet_challenge));
+     }
++    if (chainman.GetParams().GetChainType() == ChainType::POHW) {
++        const Consensus::Params& consensus{chainman.GetConsensus()};
++        UniValue pohw(UniValue::VOBJ);
++        pohw.pushKV("fork_height", consensus.pohw_fork_height);
++        pohw.pushKV("fork_hash", consensus.pohw_fork_hash.GetHex());
++        pohw.pushKV("first_fork_hash", consensus.pohw_first_fork_hash.GetHex());
++        pohw.pushKV("inherited_utxo_spending", true);
++        pohw.pushKV("replay_protection", "inherited-input-requires-fork-only-marker-v2");
++        pohw.pushKV("replay_marker_activation_height", consensus.pohw_replay_marker_activation_height);
++        pohw.pushKV("bootstrap_handoff_hashrate_hps", consensus.pohw_bootstrap_handoff_hashrate_hps);
++        pohw.pushKV("handoff_active", tip.nHeight > consensus.pohw_fork_height && CheckPoHWBlockVersion(tip.pprev, tip.nBits, tip.nVersion, consensus) && (tip.nVersion & pohw::experiment1::HANDOFF_VERSION_BIT) != 0);
++        pohw.pushKV("warning", "NO-VALUE EXPERIMENT: inherited scripts map to Bitcoin mainnet keys; never assume key isolation");
++        obj.pushKV("pohw_experiment", std::move(pohw));
++    }
+ 
+     NodeContext& node = EnsureAnyNodeContext(request.context);
+     obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 043e11ff63ad1eb6c5b30f97cb5ae3a4cfef3132..05aa527ceee9e21acd424e871881909987137018 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -24,6 +24,7 @@
+ #include <node/miner.h>
+ #include <node/warnings.h>
+ #include <policy/ephemeral_policy.h>
++#include <pohw/replay.h>
+ #include <pow.h>
+ #include <rpc/blockchain.h>
+ #include <rpc/mining.h>
+@@ -697,6 +698,7 @@ static RPCHelpMan getblocktemplate()
+                 {RPCResult::Type::NUM, "height", "The height of the next block"},
+                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "Only on signet"},
+                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
++                {RPCResult::Type::STR_HEX, "pohw_replay_marker", /*optional=*/true, "required zero-value PoHW replay-marker output script"},
+             }},
+         },
+         RPCExamples{
+@@ -1019,8 +1021,14 @@ static RPCHelpMan getblocktemplate()
+     }
+ 
+     if (auto coinbase{block_template->getCoinbaseTx()}; coinbase.required_outputs.size() > 0) {
+-        CHECK_NONFATAL(coinbase.required_outputs.size() == 1); // Only one output is currently expected
+-        result.pushKV("default_witness_commitment", HexStr(coinbase.required_outputs[0].scriptPubKey));
++        for (const CTxOut& output : coinbase.required_outputs) {
++            if (pohw::IsReplayMarkerScript(output.scriptPubKey)) {
++                CHECK_NONFATAL(output.nValue == 0);
++                result.pushKV("pohw_replay_marker", HexStr(output.scriptPubKey));
++            } else {
++                result.pushKV("default_witness_commitment", HexStr(output.scriptPubKey));
++            }
++        }
+     }
+ 
+     return result;
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 443714ceedaf6b0cc695316882080f79fb50316e..a1017ab65d2251aa05346ba75c058467ed64bfe0 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -8,6 +8,7 @@
+ #include <crypto/ripemd160.h>
+ #include <crypto/sha1.h>
+ #include <crypto/sha256.h>
++#include <pohw/replay.h>
+ #include <pubkey.h>
+ #include <script/script.h>
+ #include <tinyformat.h>
+@@ -425,6 +426,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript&
+     ConditionStack vfExec;
+     std::vector<valtype> altstack;
+     set_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
++
+     if ((sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) && script.size() > MAX_SCRIPT_SIZE) {
+         return set_error(serror, SCRIPT_ERR_SCRIPT_SIZE);
+     }
+@@ -2009,6 +2011,13 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
+ 
+     set_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
+ 
++    if ((flags & SCRIPT_VERIFY_POHW_REPLAY_MARKER) && pohw::IsReplayMarkerScript(scriptPubKey)) {
++        if (!scriptSig.empty() || !witness->IsNull()) {
++            return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
++        }
++        return set_success(serror);
++    }
++
+     if ((flags & SCRIPT_VERIFY_SIGPUSHONLY) != 0 && !scriptSig.IsPushOnly()) {
+         return set_error(serror, SCRIPT_ERR_SIG_PUSHONLY);
+     }
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index cbb137e09efb1f41d2780733d1c4f7808a22a69e..4f5d14f76cd2815664c911c0a66dff7c04041dfc 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -145,6 +145,10 @@ enum class script_verify_flag_name : uint8_t {
+     // Making unknown public key versions (in BIP 342 scripts) non-standard
+     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
+ 
++    // PoHW only: accept the exact fork replay-marker script. This flag is
++    // never set on upstream chains.
++    SCRIPT_VERIFY_POHW_REPLAY_MARKER,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+diff --git a/src/streams.h b/src/streams.h
+index f70adcf74a71ce163bff5fc19dd7b32ab22e3c88..ee83f090b4ddf7e47b8f69b603869cddf2526579 100644
+--- a/src/streams.h
++++ b/src/streams.h
+@@ -618,6 +618,30 @@ public:
+             if (buf_offset >= vchBuf.size()) buf_offset = 0;
+         }
+     }
++
++    //! Search for any byte in `bytes`, and remain positioned on the first match.
++    void FindAnyByte(std::span<const std::byte> bytes)
++    {
++        if (bytes.empty()) {
++            throw std::ios_base::failure{"BufferedFile::FindAnyByte: empty search set"};
++        }
++
++        // For best performance, avoid mod operation within the loop.
++        size_t buf_offset{size_t(m_read_pos % uint64_t(vchBuf.size()))};
++        while (true) {
++            if (m_read_pos == nSrcPos) {
++                Fill();
++            }
++            const size_t len{std::min<size_t>(vchBuf.size() - buf_offset, nSrcPos - m_read_pos)};
++            const auto it_start{vchBuf.begin() + buf_offset};
++            const auto it_find{std::find_first_of(it_start, it_start + len, bytes.begin(), bytes.end())};
++            const size_t inc{size_t(std::distance(it_start, it_find))};
++            m_read_pos += inc;
++            if (inc < len) break;
++            buf_offset += inc;
++            if (buf_offset >= vchBuf.size()) buf_offset = 0;
++        }
++    }
+ };
+ 
+ /**
+diff --git a/src/test/pow_tests.cpp b/src/test/pow_tests.cpp
+index f6123401ad0e2b38f8a48a785c9d837b94f81551..015e5ac5ccd5c7da335c121ccd1cd709da0d2092 100644
+--- a/src/test/pow_tests.cpp
++++ b/src/test/pow_tests.cpp
+@@ -4,11 +4,14 @@
+ 
+ #include <chain.h>
+ #include <chainparams.h>
++#include <node/miner.h>
++#include <pohw/experiment.h>
+ #include <pow.h>
+ #include <test/util/random.h>
+ #include <test/util/common.h>
+ #include <test/util/setup_common.h>
+ #include <util/chaintype.h>
++#include <util/time.h>
+ 
+ #include <boost/test/unit_test.hpp>
+ 
+@@ -177,7 +180,7 @@ void sanity_check_chainparams(const ArgsManager& args, ChainType chain_type)
+     BOOST_CHECK(UintToArith256(consensus.powLimit) >= pow_compact);
+ 
+     // check max target * 4*nPowTargetTimespan doesn't overflow -- see pow.cpp:CalculateNextWorkRequired()
+-    if (!consensus.fPowNoRetargeting) {
++    if (!consensus.fPowNoRetargeting && !consensus.pohw_experiment) {
+         arith_uint256 targ_max{UintToArith256(uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"})};
+         targ_max /= consensus.nPowTargetTimespan*4;
+         BOOST_CHECK(UintToArith256(consensus.powLimit) < targ_max);
+@@ -189,6 +192,117 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_sanity)
+     sanity_check_chainparams(*m_node.args, ChainType::MAIN);
+ }
+ 
++BOOST_AUTO_TEST_CASE(ChainParams_POHW_sanity)
++{
++    sanity_check_chainparams(*m_node.args, ChainType::POHW);
++}
++
++BOOST_AUTO_TEST_CASE(POHW_inherited_block_file_magic_is_disk_only)
++{
++    const auto main_params{CreateChainParams(*m_node.args, ChainType::MAIN)};
++    const auto pohw_params{CreateChainParams(*m_node.args, ChainType::POHW)};
++    const auto testnet_params{CreateChainParams(*m_node.args, ChainType::TESTNET)};
++
++    BOOST_CHECK(pohw_params->MessageStart() != main_params->MessageStart());
++    BOOST_REQUIRE(pohw_params->LegacyBlockFileMessageStart());
++    BOOST_CHECK(*pohw_params->LegacyBlockFileMessageStart() == main_params->MessageStart());
++    BOOST_CHECK(pohw_params->IsBlockFileMessageStart(pohw_params->MessageStart()));
++    BOOST_CHECK(pohw_params->IsBlockFileMessageStart(main_params->MessageStart()));
++    BOOST_CHECK(!pohw_params->IsBlockFileMessageStart(testnet_params->MessageStart()));
++
++    BOOST_CHECK(main_params->IsBlockFileMessageStart(main_params->MessageStart()));
++    BOOST_CHECK(!main_params->IsBlockFileMessageStart(pohw_params->MessageStart()));
++    BOOST_CHECK(!main_params->LegacyBlockFileMessageStart());
++}
++
++BOOST_AUTO_TEST_CASE(POHW_bootstrap_and_handoff_marker)
++{
++    const auto chain_params{CreateChainParams(*m_node.args, ChainType::POHW)};
++    const auto& consensus{chain_params->GetConsensus()};
++    BOOST_REQUIRE(consensus.pohw_experiment);
++    BOOST_CHECK_EQUAL(consensus.pohw_first_fork_hash.GetHex(), pohw::experiment1::FIRST_FORK_HASH);
++
++    CBlockIndex inherited_tip;
++    inherited_tip.nHeight = consensus.pohw_fork_height;
++    inherited_tip.nTime = 1'784'038'172;
++    inherited_tip.nBits = 0x1702369d;
++    inherited_tip.nVersion = 0x20000000;
++
++    CBlockHeader first_fork;
++    first_fork.nTime = inherited_tip.nTime + consensus.nPowTargetSpacing;
++    const uint32_t first_bits{GetNextWorkRequired(&inherited_tip, &first_fork, consensus)};
++    BOOST_CHECK_EQUAL(first_bits, UintToArith256(consensus.powLimit).GetCompact());
++    BOOST_CHECK(!PoHWTargetMeetsHandoff(first_bits, consensus));
++    BOOST_CHECK_EQUAL(ComputePoHWBlockVersion(&inherited_tip, first_bits, consensus, 0x20000000), 0x20000000);
++
++    CBlockIndex bootstrap_parent;
++    bootstrap_parent.pprev = &inherited_tip;
++    bootstrap_parent.nHeight = consensus.pohw_fork_height + 1;
++    bootstrap_parent.nTime = first_fork.nTime;
++    bootstrap_parent.nBits = first_bits;
++    bootstrap_parent.nVersion = 0x20000000;
++
++    CBlockHeader fast_child;
++    fast_child.nTime = bootstrap_parent.nTime + consensus.nPowTargetSpacing / 4;
++    const uint32_t harder_bits{GetNextWorkRequired(&bootstrap_parent, &fast_child, consensus)};
++    arith_uint256 harder_target;
++    harder_target.SetCompact(harder_bits);
++    BOOST_CHECK(UintToArith256(consensus.powLimit) > harder_target);
++
++    constexpr uint32_t HANDOFF_BITS{0x191ebe9c};
++    BOOST_REQUIRE(PoHWTargetMeetsHandoff(HANDOFF_BITS, consensus));
++    const int32_t marked{ComputePoHWBlockVersion(&bootstrap_parent, HANDOFF_BITS, consensus, 0x20000000)};
++    BOOST_CHECK_NE(marked, 0x20000000);
++    BOOST_CHECK(CheckPoHWBlockVersion(&bootstrap_parent, HANDOFF_BITS, marked, consensus));
++    BOOST_CHECK(!CheckPoHWBlockVersion(&bootstrap_parent, HANDOFF_BITS, 0x20000000, consensus));
++
++    CBlockIndex handoff_parent;
++    handoff_parent.pprev = &bootstrap_parent;
++    handoff_parent.nHeight = consensus.pohw_fork_height + 2;
++    handoff_parent.nTime = fast_child.nTime;
++    handoff_parent.nBits = HANDOFF_BITS;
++    handoff_parent.nVersion = marked;
++    BOOST_CHECK_NE(ComputePoHWBlockVersion(&handoff_parent, first_bits, consensus, 0x20000000), 0x20000000);
++}
++
++BOOST_AUTO_TEST_CASE(POHW_update_time_refreshes_template_difficulty)
++{
++    const auto chain_params{CreateChainParams(*m_node.args, ChainType::POHW)};
++    const auto& consensus{chain_params->GetConsensus()};
++
++    CBlockIndex inherited_tip;
++    inherited_tip.nHeight = consensus.pohw_fork_height;
++    inherited_tip.nTime = 1'784'038'172;
++    inherited_tip.nBits = 0x1702369d;
++    inherited_tip.nVersion = 0x20000000;
++
++    CBlockIndex bootstrap_parent;
++    bootstrap_parent.pprev = &inherited_tip;
++    bootstrap_parent.nHeight = consensus.pohw_fork_height + 1;
++    bootstrap_parent.nTime = inherited_tip.nTime + consensus.nPowTargetSpacing;
++    bootstrap_parent.nBits = UintToArith256(consensus.powLimit).GetCompact();
++    bootstrap_parent.nVersion = 0x20000000;
++
++    const int64_t refreshed_time{bootstrap_parent.nTime + consensus.nPowTargetSpacing / 4};
++    SetMockTime(refreshed_time);
++    CBlockHeader child;
++    child.nTime = bootstrap_parent.nTime;
++    child.nBits = bootstrap_parent.nBits;
++    child.nVersion = 0x20000000;
++
++    CBlockHeader expected{child};
++    expected.nTime = refreshed_time;
++    const uint32_t expected_bits{GetNextWorkRequired(&bootstrap_parent, &expected, consensus)};
++    BOOST_REQUIRE_NE(expected_bits, child.nBits);
++
++    node::UpdateTime(&child, consensus, &bootstrap_parent);
++
++    BOOST_CHECK_EQUAL(child.nTime, refreshed_time);
++    BOOST_CHECK_EQUAL(child.nBits, expected_bits);
++    BOOST_CHECK_EQUAL(child.nVersion, ComputePoHWBlockVersion(&bootstrap_parent, expected_bits, consensus, 0x20000000));
++    SetMockTime(0);
++}
++
+ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_sanity)
+ {
+     sanity_check_chainparams(*m_node.args, ChainType::REGTEST);
+diff --git a/src/test/streams_tests.cpp b/src/test/streams_tests.cpp
+index dfddc415b50e846c95e938938f03f21ad9f08b78..bcaa0bac284a591f8caab0f2511dcd007a731eb3 100644
+--- a/src/test/streams_tests.cpp
++++ b/src/test/streams_tests.cpp
+@@ -504,6 +504,34 @@ BOOST_AUTO_TEST_CASE(streams_buffered_file_skip)
+     fs::remove(streams_test_filename);
+ }
+ 
++BOOST_AUTO_TEST_CASE(streams_buffered_file_find_any_byte)
++{
++    const fs::path filename{m_args.GetDataDirBase() / "streams_find_any_tmp"};
++    AutoFile file{fsbridge::fopen(filename, "w+b")};
++    for (uint8_t value = 0; value < 40; ++value) file << value;
++    file.seek(0, SEEK_SET);
++
++    BufferedFile buffered{file, 11, 4};
++    const std::byte first_candidates[]{std::byte{7}, std::byte{3}};
++    buffered.FindAnyByte(first_candidates);
++    BOOST_CHECK_EQUAL(buffered.GetPos(), 3U);
++
++    buffered.SkipTo(4);
++    const std::byte cross_buffer_candidates[]{std::byte{23}, std::byte{17}};
++    buffered.FindAnyByte(cross_buffer_candidates);
++    BOOST_CHECK_EQUAL(buffered.GetPos(), 17U);
++
++    BOOST_CHECK_EXCEPTION(
++        buffered.FindAnyByte(std::span<const std::byte>{}),
++        std::ios_base::failure,
++        [](const std::ios_base::failure& error) {
++            return std::string{error.what()}.find("empty search set") != std::string::npos;
++        });
++
++    BOOST_REQUIRE_EQUAL(file.fclose(), 0);
++    fs::remove(filename);
++}
++
+ BOOST_AUTO_TEST_CASE(streams_buffered_file_rand)
+ {
+     // Make this test deterministic.
+diff --git a/src/test/transaction_tests.cpp b/src/test/transaction_tests.cpp
+index 916f565c04df41b909ad35e50b917cdb04caaa4f..519ec3350eb7bdd7199b7804873797286dd34ba0 100644
+--- a/src/test/transaction_tests.cpp
++++ b/src/test/transaction_tests.cpp
+@@ -10,6 +10,7 @@
+ #include <clientversion.h>
+ #include <consensus/amount.h>
+ #include <consensus/consensus.h>
++#include <consensus/params.h>
+ #include <consensus/tx_check.h>
+ #include <consensus/tx_verify.h>
+ #include <consensus/validation.h>
+@@ -17,6 +18,7 @@
+ #include <key.h>
+ #include <policy/policy.h>
+ #include <policy/settings.h>
++#include <pohw/replay.h>
+ #include <primitives/transaction_identifier.h>
+ #include <script/interpreter.h>
+ #include <script/script.h>
+@@ -1155,6 +1157,70 @@ BOOST_AUTO_TEST_CASE(checktxinputs_invalid_transactions_test)
+                   TxValidationResult::TX_PREMATURE_SPEND, /*expected_reason=*/"bad-txns-premature-spend-of-coinbase");
+ }
+ 
++BOOST_AUTO_TEST_CASE(pohw_inherited_spend_requires_fork_only_replay_marker)
++{
++    Consensus::Params params;
++    params.pohw_experiment = true;
++    params.pohw_fork_height = 100;
++    params.pohw_replay_marker_activation_height = 102;
++
++    CCoinsView coins_dummy;
++    CCoinsViewCache inputs{&coins_dummy};
++    const COutPoint inherited{Txid::FromUint256(uint256{1}), 0};
++    const COutPoint fork_created{Txid::FromUint256(uint256{2}), 0};
++    const COutPoint replay_marker{Txid::FromUint256(uint256{3}), 0};
++    const COutPoint non_coinbase_marker{Txid::FromUint256(uint256{4}), 0};
++    const COutPoint valued_coinbase_marker{Txid::FromUint256(uint256{5}), 0};
++    inputs.AddCoin(inherited, Coin{{1 * COIN, CScript{} << OP_TRUE}, 100, false}, false);
++    inputs.AddCoin(fork_created, Coin{{1 * COIN, CScript{} << OP_TRUE}, 101, false}, false);
++    inputs.AddCoin(replay_marker, Coin{{0, pohw::ReplayMarkerScript()}, 102, true}, false);
++    inputs.AddCoin(non_coinbase_marker, Coin{{0, pohw::ReplayMarkerScript()}, 102, false}, false);
++    inputs.AddCoin(valued_coinbase_marker, Coin{{1, pohw::ReplayMarkerScript()}, 102, true}, false);
++
++    CMutableTransaction inherited_only;
++    inherited_only.vin.emplace_back(inherited);
++    inherited_only.vout.emplace_back(1 * COIN, CScript{} << OP_TRUE);
++
++    TxValidationState before_activation;
++    BOOST_CHECK(Consensus::CheckPoHWForkReplayProtection(CTransaction{inherited_only}, before_activation, inputs, 101, params));
++
++    TxValidationState unprotected;
++    BOOST_CHECK(!Consensus::CheckPoHWForkReplayProtection(CTransaction{inherited_only}, unprotected, inputs, 102, params));
++    BOOST_CHECK_EQUAL(unprotected.GetRejectReason(), "bad-pohw-replay-unprotected");
++
++    // A same-height fork-created outpoint is not sufficient: its transaction
++    // id could be made to collide on mainnet by a hostile miner.
++    CMutableTransaction mixed{inherited_only};
++    mixed.vin.emplace_back(fork_created);
++    TxValidationState collision_state;
++    BOOST_CHECK(!Consensus::CheckPoHWForkReplayProtection(CTransaction{mixed}, collision_state, inputs, 102, params));
++
++    mixed.vin.emplace_back(replay_marker);
++    TxValidationState protected_state;
++    BOOST_CHECK(Consensus::CheckPoHWForkReplayProtection(CTransaction{mixed}, protected_state, inputs, 102, params));
++
++    CMutableTransaction fake_marker{inherited_only};
++    fake_marker.vin.emplace_back(non_coinbase_marker);
++    TxValidationState fake_marker_state;
++    BOOST_CHECK(!Consensus::CheckPoHWForkReplayProtection(CTransaction{fake_marker}, fake_marker_state, inputs, 102, params));
++
++    CMutableTransaction valued_marker{inherited_only};
++    valued_marker.vin.emplace_back(valued_coinbase_marker);
++    TxValidationState valued_marker_state;
++    BOOST_CHECK(!Consensus::CheckPoHWForkReplayProtection(CTransaction{valued_marker}, valued_marker_state, inputs, 102, params));
++
++    CMutableTransaction fork_only;
++    fork_only.vin.emplace_back(fork_created);
++    fork_only.vout.emplace_back(1 * COIN, CScript{} << OP_TRUE);
++    TxValidationState fork_only_state;
++    BOOST_CHECK(Consensus::CheckPoHWForkReplayProtection(CTransaction{fork_only}, fork_only_state, inputs, 102, params));
++
++    ScriptError script_error{SCRIPT_ERR_UNKNOWN_ERROR};
++    BOOST_CHECK(!VerifyScript(CScript{}, pohw::ReplayMarkerScript(), nullptr, SCRIPT_VERIFY_NONE, BaseSignatureChecker{}, &script_error));
++    BOOST_CHECK(VerifyScript(CScript{}, pohw::ReplayMarkerScript(), nullptr, SCRIPT_VERIFY_POHW_REPLAY_MARKER, BaseSignatureChecker{}, &script_error));
++    BOOST_CHECK(!VerifyScript(CScript{} << OP_0, pohw::ReplayMarkerScript(), nullptr, SCRIPT_VERIFY_POHW_REPLAY_MARKER, BaseSignatureChecker{}, &script_error));
++}
++
+ BOOST_AUTO_TEST_CASE(getvalueout_out_of_range_throws)
+ {
+     CMutableTransaction mtx;
+diff --git a/src/util/chaintype.cpp b/src/util/chaintype.cpp
+index 5059ff7e9f47f3132a669f30d9eebc16abff6cb0..510f659831b6f9176364d427f1aa593e1c18c50c 100644
+--- a/src/util/chaintype.cpp
++++ b/src/util/chaintype.cpp
+@@ -13,6 +13,8 @@ std::string ChainTypeToString(ChainType chain)
+     switch (chain) {
+     case ChainType::MAIN:
+         return "main";
++    case ChainType::POHW:
++        return "pohw";
+     case ChainType::TESTNET:
+         return "test";
+     case ChainType::TESTNET4:
+@@ -29,6 +31,8 @@ std::optional<ChainType> ChainTypeFromString(std::string_view chain)
+ {
+     if (chain == "main") {
+         return ChainType::MAIN;
++    } else if (chain == "pohw") {
++        return ChainType::POHW;
+     } else if (chain == "test") {
+         return ChainType::TESTNET;
+     } else if (chain == "testnet4") {
+diff --git a/src/util/chaintype.h b/src/util/chaintype.h
+index 3b246ea49b5001f4ecd9c66b3c3a071cbdf97773..4468925e10f208e533f7b3ac8f972fcf03a53c9f 100644
+--- a/src/util/chaintype.h
++++ b/src/util/chaintype.h
+@@ -10,6 +10,7 @@
+ 
+ enum class ChainType {
+     MAIN,
++    POHW,
+     TESTNET,
+     SIGNET,
+     REGTEST,
+diff --git a/src/validation.cpp b/src/validation.cpp
+index d3cabe4464790ef84348df10aef05f268e02488c..05e7fd2b90f3d5b32d76d79c357154d4e83f7017 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -36,6 +36,7 @@
+ #include <policy/rbf.h>
+ #include <policy/settings.h>
+ #include <policy/truc_policy.h>
++#include <pohw/replay.h>
+ #include <pow.h>
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
+@@ -65,6 +66,7 @@
+ #include <validationinterface.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <cassert>
+ #include <chrono>
+ #include <deque>
+@@ -372,6 +374,21 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+             }
+         }
+ 
++        // A reorg can cross the PoHW replay-marker activation boundary. Treat
++        // replay isolation like finality and coinbase maturity: transactions
++        // that cannot enter the next block, plus their descendants, must leave
++        // the mempool before block assembly resumes.
++        const CCoinsViewMemPool replay_view{&CoinsTip(), *m_mempool};
++        TxValidationState replay_state;
++        if (!Consensus::CheckPoHWForkReplayProtection(
++                tx,
++                replay_state,
++                replay_view,
++                m_chain.Tip()->nHeight + 1,
++                m_chainman.GetConsensus())) {
++            return true;
++        }
++
+         // If the transaction spends any coinbase outputs, it must be mature.
+         if (it->GetSpendsCoinbase()) {
+             for (const CTxIn& txin : tx.vin) {
+@@ -896,11 +913,17 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
+     }
+ 
+     // The mempool holds txs for the next block, so pass height+1 to CheckTxInputs
++    if (!Consensus::CheckPoHWForkReplayProtection(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, m_active_chainstate.m_chainman.GetConsensus())) {
++        return false;
++    }
+     if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees)) {
+         return false; // state filled in by CheckTxInputs
+     }
+ 
+-    if (m_pool.m_opts.require_standard && !AreInputsStandard(tx, m_view)) {
++    const bool allow_pohw_replay_marker{pohw::ReplayMarkerActive(
++        m_active_chainstate.m_chain.Height() + 1,
++        m_active_chainstate.m_chainman.GetConsensus())};
++    if (m_pool.m_opts.require_standard && !AreInputsStandard(tx, m_view, allow_pohw_replay_marker)) {
+         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
+     }
+ 
+@@ -1143,7 +1166,10 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
+     const CTransaction& tx = *ws.m_ptx;
+     TxValidationState& state = ws.m_state;
+ 
+-    constexpr script_verify_flags scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
++    script_verify_flags scriptVerifyFlags{STANDARD_SCRIPT_VERIFY_FLAGS};
++    if (pohw::ReplayMarkerActive(m_active_chainstate.m_chain.Height() + 1, m_active_chainstate.m_chainman.GetConsensus())) {
++        scriptVerifyFlags |= SCRIPT_VERIFY_POHW_REPLAY_MARKER;
++    }
+ 
+     // Check input scripts and signatures.
+     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+@@ -1183,6 +1209,9 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
+     // invalid blocks (using TestBlockValidity), however allowing such
+     // transactions into the mempool can be exploited as a DoS attack.
+     script_verify_flags currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
++    if (pohw::ReplayMarkerActive(m_active_chainstate.m_chain.Height() + 1, m_active_chainstate.m_chainman.GetConsensus())) {
++        currentBlockScriptVerifyFlags |= SCRIPT_VERIFY_POHW_REPLAY_MARKER;
++    }
+     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
+                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
+         LogError("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s", hash.ToString(), state.ToString());
+@@ -2289,6 +2318,10 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_NULLDUMMY;
+     }
+ 
++    if (pohw::ReplayMarkerActive(block_index.nHeight, consensusparams)) {
++        flags |= SCRIPT_VERIFY_POHW_REPLAY_MARKER;
++    }
++
+     return flags;
+ }
+ 
+@@ -2307,6 +2340,28 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state,
+ 
+     const auto time_start{SteadyClock::now()};
+     const CChainParams& params{m_chainman.GetParams()};
++    const Consensus::Params& consensus{params.GetConsensus()};
++
++    if (consensus.pohw_experiment) {
++        const bool wrong_fork_block{pindex->nHeight == consensus.pohw_fork_height && block_hash != consensus.pohw_fork_hash};
++        const bool wrong_fork_parent{pindex->nHeight == consensus.pohw_fork_height + 1 &&
++                                     (pindex->pprev == nullptr || pindex->pprev->GetBlockHash() != consensus.pohw_fork_hash)};
++        const bool wrong_first_fork_block{pindex->nHeight == consensus.pohw_fork_height + 1 &&
++                                          block_hash != consensus.pohw_first_fork_hash};
++        const bool wrong_first_fork_parent{pindex->nHeight == consensus.pohw_fork_height + 2 &&
++                                           (pindex->pprev == nullptr || pindex->pprev->GetBlockHash() != consensus.pohw_first_fork_hash)};
++        if (wrong_fork_block || wrong_fork_parent || wrong_first_fork_block || wrong_first_fork_parent) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pohw-fork-point", "block does not extend the pinned Experiment 1 fork point");
++        }
++        if (pindex->pprev != nullptr && !CheckPoHWBlockVersion(pindex->pprev, block.nBits, block.nVersion, consensus)) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pohw-handoff-version", "incorrect PoHW bootstrap handoff marker");
++        }
++        if (pohw::ReplayMarkerActive(pindex->nHeight, consensus) &&
++            (block.vtx.empty() || !pohw::CoinbaseHasReplayMarker(*block.vtx.front()))) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pohw-replay-marker",
++                                 "PoHW block coinbase is missing the required zero-value replay marker");
++        }
++    }
+ 
+     // Check it again in case a previous version let a bad block in
+     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
+@@ -2535,6 +2590,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state,
+         {
+             CAmount txfee = 0;
+             TxValidationState tx_state;
++            if (!Consensus::CheckPoHWForkReplayProtection(tx, tx_state, view, pindex->nHeight, consensus)) {
++                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
++                              tx_state.GetRejectReason(),
++                              tx_state.GetDebugMessage() + " in transaction " + tx.GetHash().ToString());
++                break;
++            }
+             if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee)) {
+                 // Any transaction validation failure in ConnectBlock is a block consensus failure
+                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+@@ -3121,11 +3182,30 @@ bool Chainstate::ConnectTip(
+         m_mempool->removeForBlock(block_to_connect->vtx, pindexNew->nHeight);
+         disconnectpool.removeForBlock(block_to_connect->vtx);
+     }
++    const bool replay_rule_changes_for_next_block{
++        pohw::ReplayMarkerActive(pindexNew->nHeight, m_chainman.GetConsensus()) !=
++        pohw::ReplayMarkerActive(pindexNew->nHeight + 1, m_chainman.GetConsensus())};
++
+     // Update m_chain & related variables.
+     m_chain.SetTip(*pindexNew);
+     m_chainman.UpdateIBDStatus();
+     UpdateTip(pindexNew);
+ 
++    if (m_mempool && replay_rule_changes_for_next_block) {
++        const CCoinsViewMemPool replay_view{&CoinsTip(), *m_mempool};
++        const auto replay_invalid = [&](CTxMemPool::txiter it)
++            EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
++            TxValidationState replay_state;
++            return !Consensus::CheckPoHWForkReplayProtection(
++                it->GetTx(),
++                replay_state,
++                replay_view,
++                m_chain.Tip()->nHeight + 1,
++                m_chainman.GetConsensus());
++        };
++        m_mempool->removeForReorg(m_chain, replay_invalid);
++    }
++
+     const auto time_6{SteadyClock::now()};
+     m_chainman.time_post_connect += time_6 - time_5;
+     m_chainman.time_total += time_6 - time_1;
+@@ -4133,8 +4213,20 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
+ 
+     // Check proof of work
+     const Consensus::Params& consensusParams = chainman.GetConsensus();
++    if (consensusParams.pohw_experiment) {
++        const bool wrong_fork_block{nHeight == consensusParams.pohw_fork_height && block.GetHash() != consensusParams.pohw_fork_hash};
++        const bool wrong_fork_parent{nHeight == consensusParams.pohw_fork_height + 1 && pindexPrev->GetBlockHash() != consensusParams.pohw_fork_hash};
++        const bool wrong_first_fork_block{nHeight == consensusParams.pohw_fork_height + 1 && block.GetHash() != consensusParams.pohw_first_fork_hash};
++        const bool wrong_first_fork_parent{nHeight == consensusParams.pohw_fork_height + 2 && pindexPrev->GetBlockHash() != consensusParams.pohw_first_fork_hash};
++        if (wrong_fork_block || wrong_fork_parent || wrong_first_fork_block || wrong_first_fork_parent) {
++            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-pohw-fork-point", "block does not extend the pinned Experiment 1 fork point");
++        }
++    }
+     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
+         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
++    if (!CheckPoHWBlockVersion(pindexPrev, block.nBits, block.nVersion, consensusParams)) {
++        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-pohw-handoff-version", "incorrect PoHW bootstrap handoff marker");
++    }
+ 
+     // Check timestamp against prev
+     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
+@@ -5028,10 +5120,18 @@ void ChainstateManager::LoadExternalBlockFile(
+             try {
+                 // locate a header
+                 MessageStartChars buf;
+-                blkdat.FindByte(std::byte(params.MessageStart()[0]));
++                const std::array first_bytes{
++                    std::byte{params.MessageStart()[0]},
++                    std::byte{params.LegacyBlockFileMessageStart()
++                                  .value_or(params.MessageStart())[0]},
++                };
++                const auto search_bytes{params.LegacyBlockFileMessageStart() ?
++                        std::span<const std::byte>{first_bytes} :
++                        std::span<const std::byte>{first_bytes}.first(1)};
++                blkdat.FindAnyByte(search_bytes);
+                 nRewind = blkdat.GetPos() + 1;
+                 blkdat >> buf;
+-                if (buf != params.MessageStart()) {
++                if (!params.IsBlockFileMessageStart(buf)) {
+                     continue;
+                 }
+                 // read size

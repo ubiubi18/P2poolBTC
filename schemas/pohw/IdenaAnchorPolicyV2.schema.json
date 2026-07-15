@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.invalid/schemas/pohw/IdenaAnchorPolicyV2.schema.json",
+  "title": "IdenaAnchorPolicyV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "registry_contract_address",
+    "registry_deployment_tx_hash",
+    "registry_deployment_payload_sha256",
+    "registry_contract_code_hash",
+    "registry_contract_wasm_sha256",
+    "registry_ecosystem_cid",
+    "minimum_registration_burn_atoms",
+    "activation_idena_height",
+    "finality_confirmations",
+    "max_anchor_age_blocks",
+    "handoff_version_bit"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "experiment_id": {"type": "string", "pattern": "^[a-z0-9._:/-]{1,64}$"},
+    "registry_contract_address": {"type": "string", "pattern": "^0x(?!0{40}$)[0-9a-f]{40}$"},
+    "registry_deployment_tx_hash": {"type": "string", "pattern": "^0x[0-9a-f]{64}$"},
+    "registry_deployment_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registry_contract_code_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registry_contract_wasm_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registry_ecosystem_cid": {"type": "string", "pattern": "^b[a-z2-7]{9,127}$"},
+    "minimum_registration_burn_atoms": {"type": "string", "pattern": "^[1-9][0-9]{0,38}$"},
+    "activation_idena_height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "finality_confirmations": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "max_anchor_age_blocks": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "handoff_version_bit": {"type": "integer", "minimum": 0, "maximum": 28}
+  }
+}

@@ -2,6 +2,10 @@ use crate::snapshot::SnapshotLeaf;
 use crate::{canonical_json, hash_hex, sha256_tagged};
 use serde::{Deserialize, Serialize};
 
+const MAX_COMMITMENT_SNAPSHOT_ID_BYTES: usize = 64;
+const HASH_HEX_BYTES: usize = 64;
+const IDENA_ADDRESS_BYTES: usize = 42;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PohwCommitment {
     pub version: String,
@@ -81,6 +85,23 @@ impl PohwCommitment {
         ))
     }
 
+    pub fn validate_fields(&self) -> Result<(), CommitmentError> {
+        if self.version != "POHW1" {
+            return Err(CommitmentError::UnsupportedVersion(self.version.clone()));
+        }
+        validate_snapshot_id(&self.idena_snapshot_id)?;
+        validate_hash_hex("idena_score_root", &self.idena_score_root)?;
+        validate_idena_address(&self.miner_idena_address)?;
+        validate_hash_hex("identity_proof_root", &self.identity_proof_root)?;
+        validate_hash_hex("sharechain_tip", &self.sharechain_tip)?;
+        if let Some(root) = self.sharechain_state_root.as_deref() {
+            validate_hash_hex("sharechain_state_root", root)?;
+        }
+        validate_hash_hex("payout_schedule_root", &self.payout_schedule_root)?;
+        validate_hash_hex("frost_vault_key_xonly", &self.frost_vault_key_xonly)?;
+        Ok(())
+    }
+
     pub fn op_return_payload(&self) -> Vec<u8> {
         let mut payload = b"POHW1".to_vec();
         payload.extend_from_slice(&hex::decode(self.commitment_hash()).expect("hash hex is valid"));
@@ -105,6 +126,8 @@ impl PohwCommitment {
 pub enum CommitmentError {
     #[error("unsupported commitment version {0}")]
     UnsupportedVersion(String),
+    #[error("invalid commitment field {field}: {reason}")]
+    InvalidField { field: String, reason: String },
     #[error("miner identity is not eligible for block proposal")]
     IneligibleIdentity,
     #[error("miner commitment address {commitment_address} does not match snapshot leaf {snapshot_address}")]
@@ -219,11 +242,7 @@ pub fn validate_commitment_identity(
     commitment: &PohwCommitment,
     miner_leaf: &SnapshotLeaf,
 ) -> Result<(), CommitmentError> {
-    if commitment.version != "POHW1" {
-        return Err(CommitmentError::UnsupportedVersion(
-            commitment.version.clone(),
-        ));
-    }
+    commitment.validate_fields()?;
     if commitment.miner_idena_address != miner_leaf.idena_address.to_ascii_lowercase() {
         return Err(CommitmentError::MinerAddressMismatch {
             commitment_address: commitment.miner_idena_address.clone(),
@@ -232,6 +251,58 @@ pub fn validate_commitment_identity(
     }
     if !miner_leaf.is_block_eligible() {
         return Err(CommitmentError::IneligibleIdentity);
+    }
+    Ok(())
+}
+
+fn validate_snapshot_id(value: &str) -> Result<(), CommitmentError> {
+    if value.is_empty() || value.len() > MAX_COMMITMENT_SNAPSHOT_ID_BYTES {
+        return Err(CommitmentError::InvalidField {
+            field: "idena_snapshot_id".to_string(),
+            reason: format!("length must be 1..={MAX_COMMITMENT_SNAPSHOT_ID_BYTES} bytes"),
+        });
+    }
+    if !value
+        .as_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(CommitmentError::InvalidField {
+            field: "idena_snapshot_id".to_string(),
+            reason: "contains unsupported characters".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_hash_hex(field: &str, value: &str) -> Result<(), CommitmentError> {
+    if value.len() != HASH_HEX_BYTES || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CommitmentError::InvalidField {
+            field: field.to_string(),
+            reason: "must be exactly 32 bytes encoded as 64 hex characters".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_idena_address(value: &str) -> Result<(), CommitmentError> {
+    let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(CommitmentError::InvalidField {
+            field: "miner_idena_address".to_string(),
+            reason: "must start with 0x".to_string(),
+        });
+    };
+    if value.len() != IDENA_ADDRESS_BYTES
+        || hex.len() != 40
+        || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CommitmentError::InvalidField {
+            field: "miner_idena_address".to_string(),
+            reason: "must contain 20 bytes encoded as 40 hex characters".to_string(),
+        });
     }
     Ok(())
 }
@@ -257,7 +328,7 @@ mod tests {
 
     fn leaf(status: IdenaStatus) -> SnapshotLeaf {
         SnapshotLeaf {
-            idena_address: "0xabc".to_string(),
+            idena_address: "0x1111111111111111111111111111111111111111".to_string(),
             status,
             pubkey: "00".to_string(),
             validation_reward_score: 1,
@@ -283,14 +354,14 @@ mod tests {
             &commitment,
             PohwCommitmentValidationContext {
                 idena_snapshot_id: "day",
-                idena_score_root: "root",
+                idena_score_root: &"11".repeat(32),
                 miner_leaf: &leaf(IdenaStatus::Human),
-                identity_proof_root: "proof",
-                sharechain_tip: "tip",
-                sharechain_state_root: Some("state"),
-                payout_schedule_root: "payout",
+                identity_proof_root: &"22".repeat(32),
+                sharechain_tip: &"33".repeat(32),
+                sharechain_state_root: Some(&"44".repeat(32)),
+                payout_schedule_root: &"55".repeat(32),
                 vault_epoch_id: 1,
-                frost_vault_key_xonly: "key",
+                frost_vault_key_xonly: &"66".repeat(32),
             },
         )
         .unwrap();
@@ -303,14 +374,14 @@ mod tests {
             &commitment,
             PohwCommitmentValidationContext {
                 idena_snapshot_id: "day",
-                idena_score_root: "root",
+                idena_score_root: &"11".repeat(32),
                 miner_leaf: &leaf(IdenaStatus::Human),
-                identity_proof_root: "proof",
-                sharechain_tip: "tip",
-                sharechain_state_root: Some("state"),
+                identity_proof_root: &"22".repeat(32),
+                sharechain_tip: &"33".repeat(32),
+                sharechain_state_root: Some(&"44".repeat(32)),
                 payout_schedule_root: "wrong",
                 vault_epoch_id: 1,
-                frost_vault_key_xonly: "key",
+                frost_vault_key_xonly: &"66".repeat(32),
             },
         )
         .unwrap_err();
@@ -330,14 +401,14 @@ mod tests {
             &commitment,
             PohwCommitmentValidationContext {
                 idena_snapshot_id: "day",
-                idena_score_root: "root",
+                idena_score_root: &"11".repeat(32),
                 miner_leaf: &leaf(IdenaStatus::Human),
-                identity_proof_root: "proof",
-                sharechain_tip: "tip",
-                sharechain_state_root: Some("state"),
-                payout_schedule_root: "payout",
+                identity_proof_root: &"22".repeat(32),
+                sharechain_tip: &"33".repeat(32),
+                sharechain_state_root: Some(&"44".repeat(32)),
+                payout_schedule_root: &"55".repeat(32),
                 vault_epoch_id: 1,
-                frost_vault_key_xonly: "key",
+                frost_vault_key_xonly: &"66".repeat(32),
             },
         )
         .unwrap_err();
@@ -367,17 +438,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn commitment_fields_have_strict_protocol_bounds() {
+        let mut commitment = PohwCommitment::new_pohw1(commitment_params());
+        commitment.idena_snapshot_id = "a".repeat(MAX_COMMITMENT_SNAPSHOT_ID_BYTES + 1);
+        assert!(matches!(
+            commitment.validate_fields(),
+            Err(CommitmentError::InvalidField { ref field, .. })
+                if field == "idena_snapshot_id"
+        ));
+
+        let mut commitment = PohwCommitment::new_pohw1(commitment_params());
+        commitment.sharechain_tip = "not-a-hash".to_string();
+        assert!(matches!(
+            commitment.validate_fields(),
+            Err(CommitmentError::InvalidField { ref field, .. }) if field == "sharechain_tip"
+        ));
+    }
+
     fn commitment_params() -> PohwCommitmentParams {
         PohwCommitmentParams {
             idena_snapshot_id: "day".to_string(),
-            idena_score_root: "root".to_string(),
-            miner_idena_address: "0xABC".to_string(),
-            identity_proof_root: "proof".to_string(),
-            sharechain_tip: "tip".to_string(),
-            sharechain_state_root: Some("state".to_string()),
-            payout_schedule_root: "payout".to_string(),
+            idena_score_root: "11".repeat(32),
+            miner_idena_address: "0x1111111111111111111111111111111111111111".to_string(),
+            identity_proof_root: "22".repeat(32),
+            sharechain_tip: "33".repeat(32),
+            sharechain_state_root: Some("44".repeat(32)),
+            payout_schedule_root: "55".repeat(32),
             vault_epoch_id: 1,
-            frost_vault_key_xonly: "key".to_string(),
+            frost_vault_key_xonly: "66".repeat(32),
         }
     }
 }

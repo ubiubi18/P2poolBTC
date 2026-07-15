@@ -1,0 +1,12 @@
+[Unit]
+Description=Run a bounded Experiment 1 bootstrap mining attempt every ten minutes
+
+[Timer]
+OnCalendar=*:0/10
+AccuracySec=5s
+RandomizedDelaySec=30s
+Persistent=false
+Unit=pohw-bootstrap-miner.service
+
+[Install]
+WantedBy=timers.target

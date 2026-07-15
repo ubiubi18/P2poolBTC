@@ -17,9 +17,25 @@ IDLE_TIMEOUT_SECONDS="${POHW_STRATUM_IDLE_TIMEOUT_SECONDS:-900}"
 JOB_REFRESH_INTERVAL_SECONDS="${POHW_STRATUM_JOB_REFRESH_INTERVAL_SECONDS:-5}"
 DYNAMIC_MIN_SNAPSHOT_VOTERS="${POHW_STRATUM_DYNAMIC_MIN_SNAPSHOT_VOTERS:-3}"
 BITCOIN_RPC_URL="${POHW_BITCOIN_RPC_URL:-http://127.0.0.1:8332}"
+BITCOIN_EXPECTED_CHAIN="${POHW_BITCOIN_EXPECTED_CHAIN:-}"
 FORK_CHAIN_RPC_ADDR="${POHW_STRATUM_FORK_CHAIN_RPC_ADDR:-}"
 FORK_CHAIN_ACTIVATION_MANIFEST="${POHW_FORK_ACTIVATION_MANIFEST:-}"
+GOSSIP_NETWORK_ID="${POHW_GOSSIP_NETWORK_ID:-}"
+IDENA_ANCHOR_POLICY="${POHW_IDENA_ANCHOR_POLICY:-}"
+REQUIRE_IDENA_ANCHOR_POLICY="${POHW_REQUIRE_IDENA_ANCHOR_POLICY:-false}"
 FORK_CHAIN_MODE=false
+
+case "$REQUIRE_IDENA_ANCHOR_POLICY" in
+  true|false) ;;
+  *)
+    echo "POHW_REQUIRE_IDENA_ANCHOR_POLICY must be true or false." >&2
+    exit 1
+    ;;
+esac
+if [[ "$REQUIRE_IDENA_ANCHOR_POLICY" == "true" && -z "$IDENA_ANCHOR_POLICY" ]]; then
+  echo "POHW_IDENA_ANCHOR_POLICY is required by this launch profile." >&2
+  exit 1
+fi
 
 if [[ -n "$FORK_CHAIN_RPC_ADDR" || -n "$FORK_CHAIN_ACTIVATION_MANIFEST" ]]; then
   if [[ -z "$FORK_CHAIN_RPC_ADDR" || -z "$FORK_CHAIN_ACTIVATION_MANIFEST" ]]; then
@@ -115,8 +131,32 @@ configure_rpc_environment() {
 }
 
 if [[ "$FORK_CHAIN_MODE" != "true" && ( "$rpc_builder_count" -gt 0 || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
+  if [[ "$BITCOIN_EXPECTED_CHAIN" != "pohw" && "$BITCOIN_EXPECTED_CHAIN" != "main" ]]; then
+    echo "POHW_BITCOIN_EXPECTED_CHAIN must be pohw or main for Bitcoin RPC mining." >&2
+    exit 1
+  fi
   configure_rpc_environment
 fi
+
+if [[ "$FORK_CHAIN_MODE" != "true" && "$BITCOIN_EXPECTED_CHAIN" == "pohw" \
+  && ( "$rpc_builder_count" -gt 0 || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) \
+  && -z "$GOSSIP_NETWORK_ID" ]]; then
+  echo "POHW_GOSSIP_NETWORK_ID is required for pohw-chain mining." >&2
+  exit 1
+fi
+
+initialize_gossip_network() {
+  if [[ -z "$GOSSIP_NETWORK_ID" ]]; then
+    return 0
+  fi
+  if ! [[ "$GOSSIP_NETWORK_ID" =~ ^([0-9a-fA-F]{64})$ ]]; then
+    echo "POHW_GOSSIP_NETWORK_ID must be 32 bytes encoded as 64 hex characters." >&2
+    exit 1
+  fi
+  "$BIN" initialize-gossip-network \
+    --datadir "$DATADIR" \
+    --network-id "$GOSSIP_NETWORK_ID" >/dev/null
+}
 
 check_health_ready_for_rpc_job() {
   local health_file="${POHW_HEALTH_STATUS_FILE:-$DATADIR/health/status.json}"
@@ -350,12 +390,27 @@ if [[ "$FORK_CHAIN_MODE" != "true" && "${POHW_STRATUM_ALLOW_MAINNET_SUBMIT:-fals
 fi
 
 if [[ "$FORK_CHAIN_MODE" != "true" && ( "$rpc_builder_count" -gt 0 || "${POHW_STRATUM_AUTO_SUBMIT_BLOCKS:-false}" == "true" ) ]]; then
-  args+=(--rpc-url "$BITCOIN_RPC_URL")
+  args+=(--rpc-url "$BITCOIN_RPC_URL" --expected-rpc-chain "$BITCOIN_EXPECTED_CHAIN")
   if [[ -n "${POHW_BITCOIN_RPC_COOKIE_FILE:-}" ]]; then
     args+=(--rpc-cookie-file "$POHW_BITCOIN_RPC_COOKIE_FILE")
   fi
   if [[ "${POHW_BITCOIN_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
     args+=(--allow-remote-rpc)
+  fi
+fi
+
+if [[ -n "$IDENA_ANCHOR_POLICY" ]]; then
+  if [[ -z "${IDENA_API_KEY_FILE:-}" ]]; then
+    echo "IDENA_API_KEY_FILE is required when POHW_IDENA_ANCHOR_POLICY is set." >&2
+    exit 1
+  fi
+  args+=(
+    --idena-anchor-policy "$IDENA_ANCHOR_POLICY"
+    --idena-rpc-url "${IDENA_RPC_URL:-http://127.0.0.1:9009}"
+    --idena-api-key-file "$IDENA_API_KEY_FILE"
+  )
+  if [[ "${POHW_IDENA_RPC_ALLOW_REMOTE:-false}" == "true" ]]; then
+    args+=(--allow-remote-idena-rpc)
   fi
 fi
 
@@ -368,4 +423,5 @@ if [[ -n "${POHW_PEER_ADDRS:-}" ]]; then
   done
 fi
 
+initialize_gossip_network
 exec "$BIN" "${args[@]}"

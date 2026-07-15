@@ -1,5 +1,10 @@
 # Experiment 0 Fork-Chain Node
 
+This document describes the frozen coinbase-only predecessor only. The
+Bitcoin Core based successor, including all script paths and inherited UTXO
+spending, is specified in [Experiment 1](../EXPERIMENT-1.md). Experiment 0 is
+not upgraded in place.
+
 The Experiment 0 fork-chain node is the consensus and live-template source for
 the no-value PoHW test chain. It inherits one Bitcoin mainnet block hash as its
 parent, but it does not modify Bitcoin Core and it never submits fork blocks to
@@ -75,9 +80,10 @@ until the next Bitcoin retarget.
 
 The fork protocol uses bounded length-prefixed JSON frames. Every request carries
 the activation ID. Blocks received over RPC or P2P pass the same consensus
-validator before durable append. Loopback control RPC and configured fork-peer
-IPs may submit blocks. Unconfigured P2P clients may read and synchronize chain
-data, but block submission is rejected.
+validator before durable append. Loopback control RPC may mutate state without
+network authentication. Every non-loopback block, transaction, or mempool
+request must carry a timestamped, nonce-bound HMAC made with the protected fork
+P2P capability. Source IP is used only for rate limiting and never authorization.
 
 ## Prepare
 
@@ -107,18 +113,30 @@ POHW_FORK_RPC_BIND_ADDR=127.0.0.1:40408
 POHW_FORK_P2P_BIND_ADDR=<node-address>:40409
 POHW_FORK_ALLOW_NON_LOOPBACK_P2P=true
 POHW_FORK_PEER_ADDRS=<current-experiment-0-peer>:40409
+POHW_FORK_P2P_CAPABILITY_FILE=/var/lib/pohw-p2pool/fork-chain/fork-p2p.capability
 POHW_FORK_BOOTSTRAP_FIRST_SEED=false
 POHW_STRATUM_FORK_CHAIN_RPC_ADDR=127.0.0.1:40408
 POHW_ADMIT_PEER_WORK_TEMPLATES=true
 ```
 
+Create one capability for this isolated no-value experiment and distribute it
+to participants through a protected channel, never Git, issue comments, logs,
+or screenshots:
+
+```sh
+umask 077
+openssl rand -out /var/lib/pohw-p2pool/fork-chain/fork-p2p.capability 32
+chmod 600 /var/lib/pohw-p2pool/fork-chain/fork-p2p.capability
+```
+
 An outbound-only joining node may keep `POHW_FORK_P2P_BIND_ADDR` empty, but it
+still needs the same capability before connecting to a non-loopback peer. It
 must configure and reach an existing fork peer before mining. A deliberate
 single-node test belongs in `create-separate` mode. When P2P is public, allow
 only the selected fork P2P TCP port from announced participant IPs through the
-host firewall. Never expose the control RPC. The configured peer IPs form the
-temporary remote block-submission allowlist for the easy bootstrap phase; this
-is not a substitute for authenticated production peering.
+host firewall. Never expose the control RPC. The shared capability is an
+experimental authentication boundary, not identity-bound production peering;
+rotate it if any participant host is compromised.
 
 Only the designated coordinator may initialize the canonical first seed with:
 

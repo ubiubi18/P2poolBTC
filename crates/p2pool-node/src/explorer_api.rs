@@ -1,8 +1,9 @@
 use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
 use crate::fork_chain::{
     ForkAddressSummary, ForkAddressTransactionPage, ForkBlockPage, ForkBlockSummary,
-    ForkChainClient, ForkChainStatus, ForkTransactionDetail, ForkTransactionPage, ForkUtxoPage,
+    ForkChainStatus, ForkTransactionDetail, ForkTransactionPage, ForkUtxoPage,
 };
+use crate::fork_explorer::ExplorerForkClient;
 use crate::local_node;
 use crate::{
     MAINNET_HANDOFF_MAX_SHARE_AGE_SECONDS, MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS,
@@ -128,6 +129,9 @@ pub(crate) struct ExplorerForkStatus {
     pub bootstrap_handoff_hashrate_hps: u64,
     pub estimated_hashrate_hps: String,
     pub blocks_until_bitcoin_retarget: Option<u64>,
+    pub transaction_upgrade_id: Option<String>,
+    pub transaction_activation_height: Option<u64>,
+    pub mempool_transaction_count: usize,
     pub transaction_consensus: String,
 }
 
@@ -151,6 +155,9 @@ impl From<ForkChainStatus> for ExplorerForkStatus {
             bootstrap_handoff_hashrate_hps: status.bootstrap_handoff_hashrate_hps,
             estimated_hashrate_hps: status.estimated_hashrate_hps,
             blocks_until_bitcoin_retarget: status.blocks_until_bitcoin_retarget,
+            transaction_upgrade_id: status.transaction_upgrade_id,
+            transaction_activation_height: status.transaction_activation_height,
+            mempool_transaction_count: status.mempool_transaction_count,
             transaction_consensus: status.transaction_consensus,
         }
     }
@@ -220,7 +227,7 @@ pub(crate) struct ExplorerSharePage {
 pub(crate) async fn build_overview(
     datadir: &Path,
     snapshot_dir: Option<&Path>,
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     bitcoin_index_client: Option<&BitcoinExplorerIndexClient>,
 ) -> Result<ExplorerOverview> {
     let replay_datadir = datadir.to_path_buf();
@@ -317,6 +324,27 @@ pub(crate) async fn build_overview(
     if bitcoin_index_client.is_some_and(BitcoinExplorerIndexClient::is_remote) {
         limitations.push("Bitcoin history uses an external HTTPS Esplora provider; searched hashes and addresses are visible to that provider and its availability limits apply".to_string());
     }
+    let experiment_1 = fork.status.as_ref().is_some_and(|status| {
+        status.chain_name == "pohw" && status.transaction_consensus == "bitcoin-core-v31.1-full"
+    });
+    if experiment_1 {
+        limitations.push(
+            "Experiment 1 block and transaction detail comes from the host Core txindex; fork address history is unavailable until a separate bounded address index is configured"
+                .to_string(),
+        );
+    }
+    let safety_boundaries = if experiment_1 {
+        vec![
+            "Experiment 1 uses the pinned Bitcoin Core v31.1 consensus engine and permits standard fork transactions, including explicitly replay-protected inherited-input spends".to_string(),
+            "Fork coins have no promised value; never reuse or import a Bitcoin mainnet private key for this experiment".to_string(),
+            "The optional host Bitcoin history index is not required on participant nodes".to_string(),
+        ]
+    } else {
+        vec![
+            "Experiment 0 consensus admits coinbase transactions only; the explorer fully decodes accepted fork transactions without enabling inherited-value spending".to_string(),
+            "The optional host Bitcoin history index is not required on participant nodes".to_string(),
+        ]
+    };
     Ok(ExplorerOverview {
         api_version: EXPLORER_API_VERSION.to_string(),
         generated_at_unix: current_unix_timestamp()?,
@@ -331,15 +359,12 @@ pub(crate) async fn build_overview(
         ),
         idena,
         limitations,
-        safety_boundaries: vec![
-            "Experiment 0 consensus admits coinbase transactions only; the explorer fully decodes accepted fork transactions without enabling inherited-value spending".to_string(),
-            "The optional host Bitcoin history index is not required on participant nodes".to_string(),
-        ],
+        safety_boundaries,
     })
 }
 
 pub(crate) async fn fork_block_page(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     cursor: Option<String>,
     limit: usize,
 ) -> Result<ExplorerForkBlockPage> {
@@ -370,7 +395,7 @@ pub(crate) async fn fork_block_page(
 }
 
 pub(crate) async fn fork_block_summary(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     block_hash: &str,
 ) -> Result<Option<ForkBlockSummary>> {
     validate_hash(block_hash, "fork block hash")?;
@@ -381,7 +406,7 @@ pub(crate) async fn fork_block_summary(
 }
 
 pub(crate) async fn fork_block_at_height(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     height: u64,
 ) -> Result<Option<ForkBlockSummary>> {
     let Some(client) = fork_client else {
@@ -394,7 +419,7 @@ pub(crate) async fn fork_block_at_height(
 }
 
 pub(crate) async fn fork_block_transactions(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     block_hash: &str,
     cursor: usize,
     limit: usize,
@@ -414,7 +439,7 @@ pub(crate) async fn fork_block_transactions(
 }
 
 pub(crate) async fn fork_transaction_detail(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     txid: &str,
 ) -> Result<Option<ForkTransactionDetail>> {
     validate_hash(txid, "fork transaction id")?;
@@ -425,7 +450,7 @@ pub(crate) async fn fork_transaction_detail(
 }
 
 pub(crate) async fn fork_address_summary(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     address: &str,
 ) -> Result<Option<ForkAddressSummary>> {
     let address = validate_bitcoin_address(address)?;
@@ -436,7 +461,7 @@ pub(crate) async fn fork_address_summary(
 }
 
 pub(crate) async fn fork_address_transactions(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     address: &str,
     cursor: usize,
     limit: usize,
@@ -457,7 +482,7 @@ pub(crate) async fn fork_address_transactions(
 }
 
 pub(crate) async fn fork_address_utxos(
-    fork_client: Option<&ForkChainClient>,
+    fork_client: Option<&ExplorerForkClient>,
     address: &str,
     cursor: usize,
     limit: usize,
@@ -1066,7 +1091,7 @@ mod tests {
     #[test]
     fn public_fork_status_uses_camel_case_without_changing_wire_status() {
         let status = ExplorerForkStatus::from(ForkChainStatus {
-            protocol_version: 2,
+            protocol_version: 3,
             chain_name: "pohw-test".to_string(),
             activation_id: "a".repeat(64),
             inherited_tip_height: 100,
@@ -1083,6 +1108,9 @@ mod tests {
             bootstrap_handoff_hashrate_hps: 1_000,
             estimated_hashrate_hps: "500".to_string(),
             blocks_until_bitcoin_retarget: None,
+            transaction_upgrade_id: Some("d".repeat(64)),
+            transaction_activation_height: Some(102),
+            mempool_transaction_count: 1,
             transaction_consensus: "coinbase_only".to_string(),
         });
         let encoded = serde_json::to_string(&status).unwrap();

@@ -139,6 +139,14 @@
       "cid": "bafkreihv375yxvslxtmzq6dijulqybflhqfugt3q3xixjijes5lwpknm74",
       "sha256": "f5dffb8bd64bbcd99878684d170c04ab3c0b434f70ddd174a124975767a9acff"
     },
+    "runtimeIntegrationTestOverlay": {
+      "path": "compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go",
+      "targetPath": "vm/wasm/pohw_governance_contract_runtime_gate_test.go",
+      "testName": "TestGovernanceContractProductionRuntimeDeterminism",
+      "size": 13048,
+      "cid": "bafkreic5nitmd2uv2abkmmq3sbkta7attqlazesc6bbcnwmqouhdtyjj2m",
+      "sha256": "5d6a26c1ea95d002a6321b9055307c139c160c9242f04226d990750e39e129d3"
+    },
     "parameterSet": {
       "path": "governance-testnet-parameters-v1.json",
       "jsonSha256": "ac5937690d2c48d07e90bf323beb3d06d21d4bca3f429bf1c0ca15b178663ee8",

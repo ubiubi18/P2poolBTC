@@ -2,6 +2,7 @@ pub mod commitment;
 pub mod dkg_transport;
 pub mod fork;
 pub mod gossip;
+pub mod idena_anchor;
 pub mod ledger;
 pub mod merkle;
 pub mod payout;

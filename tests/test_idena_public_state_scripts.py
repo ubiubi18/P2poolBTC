@@ -1,6 +1,7 @@
 import os
 import py_compile
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,7 +32,14 @@ class IdenaPublicStateScriptsTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
         for script in (RRSYNC_GUARD, LOCK_HELPER):
-            py_compile.compile(str(script), doraise=True)
+            with self.subTest(script=script.name), tempfile.TemporaryDirectory(
+                prefix="idena-script-compile-"
+            ) as temp:
+                py_compile.compile(
+                    str(script),
+                    cfile=str(Path(temp) / f"{script.name}.pyc"),
+                    doraise=True,
+                )
 
     def test_runtime_locks_live_only_under_run_lock(self) -> None:
         for script in (EXPORTER, IMPORTER):

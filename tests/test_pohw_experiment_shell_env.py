@@ -1197,6 +1197,118 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to reuse existing output directory", result.stderr)
 
+    def test_register_miner_wrapper_supports_two_phase_registry_flow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-registry-wrapper-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            args_out = root / "args.txt"
+            fake = root / "p2pool-node"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$@\" > \"$POHW_FAKE_ARGS_OUT\"\n"
+                "if [[ \" $* \" == *' --registry-anchor-file '* ]]; then\n"
+                "  printf '{\"status\":\"needs_idena_signature\",\"idena_ownership_challenge\":\"anchored\"}\\n'\n"
+                "else\n"
+                "  printf '{\"status\":\"needs_registry_transaction\",\"registration_commitment\":\"%s\"}\\n' \"$(printf 'aa%.0s' {1..32})\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        f"POHW_WORKDIR={REPO_ROOT}",
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        f"POHW_P2POOL_NODE_BIN={fake}",
+                        "POHW_MINER_ID=alice",
+                        "POHW_IDENA_ADDRESS=0x1111111111111111111111111111111111111111",
+                        "POHW_MINER_REGISTRY_EXPERIMENT_ID=p2poolbtc-experiment-1",
+                        "",
+                    ]
+                ),
+            )
+            env = dict(os.environ)
+            env["POHW_FAKE_ARGS_OUT"] = str(args_out)
+            commitment = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "scripts" / "pohw-experiment-register-miner.sh"),
+                    str(env_file),
+                    "--output-dir",
+                    str(root / "commitment-output"),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            commitment_args = args_out.read_text(encoding="utf-8")
+
+            anchor = root / "registry-anchor.json"
+            anchor.write_text("{}\n", encoding="utf-8")
+            anchored = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "scripts" / "pohw-experiment-register-miner.sh"),
+                    str(env_file),
+                    "--registry-anchor-file",
+                    str(anchor),
+                    "--output-dir",
+                    str(root / "anchor-output"),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            anchored_args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(commitment.returncode, 0, commitment.stderr)
+        self.assertIn("--registry-experiment-id\np2poolbtc-experiment-1", commitment_args)
+        self.assertNotIn("--registry-anchor-file", commitment_args)
+        self.assertIn("call registerMiner", commitment.stderr)
+        self.assertEqual(anchored.returncode, 0, anchored.stderr)
+        self.assertIn("--registry-anchor-file\n" + str(anchor), anchored_args)
+        self.assertIn("sign idena_ownership_challenge", anchored.stderr)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
+    def test_register_miner_rejects_symlinked_registry_anchor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-registry-anchor-link-") as temp:
+            root = Path(temp)
+            env_file = root / ".pohw-experiment.env"
+            target = root / "anchor.json"
+            link = root / "anchor-link.json"
+            target.write_text("{}\n", encoding="utf-8")
+            os.symlink(target, link)
+            self.write_env(
+                env_file,
+                "\n".join(
+                    [
+                        f"POHW_WORKDIR={REPO_ROOT}",
+                        f"POHW_DATADIR={root / 'datadir'}",
+                        f"POHW_EXPERIMENT_OUTPUT_ROOT={root / 'output'}",
+                        "POHW_MINER_ID=alice",
+                        "POHW_IDENA_ADDRESS=0x1111111111111111111111111111111111111111",
+                        "POHW_MINER_REGISTRY_EXPERIMENT_ID=p2poolbtc-experiment-1",
+                        f"POHW_MINER_REGISTRY_ANCHOR_FILE={link}",
+                        "",
+                    ]
+                ),
+            )
+
+            result = self.run_script(
+                REPO_ROOT / "scripts" / "pohw-experiment-register-miner.sh",
+                env_file,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("regular non-symlink file", result.stderr)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_wrappers_refuse_symlinked_output_parent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-output-parent-symlink-") as temp:

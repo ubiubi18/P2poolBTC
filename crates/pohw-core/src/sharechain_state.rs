@@ -1,3 +1,8 @@
+use crate::commitment::CommitmentError;
+use crate::idena_anchor::{
+    IdenaAnchorError, IdenaAnchorPolicyV2, SharechainCheckpointAnchorV1,
+    CHECKPOINT_MIN_INTERVAL_BLOCKS, ZERO_SHARE_PARENT_HASH,
+};
 use crate::ledger::{ClaimLedger, LedgerError};
 use crate::payout::{build_payout_schedule, ParticipantAccount, PayoutError, PayoutSchedule};
 use crate::sharechain::{
@@ -9,9 +14,6 @@ use crate::withdrawal::{
 use crate::{canonical_json, hash_hex, sha256_tagged, Sats, Score};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-const ZERO_SHARE_PARENT_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyOutcome {
@@ -25,7 +27,11 @@ pub struct SharechainReplayState {
     accepted_bitcoin_work_template_prefixes: BTreeMap<String, String>,
     bitcoin_work_templates: BTreeMap<String, BitcoinWorkTemplate>,
     registrations: BTreeMap<String, MinerRegistration>,
+    #[serde(default)]
+    sharechain_checkpoints: BTreeMap<u32, SharechainCheckpointAnchorV1>,
     shares: BTreeMap<String, ShareNode>,
+    #[serde(default)]
+    share_hash_by_work_hash: BTreeMap<String, String>,
     #[serde(default)]
     children_by_parent: BTreeMap<String, BTreeSet<String>>,
     active_share_hashes: BTreeSet<String>,
@@ -61,6 +67,9 @@ pub struct SharechainReplaySummary {
     pub share_miner_count: usize,
     pub active_share_score_total: Score,
     pub best_share_tip: Option<String>,
+    pub finalized_checkpoint_count: usize,
+    pub latest_checkpoint_round: Option<u32>,
+    pub latest_checkpoint_tip: Option<String>,
     pub snapshot_vote_root_count: usize,
     pub proposed_payout_schedule_count: usize,
     pub withdrawal_request_count: usize,
@@ -96,6 +105,7 @@ struct AccountingStateRootMaterial {
     active_share_score_total: Score,
     hashrate_scores: BTreeMap<String, Score>,
     registrations: BTreeMap<String, MinerRegistration>,
+    sharechain_checkpoints: BTreeMap<u32, SharechainCheckpointAnchorV1>,
     snapshot_votes: BTreeMap<String, BTreeSet<String>>,
     proposed_payout_schedules: BTreeMap<String, PayoutSchedule>,
     withdrawal_requests: BTreeMap<String, WithdrawalRequest>,
@@ -124,6 +134,25 @@ struct ShareNode {
 pub enum SharechainReplayError {
     #[error("conflicting registration for miner {0}")]
     ConflictingRegistration(String),
+    #[error("Idena anchor policy rejected the message: {0}")]
+    IdenaAnchorPolicy(#[from] IdenaAnchorError),
+    #[error("miner {0} has no contract-anchored registration")]
+    UnanchoredMinerRegistration(String),
+    #[error("Bitcoin work template {0} has no finalized Idena block anchor")]
+    UnanchoredBitcoinWorkTemplate(String),
+    #[error("Bitcoin work template anchor predates miner registration")]
+    TemplateAnchorBeforeRegistration,
+    #[error("bootstrap share reuses Idena anchor {anchor_height} for miner {miner_id}")]
+    DuplicateBootstrapAnchor {
+        miner_id: String,
+        anchor_height: u64,
+    },
+    #[error("bootstrap share Idena anchor must advance beyond its anchored parent")]
+    NonIncreasingBootstrapAnchor,
+    #[error("bootstrap share references missing anchored parent {0}")]
+    MissingAnchoredShareParent(String),
+    #[error("bootstrap share parent references missing Bitcoin work template {0}")]
+    MissingAnchoredParentBitcoinWorkTemplate(String),
     #[error("share references unknown miner {0}")]
     UnknownShareMiner(String),
     #[error("Bitcoin work template references unknown miner {0}")]
@@ -138,6 +167,27 @@ pub enum SharechainReplayError {
     ShareBitcoinWorkTemplateMismatch(String),
     #[error("conflicting share for hash {0}")]
     ConflictingShare(String),
+    #[error("Bitcoin work hash {work_hash} is already credited to share {existing_share_hash}")]
+    DuplicateShareWork {
+        work_hash: String,
+        existing_share_hash: String,
+    },
+    #[error("checkpoint round {0} conflicts with an existing finalized checkpoint")]
+    ConflictingCheckpoint(u32),
+    #[error("checkpoint round {actual} must follow finalized round {expected_parent}")]
+    NonSequentialCheckpoint { expected_parent: u32, actual: u32 },
+    #[error("checkpoint parent share tip does not match the previous finalized checkpoint")]
+    CheckpointParentMismatch,
+    #[error("checkpoint finalization block does not satisfy the minimum interval")]
+    CheckpointIntervalNotElapsed,
+    #[error("checkpoint registered miner set does not match anchored sharechain registrations")]
+    CheckpointRegistrationSetMismatch,
+    #[error("checkpoint references unknown or unresolved share tip {0}")]
+    UnknownCheckpointShareTip(String),
+    #[error("checkpoint share height or cumulative score does not match local replay")]
+    CheckpointShareMetadataMismatch,
+    #[error("checkpoint share tip does not descend from the previous finalized checkpoint")]
+    CheckpointNotDescendant,
     #[error("snapshot vote references unknown miner {0}")]
     UnknownSnapshotVoter(String),
     #[error("hashrate score overflow for miner {0}")]
@@ -170,6 +220,8 @@ pub enum SharechainReplayError {
     WithdrawalBatchRequestMismatch { request_id: String },
     #[error("invalid sharechain signature: {0}")]
     InvalidSharechainSignature(#[from] SharechainError),
+    #[error("invalid PoHW commitment: {0}")]
+    InvalidCommitment(#[from] CommitmentError),
     #[error("invalid withdrawal request: {0}")]
     InvalidWithdrawal(#[from] WithdrawalError),
     #[error("invalid payout schedule: {0}")]
@@ -179,6 +231,54 @@ pub enum SharechainReplayError {
 }
 
 impl SharechainReplayState {
+    pub fn validate_idena_anchor_policy(
+        &self,
+        message: &SharechainMessage,
+        policy: &IdenaAnchorPolicyV2,
+    ) -> Result<(), SharechainReplayError> {
+        policy.validate()?;
+        match message {
+            SharechainMessage::MinerRegistration(registration) => {
+                let anchor = registration.require_registry_anchor().map_err(|_| {
+                    SharechainReplayError::UnanchoredMinerRegistration(
+                        registration.miner_id.to_ascii_lowercase(),
+                    )
+                })?;
+                policy.validate_registry_anchor(anchor)?;
+            }
+            SharechainMessage::BitcoinWorkTemplate(template) => {
+                let miner_id = template.miner_id.to_ascii_lowercase();
+                let registration = self.registrations.get(&miner_id).ok_or_else(|| {
+                    SharechainReplayError::UnknownBitcoinWorkTemplateMiner(miner_id.clone())
+                })?;
+                let registry_anchor = registration.require_registry_anchor().map_err(|_| {
+                    SharechainReplayError::UnanchoredMinerRegistration(miner_id.clone())
+                })?;
+                policy.validate_registry_anchor(registry_anchor)?;
+                let block_anchor = template.require_idena_anchor().map_err(|_| {
+                    SharechainReplayError::UnanchoredBitcoinWorkTemplate(
+                        template.template_hash.to_ascii_lowercase(),
+                    )
+                })?;
+                let policy_hash = policy.commitment_hash()?;
+                if template.require_idena_anchor_policy_hash()? != policy_hash {
+                    return Err(IdenaAnchorError::PolicyCommitmentMismatch.into());
+                }
+                if block_anchor.height < registry_anchor.registration_block {
+                    return Err(SharechainReplayError::TemplateAnchorBeforeRegistration);
+                }
+            }
+            SharechainMessage::Share(share) => {
+                self.validate_anchored_share(share, policy)?;
+            }
+            SharechainMessage::SharechainCheckpoint(checkpoint) => {
+                policy.validate_checkpoint_anchor(checkpoint)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn apply_message(
         &mut self,
         message: &SharechainMessage,
@@ -201,9 +301,19 @@ impl SharechainReplayState {
                     .registrations
                     .get(&miner_id)
                     .ok_or_else(|| SharechainReplayError::UnknownShareMiner(miner_id.clone()))?;
-                share.verify_mining_signature(&registration.mining_pubkey_hex)?;
+                let template_hash = share.bitcoin_template_hash.to_ascii_lowercase();
+                let template = self.bitcoin_work_templates.get(&template_hash).ok_or(
+                    SharechainReplayError::UnknownShareBitcoinWorkTemplate(template_hash),
+                )?;
+                share.verify_mining_signature_for_template(
+                    &registration.mining_pubkey_hex,
+                    template,
+                )?;
                 self.validate_share_bitcoin_work_template(share)?;
                 self.apply_share(share)?;
+            }
+            SharechainMessage::SharechainCheckpoint(checkpoint) => {
+                self.apply_sharechain_checkpoint(checkpoint)?;
             }
             SharechainMessage::SnapshotVote(vote) => {
                 self.apply_snapshot_vote(vote)?;
@@ -217,7 +327,8 @@ impl SharechainReplayState {
             SharechainMessage::WithdrawalBatch(batch) => {
                 self.apply_withdrawal_batch(batch)?;
             }
-            SharechainMessage::PohwCommitment(_) => {
+            SharechainMessage::PohwCommitment(commitment) => {
+                commitment.validate_fields()?;
                 // Commitment verification depends on the fork-chain block that carried it.
                 // The sharechain log records it, but replay does not credit funds from it.
             }
@@ -273,6 +384,15 @@ impl SharechainReplayState {
             share_miner_count: self.hashrate_scores.len(),
             active_share_score_total: self.active_share_score_total,
             best_share_tip: self.best_share_tip.clone(),
+            finalized_checkpoint_count: self.sharechain_checkpoints.len(),
+            latest_checkpoint_round: self
+                .sharechain_checkpoints
+                .last_key_value()
+                .map(|(round, _)| *round),
+            latest_checkpoint_tip: self
+                .sharechain_checkpoints
+                .last_key_value()
+                .map(|(_, checkpoint)| checkpoint.share_tip_hash.clone()),
             snapshot_vote_root_count: self.snapshot_votes.len(),
             proposed_payout_schedule_count: self.proposed_payout_schedules.len(),
             withdrawal_request_count: self.withdrawal_requests.len(),
@@ -309,6 +429,50 @@ impl SharechainReplayState {
             }
         }
         Ok(template_hash)
+    }
+
+    pub fn accept_bitcoin_work_template(
+        &mut self,
+        template: &BitcoinWorkTemplate,
+    ) -> Result<String, SharechainReplayError> {
+        template.verify_template_hash()?;
+        let template_hash = template.template_hash.to_ascii_lowercase();
+        let normalized_prefix = template.header_prefix_hex.to_ascii_lowercase();
+        if let Some(existing_prefix) = self
+            .accepted_bitcoin_work_template_prefixes
+            .insert(template_hash.clone(), normalized_prefix.clone())
+        {
+            if existing_prefix != normalized_prefix {
+                return Err(SharechainReplayError::ConflictingBitcoinWorkTemplate(
+                    template_hash,
+                ));
+            }
+        }
+        Ok(template_hash)
+    }
+
+    pub fn validate_target_bound_message(
+        &self,
+        message: &SharechainMessage,
+    ) -> Result<(), SharechainReplayError> {
+        match message {
+            SharechainMessage::BitcoinWorkTemplate(template) => template.require_target_bound()?,
+            SharechainMessage::Share(share) => {
+                let template_hash = share.bitcoin_template_hash.to_ascii_lowercase();
+                let template =
+                    self.bitcoin_work_templates
+                        .get(&template_hash)
+                        .ok_or_else(|| {
+                            SharechainReplayError::UnknownShareBitcoinWorkTemplate(
+                                template_hash.clone(),
+                            )
+                        })?;
+                template.require_target_bound()?;
+                template.verify_assigned_share_target(&share.target)?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn hashrate_scores(&self) -> &BTreeMap<String, Score> {
@@ -369,6 +533,12 @@ impl SharechainReplayState {
 
     pub fn best_share_tip(&self) -> Option<&str> {
         self.best_share_tip.as_deref()
+    }
+
+    pub fn latest_sharechain_checkpoint(&self) -> Option<&SharechainCheckpointAnchorV1> {
+        self.sharechain_checkpoints
+            .last_key_value()
+            .map(|(_, checkpoint)| checkpoint)
     }
 
     pub fn best_share_height(&self) -> Option<u64> {
@@ -586,6 +756,7 @@ impl SharechainReplayState {
                     (miner_id.clone(), registration.clone().normalized())
                 })
                 .collect(),
+            sharechain_checkpoints: self.sharechain_checkpoints.clone(),
             snapshot_votes: self
                 .snapshot_votes
                 .iter()
@@ -688,12 +859,14 @@ impl SharechainReplayState {
         registration.mining_signature_hex = registration.mining_signature_hex.to_ascii_lowercase();
 
         if let Some(existing) = self.registrations.get(&registration.miner_id) {
-            if existing != &registration {
+            if existing == &registration {
+                return Ok(());
+            }
+            if !is_valid_registry_registration_upgrade(existing, &registration) {
                 return Err(SharechainReplayError::ConflictingRegistration(
                     registration.miner_id,
                 ));
             }
-            return Ok(());
         }
         self.registrations
             .insert(registration.miner_id.clone(), registration);
@@ -755,7 +928,182 @@ impl SharechainReplayState {
                 template_hash,
             ));
         }
+        template.verify_assigned_share_target(&share.target)?;
         Ok(())
+    }
+
+    fn validate_anchored_share(
+        &self,
+        share: &Share,
+        policy: &IdenaAnchorPolicyV2,
+    ) -> Result<(), SharechainReplayError> {
+        let miner_id = share.miner_id.to_ascii_lowercase();
+        let registration = self
+            .registrations
+            .get(&miner_id)
+            .ok_or_else(|| SharechainReplayError::UnknownShareMiner(miner_id.clone()))?;
+        let registry_anchor = registration
+            .require_registry_anchor()
+            .map_err(|_| SharechainReplayError::UnanchoredMinerRegistration(miner_id.clone()))?;
+        policy.validate_registry_anchor(registry_anchor)?;
+
+        let template_hash = share.bitcoin_template_hash.to_ascii_lowercase();
+        let template = self
+            .bitcoin_work_templates
+            .get(&template_hash)
+            .ok_or_else(|| {
+                SharechainReplayError::UnknownShareBitcoinWorkTemplate(template_hash.clone())
+            })?;
+        let anchor = template.require_idena_anchor().map_err(|_| {
+            SharechainReplayError::UnanchoredBitcoinWorkTemplate(template_hash.clone())
+        })?;
+        if anchor.height < registry_anchor.registration_block {
+            return Err(SharechainReplayError::TemplateAnchorBeforeRegistration);
+        }
+
+        if !policy.bootstrap_limits_active(template.bitcoin_header_version()?) {
+            return Ok(());
+        }
+        for node in self.shares.values() {
+            if !node.share.miner_id.eq_ignore_ascii_case(&miner_id) {
+                continue;
+            }
+            let Some(existing_template) = self
+                .bitcoin_work_templates
+                .get(&node.share.bitcoin_template_hash.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            if existing_template
+                .idena_anchor
+                .as_ref()
+                .is_some_and(|existing| existing == anchor)
+            {
+                return Err(SharechainReplayError::DuplicateBootstrapAnchor {
+                    miner_id,
+                    anchor_height: anchor.height,
+                });
+            }
+        }
+
+        let parent_hash = share.parent_share_hash.to_ascii_lowercase();
+        if parent_hash == ZERO_SHARE_PARENT_HASH {
+            return Ok(());
+        }
+        let parent = self.shares.get(&parent_hash).ok_or_else(|| {
+            SharechainReplayError::MissingAnchoredShareParent(parent_hash.clone())
+        })?;
+        let parent_template = self
+            .bitcoin_work_templates
+            .get(&parent.share.bitcoin_template_hash.to_ascii_lowercase())
+            .ok_or_else(|| {
+                SharechainReplayError::MissingAnchoredParentBitcoinWorkTemplate(
+                    parent.share.bitcoin_template_hash.to_ascii_lowercase(),
+                )
+            })?;
+        if let Some(parent_anchor) = parent_template.idena_anchor.as_ref() {
+            if anchor.height <= parent_anchor.height {
+                return Err(SharechainReplayError::NonIncreasingBootstrapAnchor);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_sharechain_checkpoint(
+        &mut self,
+        checkpoint: &SharechainCheckpointAnchorV1,
+    ) -> Result<(), SharechainReplayError> {
+        let checkpoint = checkpoint.clone().normalized();
+        checkpoint.validate()?;
+        if let Some(existing) = self.sharechain_checkpoints.get(&checkpoint.round) {
+            return if existing == &checkpoint {
+                Ok(())
+            } else {
+                Err(SharechainReplayError::ConflictingCheckpoint(
+                    checkpoint.round,
+                ))
+            };
+        }
+
+        let previous = self.sharechain_checkpoints.last_key_value();
+        let expected_round = previous
+            .map(|(round, _)| round.saturating_add(1))
+            .unwrap_or(1);
+        if checkpoint.round != expected_round {
+            return Err(SharechainReplayError::NonSequentialCheckpoint {
+                expected_parent: expected_round.saturating_sub(1),
+                actual: checkpoint.round,
+            });
+        }
+        match previous {
+            None if checkpoint.parent_checkpoint_tip != ZERO_SHARE_PARENT_HASH => {
+                return Err(SharechainReplayError::CheckpointParentMismatch);
+            }
+            Some((_, prior)) => {
+                if checkpoint.parent_checkpoint_tip != prior.share_tip_hash {
+                    return Err(SharechainReplayError::CheckpointParentMismatch);
+                }
+                if checkpoint.finalization_block
+                    < prior
+                        .finalization_block
+                        .checked_add(CHECKPOINT_MIN_INTERVAL_BLOCKS)
+                        .ok_or(SharechainReplayError::CheckpointIntervalNotElapsed)?
+                {
+                    return Err(SharechainReplayError::CheckpointIntervalNotElapsed);
+                }
+            }
+            None => {}
+        }
+
+        let registered_miners = self.registrations.keys().cloned().collect::<Vec<_>>();
+        if registered_miners != checkpoint.registered_miners {
+            return Err(SharechainReplayError::CheckpointRegistrationSetMismatch);
+        }
+        for miner_id in &checkpoint.registered_miners {
+            let registration = self
+                .registrations
+                .get(miner_id)
+                .ok_or(SharechainReplayError::CheckpointRegistrationSetMismatch)?;
+            let registry_anchor = registration
+                .require_registry_anchor()
+                .map_err(|_| SharechainReplayError::CheckpointRegistrationSetMismatch)?;
+            if !registry_anchor
+                .contract_address
+                .eq_ignore_ascii_case(&checkpoint.contract_address)
+                || !registry_anchor
+                    .experiment_id
+                    .eq_ignore_ascii_case(&checkpoint.experiment_id)
+            {
+                return Err(SharechainReplayError::CheckpointRegistrationSetMismatch);
+            }
+        }
+
+        let checkpoint_tip = self
+            .shares
+            .get(&checkpoint.share_tip_hash)
+            .filter(|node| node.cumulative_score.is_some())
+            .ok_or_else(|| {
+                SharechainReplayError::UnknownCheckpointShareTip(checkpoint.share_tip_hash.clone())
+            })?;
+        let expected_score = checkpoint
+            .cumulative_score
+            .parse::<Score>()
+            .map_err(|_| SharechainReplayError::CheckpointShareMetadataMismatch)?;
+        if checkpoint_tip.height != checkpoint.share_height
+            || checkpoint_tip.cumulative_score != Some(expected_score)
+        {
+            return Err(SharechainReplayError::CheckpointShareMetadataMismatch);
+        }
+        if let Some((_, prior)) = previous {
+            if !self.share_descends_from(&checkpoint.share_tip_hash, &prior.share_tip_hash) {
+                return Err(SharechainReplayError::CheckpointNotDescendant);
+            }
+        }
+
+        let finalized_tip = checkpoint.share_tip_hash.clone();
+        self.sharechain_checkpoints
+            .insert(checkpoint.round, checkpoint);
+        self.rebuild_active_branch(&finalized_tip)
     }
 
     fn apply_share(&mut self, share: &Share) -> Result<(), SharechainReplayError> {
@@ -766,6 +1114,14 @@ impl SharechainReplayState {
                 return Err(SharechainReplayError::ConflictingShare(share_hash));
             }
             return Ok(());
+        }
+
+        let work_hash = share.work_hash.to_ascii_lowercase();
+        if let Some(existing_share_hash) = self.share_hash_by_work_hash.get(&work_hash) {
+            return Err(SharechainReplayError::DuplicateShareWork {
+                work_hash,
+                existing_share_hash: existing_share_hash.clone(),
+            });
         }
 
         let parent_share_hash = share.parent_share_hash.to_ascii_lowercase();
@@ -782,7 +1138,9 @@ impl SharechainReplayState {
             .entry(parent_share_hash)
             .or_default()
             .insert(share_hash.clone());
-        self.resolve_share_and_descendants(&share_hash)
+        self.resolve_share_and_descendants(&share_hash)?;
+        self.share_hash_by_work_hash.insert(work_hash, share_hash);
+        Ok(())
     }
 
     fn resolve_share_and_descendants(
@@ -839,6 +1197,12 @@ impl SharechainReplayState {
     }
 
     fn consider_resolved_share(&mut self, share_hash: &str) -> Result<(), SharechainReplayError> {
+        if self.latest_sharechain_checkpoint().is_some() {
+            // Post-checkpoint shares remain pending until a later on-chain round
+            // finalizes an exact descendant. This keeps uncheckpointed work out
+            // of payout accounting even when it has a higher cumulative score.
+            return Ok(());
+        }
         let node = self
             .shares
             .get(share_hash)
@@ -881,6 +1245,28 @@ impl SharechainReplayState {
         }
 
         self.rebuild_active_branch(share_hash)
+    }
+
+    fn share_descends_from(&self, candidate_hash: &str, ancestor_hash: &str) -> bool {
+        let mut cursor = Some(candidate_hash.to_ascii_lowercase());
+        let ancestor_hash = ancestor_hash.to_ascii_lowercase();
+        let mut seen = BTreeSet::new();
+        while let Some(share_hash) = cursor {
+            if share_hash == ancestor_hash {
+                return true;
+            }
+            if !seen.insert(share_hash.clone()) {
+                return false;
+            }
+            let Some(node) = self.shares.get(&share_hash) else {
+                return false;
+            };
+            if node.parent_share_hash == ZERO_SHARE_PARENT_HASH {
+                return false;
+            }
+            cursor = Some(node.parent_share_hash.clone());
+        }
+        false
     }
 
     fn rebuild_active_branch(&mut self, best_share_tip: &str) -> Result<(), SharechainReplayError> {
@@ -926,6 +1312,19 @@ impl SharechainReplayState {
     }
 
     pub fn rebuild_derived_share_state(&mut self) -> Result<(), SharechainReplayError> {
+        self.share_hash_by_work_hash.clear();
+        for (share_hash, node) in &self.shares {
+            let work_hash = node.share.work_hash.to_ascii_lowercase();
+            if let Some(existing_share_hash) = self
+                .share_hash_by_work_hash
+                .insert(work_hash.clone(), share_hash.clone())
+            {
+                return Err(SharechainReplayError::DuplicateShareWork {
+                    work_hash,
+                    existing_share_hash,
+                });
+            }
+        }
         self.children_by_parent.clear();
         for (share_hash, node) in &self.shares {
             self.children_by_parent
@@ -1181,9 +1580,48 @@ impl SharechainReplayState {
     }
 }
 
+fn is_valid_registry_registration_upgrade(
+    existing: &MinerRegistration,
+    candidate: &MinerRegistration,
+) -> bool {
+    if candidate.version != crate::sharechain::IDENA_ANCHORED_MINER_REGISTRATION_VERSION
+        || !existing.miner_id.eq_ignore_ascii_case(&candidate.miner_id)
+        || !existing
+            .idena_address
+            .eq_ignore_ascii_case(&candidate.idena_address)
+        || !existing
+            .btc_payout_script_hex
+            .eq_ignore_ascii_case(&candidate.btc_payout_script_hex)
+        || !existing
+            .claim_owner_pubkey_hex
+            .eq_ignore_ascii_case(&candidate.claim_owner_pubkey_hex)
+        || !existing
+            .mining_pubkey_hex
+            .eq_ignore_ascii_case(&candidate.mining_pubkey_hex)
+    {
+        return false;
+    }
+    let Some(candidate_anchor) = candidate.registry_anchor.as_ref() else {
+        return false;
+    };
+    match existing.registry_anchor.as_ref() {
+        None => true,
+        Some(existing_anchor) => {
+            candidate_anchor
+                .contract_address
+                .eq_ignore_ascii_case(&existing_anchor.contract_address)
+                && candidate_anchor
+                    .experiment_id
+                    .eq_ignore_ascii_case(&existing_anchor.experiment_id)
+                && candidate_anchor.registration_sequence > existing_anchor.registration_sequence
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::idena_anchor::{IdenaBlockAnchorV1, MinerRegistryAnchorV1};
     use crate::sharechain::{BitcoinWorkTemplate, MinerRegistration, Share, SnapshotVote};
     use crate::withdrawal::{build_withdrawal_batch, WithdrawalOutputKind, WithdrawalRequest};
     use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
@@ -1218,12 +1656,14 @@ mod tests {
             &idena_secret,
         ));
         let mut registration = MinerRegistration {
+            version: crate::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
             miner_id: miner_id.to_string(),
             idena_address,
             btc_payout_script_hex:
                 "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
             claim_owner_pubkey_hex: claim_keypair.x_only_public_key().0.to_string(),
             mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            registry_anchor: None,
             idena_signature_hex: String::new(),
             mining_signature_hex: String::new(),
         };
@@ -1307,7 +1747,13 @@ mod tests {
         proof_root: &str,
         parent_hash: &str,
     ) -> Share {
-        mined_test_share_from_nonce(miner_id, target, proof_root, parent_hash, 0, 0x22)
+        let nonce_seed = sha256_tagged(
+            b"POHW_TEST_SHARE_NONCE",
+            format!("{miner_id}|{proof_root}|{parent_hash}").as_bytes(),
+        );
+        let start_nonce =
+            u32::from_le_bytes(nonce_seed[..4].try_into().unwrap()) % (u32::MAX - 10_000);
+        mined_test_share_from_nonce(miner_id, target, proof_root, parent_hash, start_nonce, 0x22)
     }
 
     fn mined_test_share_from_nonce(
@@ -1339,6 +1785,107 @@ mod tests {
         .unwrap();
         template.mining_signature_hex = sign(template.signing_hash(), keypair);
         template
+    }
+
+    fn signed_target_bound_work_template(share: &Share, keypair: &Keypair) -> BitcoinWorkTemplate {
+        let mut template = BitcoinWorkTemplate::new_target_bound_unsigned(
+            share.miner_id.clone(),
+            share.bitcoin_header_prefix_hex().unwrap(),
+            share.target.clone(),
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign(template.signing_hash(), keypair);
+        template
+    }
+
+    fn anchor_policy() -> IdenaAnchorPolicyV2 {
+        IdenaAnchorPolicyV2 {
+            schema_version: 2,
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            registry_contract_address: format!("0x{}", "21".repeat(20)),
+            registry_deployment_tx_hash: format!("0x{}", "22".repeat(32)),
+            registry_deployment_payload_sha256: "23".repeat(32),
+            registry_contract_code_hash: "25".repeat(32),
+            registry_contract_wasm_sha256: "24".repeat(32),
+            registry_ecosystem_cid: "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm"
+                .to_string(),
+            minimum_registration_burn_atoms: "1000".to_string(),
+            activation_idena_height: 90,
+            finality_confirmations: 2,
+            max_anchor_age_blocks: 4,
+            handoff_version_bit: 27,
+        }
+    }
+
+    fn anchored_registration(
+        registration: MinerRegistration,
+        mining_keypair: &Keypair,
+        idena_key_byte: u8,
+        sequence: u32,
+        registration_block: u64,
+    ) -> MinerRegistration {
+        let commitment = registration
+            .registry_commitment_hash("p2poolbtc-experiment-1")
+            .unwrap();
+        let mut registration = registration
+            .attach_registry_anchor(MinerRegistryAnchorV1 {
+                contract_address: format!("0x{}", "21".repeat(20)),
+                experiment_id: "p2poolbtc-experiment-1".to_string(),
+                registration_sequence: sequence,
+                registration_block,
+                registration_epoch: 7,
+                registration_timestamp: 1_700_000_000,
+                registration_commitment: commitment,
+            })
+            .unwrap();
+        let idena_secret = SecretKey::from_slice(&[idena_key_byte; 32]).unwrap();
+        registration.idena_signature_hex =
+            idena_signature(&registration.idena_ownership_challenge(), &idena_secret);
+        registration.mining_signature_hex = sign(registration.signing_hash(), mining_keypair);
+        registration
+    }
+
+    fn signed_anchored_work_template(
+        share: &mut Share,
+        keypair: &Keypair,
+        policy: &IdenaAnchorPolicyV2,
+        anchor_height: u64,
+        anchor_byte: u8,
+    ) -> BitcoinWorkTemplate {
+        let anchor = IdenaBlockAnchorV1 {
+            height: anchor_height,
+            hash: format!("0x{}", format!("{anchor_byte:02x}").repeat(32)),
+        };
+        let policy_hash = policy.commitment_hash().unwrap();
+        share.bitcoin_template_hash = share
+            .recomputed_idena_anchored_bitcoin_template_hash(&anchor, &policy_hash)
+            .unwrap();
+        share.mining_signature_hex = sign(share.signing_hash(), keypair);
+        let mut template = BitcoinWorkTemplate::new_idena_anchored_target_bound_unsigned(
+            share.miner_id.clone(),
+            share.bitcoin_header_prefix_hex().unwrap(),
+            share.target.clone(),
+            anchor,
+            policy_hash,
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign(template.signing_hash(), keypair);
+        template
+    }
+
+    fn apply_anchored_template(
+        state: &mut SharechainReplayState,
+        template: BitcoinWorkTemplate,
+        policy: &IdenaAnchorPolicyV2,
+    ) {
+        let message = SharechainMessage::BitcoinWorkTemplate(template.clone());
+        state
+            .validate_idena_anchor_policy(&message, policy)
+            .unwrap();
+        state.accept_bitcoin_work_template(&template).unwrap();
+        state.apply_message(&message).unwrap();
     }
 
     fn signed_snapshot_vote(miner_id: &str, keypair: &Keypair) -> SnapshotVote {
@@ -1501,6 +2048,425 @@ mod tests {
     }
 
     #[test]
+    fn target_bound_template_rejects_post_selected_share_target() {
+        let (registration, mining_keypair) = signed_registration();
+        let mut share = mined_test_share(
+            "MINER-A",
+            MAX_SHARE_TARGET_HEX,
+            &"ab".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        share.bitcoin_template_hash = share
+            .recomputed_target_bound_bitcoin_template_hash()
+            .unwrap();
+        share.mining_signature_hex = sign(share.signing_hash(), &mining_keypair);
+        let template = signed_target_bound_work_template(&share, &mining_keypair);
+
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+        state.accept_bitcoin_work_template(&template).unwrap();
+        state
+            .apply_message(&SharechainMessage::BitcoinWorkTemplate(template.clone()))
+            .unwrap();
+        state
+            .validate_target_bound_message(&SharechainMessage::Share(share.clone()))
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(share.clone()))
+            .unwrap();
+
+        let harder_target = "3fffff0000000000000000000000000000000000000000000000000000000000";
+        let mut post_selected = share;
+        post_selected.target = harder_target.to_string();
+        post_selected.hashrate_score_delta =
+            Share::expected_hashrate_score_delta_for_target(harder_target).unwrap();
+        post_selected.mining_signature_hex = sign(post_selected.signing_hash(), &mining_keypair);
+        let admission_err = state
+            .validate_target_bound_message(&SharechainMessage::Share(post_selected.clone()))
+            .unwrap_err();
+        assert!(matches!(
+            admission_err,
+            SharechainReplayError::InvalidSharechainSignature(
+                SharechainError::AssignedShareTargetMismatch { .. }
+            )
+        ));
+        let err = state
+            .apply_message(&SharechainMessage::Share(post_selected))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SharechainReplayError::InvalidSharechainSignature(
+                SharechainError::AssignedShareTargetMismatch { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn anchored_registration_upgrades_legacy_without_changing_miner_keys() {
+        let (legacy, mining_keypair) = signed_registration();
+        let legacy_for_conflict = legacy.clone();
+        let anchored = anchored_registration(legacy.clone(), &mining_keypair, 13, 1, 100);
+        let policy = anchor_policy();
+        let mut state = SharechainReplayState::default();
+
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(legacy))
+            .unwrap();
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::MinerRegistration(anchored.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(anchored.clone()))
+            .unwrap();
+        assert_eq!(
+            state
+                .registrations()
+                .get("miner-a")
+                .unwrap()
+                .registry_anchor
+                .as_ref()
+                .unwrap()
+                .registration_sequence,
+            1
+        );
+
+        let changed_mining_keypair = keypair(42);
+        let mut changed_base = legacy_for_conflict;
+        changed_base.mining_pubkey_hex = changed_mining_keypair.x_only_public_key().0.to_string();
+        let changed_key = anchored_registration(changed_base, &changed_mining_keypair, 13, 2, 101);
+        assert!(matches!(
+            state.apply_message(&SharechainMessage::MinerRegistration(changed_key)),
+            Err(SharechainReplayError::ConflictingRegistration(_))
+        ));
+    }
+
+    #[test]
+    fn anchored_policy_rejects_templates_before_registry_registration() {
+        let (legacy, mining_keypair) = signed_registration();
+        let registration = anchored_registration(legacy, &mining_keypair, 13, 1, 100);
+        let policy = anchor_policy();
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+        let mut share = mined_test_share(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"71".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        let template =
+            signed_anchored_work_template(&mut share, &mining_keypair, &policy, 99, 0x31);
+
+        assert!(matches!(
+            state.validate_idena_anchor_policy(
+                &SharechainMessage::BitcoinWorkTemplate(template),
+                &policy,
+            ),
+            Err(SharechainReplayError::TemplateAnchorBeforeRegistration)
+        ));
+    }
+
+    #[test]
+    fn finalized_checkpoint_prevents_non_descendant_score_takeover() {
+        let (legacy, mining_keypair) = signed_registration();
+        let registration = anchored_registration(legacy, &mining_keypair, 13, 1, 100);
+        let policy = anchor_policy();
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+
+        let mut checkpoint_root = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"61".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+            1,
+            0x61,
+        );
+        let template = signed_anchored_work_template(
+            &mut checkpoint_root,
+            &mining_keypair,
+            &policy,
+            101,
+            0x41,
+        );
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(checkpoint_root.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(checkpoint_root.clone()))
+            .unwrap();
+        let checkpoint_root_hash = checkpoint_root.share_hash();
+
+        let mut competing_root = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"62".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+            2,
+            0x62,
+        );
+        let template =
+            signed_anchored_work_template(&mut competing_root, &mining_keypair, &policy, 102, 0x42);
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(competing_root.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(competing_root.clone()))
+            .unwrap();
+        let competing_root_hash = competing_root.share_hash();
+
+        let mut competing_child = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"63".repeat(32),
+            &competing_root_hash,
+            3,
+            0x63,
+        );
+        let template = signed_anchored_work_template(
+            &mut competing_child,
+            &mining_keypair,
+            &policy,
+            103,
+            0x43,
+        );
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(competing_child.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(competing_child.clone()))
+            .unwrap();
+        let competing_child_hash = competing_child.share_hash();
+        assert_eq!(state.best_share_tip(), Some(competing_child_hash.as_str()));
+
+        let checkpoint_summary = state.share_summary(&checkpoint_root_hash).unwrap();
+        let checkpoint = SharechainCheckpointAnchorV1 {
+            contract_address: policy.registry_contract_address.clone(),
+            experiment_id: policy.experiment_id.clone(),
+            round: 1,
+            share_tip_hash: checkpoint_root_hash.clone(),
+            share_height: checkpoint_summary.height,
+            cumulative_score: checkpoint_summary.cumulative_score.unwrap(),
+            parent_checkpoint_tip: ZERO_SHARE_PARENT_HASH.to_string(),
+            finalization_block: 110,
+            finalization_block_hash: format!("0x{}", "51".repeat(32)),
+            finalization_epoch: 8,
+            finalization_timestamp: 1_700_000_100,
+            support_count: 1,
+            registered_count: 1,
+            registered_miners: vec!["miner-a".to_string()],
+            supporters: vec!["miner-a".to_string()],
+        };
+        let checkpoint_message = SharechainMessage::SharechainCheckpoint(checkpoint);
+        state
+            .validate_idena_anchor_policy(&checkpoint_message, &policy)
+            .unwrap();
+        state.apply_message(&checkpoint_message).unwrap();
+        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+
+        let mut fabricated_extension = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"64".repeat(32),
+            &competing_child_hash,
+            4,
+            0x64,
+        );
+        let template = signed_anchored_work_template(
+            &mut fabricated_extension,
+            &mining_keypair,
+            &policy,
+            104,
+            0x44,
+        );
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(fabricated_extension.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(fabricated_extension))
+            .unwrap();
+        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+
+        let mut checkpoint_child = mined_test_share_from_nonce(
+            "miner-a",
+            MAX_SHARE_TARGET_HEX,
+            &"65".repeat(32),
+            &checkpoint_root_hash,
+            5,
+            0x65,
+        );
+        let template = signed_anchored_work_template(
+            &mut checkpoint_child,
+            &mining_keypair,
+            &policy,
+            105,
+            0x45,
+        );
+        apply_anchored_template(&mut state, template, &policy);
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(checkpoint_child.clone()),
+                &policy,
+            )
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(checkpoint_child.clone()))
+            .unwrap();
+        let checkpoint_child_hash = checkpoint_child.share_hash();
+        assert_eq!(state.best_share_tip(), Some(checkpoint_root_hash.as_str()));
+
+        let checkpoint_child_summary = state.share_summary(&checkpoint_child_hash).unwrap();
+        let checkpoint_two = SharechainCheckpointAnchorV1 {
+            contract_address: policy.registry_contract_address.clone(),
+            experiment_id: policy.experiment_id.clone(),
+            round: 2,
+            share_tip_hash: checkpoint_child_hash.clone(),
+            share_height: checkpoint_child_summary.height,
+            cumulative_score: checkpoint_child_summary.cumulative_score.unwrap(),
+            parent_checkpoint_tip: checkpoint_root_hash,
+            finalization_block: 116,
+            finalization_block_hash: format!("0x{}", "52".repeat(32)),
+            finalization_epoch: 8,
+            finalization_timestamp: 1_700_000_160,
+            support_count: 1,
+            registered_count: 1,
+            registered_miners: vec!["miner-a".to_string()],
+            supporters: vec!["miner-a".to_string()],
+        };
+        let checkpoint_two_message = SharechainMessage::SharechainCheckpoint(checkpoint_two);
+        state
+            .validate_idena_anchor_policy(&checkpoint_two_message, &policy)
+            .unwrap();
+        state.apply_message(&checkpoint_two_message).unwrap();
+        assert_eq!(state.best_share_tip(), Some(checkpoint_child_hash.as_str()));
+        assert_eq!(state.summary().latest_checkpoint_round, Some(2));
+    }
+
+    #[test]
+    fn bootstrap_shares_require_unique_and_increasing_idena_anchors() {
+        let (legacy, mining_keypair) = signed_registration();
+        let registration = anchored_registration(legacy, &mining_keypair, 13, 1, 100);
+        let policy = anchor_policy();
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+
+        let mut first = mined_test_share(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"72".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        let first_template =
+            signed_anchored_work_template(&mut first, &mining_keypair, &policy, 101, 0x32);
+        let mut mismatched_policy = policy.clone();
+        mismatched_policy.max_anchor_age_blocks += 1;
+        assert!(matches!(
+            state.validate_idena_anchor_policy(
+                &SharechainMessage::BitcoinWorkTemplate(first_template.clone()),
+                &mismatched_policy,
+            ),
+            Err(SharechainReplayError::IdenaAnchorPolicy(
+                IdenaAnchorError::PolicyCommitmentMismatch
+            ))
+        ));
+        apply_anchored_template(&mut state, first_template, &policy);
+        state
+            .validate_idena_anchor_policy(&SharechainMessage::Share(first.clone()), &policy)
+            .unwrap();
+        state
+            .apply_message(&SharechainMessage::Share(first.clone()))
+            .unwrap();
+
+        // The old V1 policy selected bootstrap checks by target. A target one
+        // unit below the configured floor was effectively just as cheap but
+        // skipped duplicate-anchor enforcement entirely.
+        let target_below_old_floor = format!("7ffffe{}", "ff".repeat(29));
+        let mut duplicate = mined_test_share_from_nonce(
+            "Miner-A",
+            &target_below_old_floor,
+            &"73".repeat(32),
+            &first.share_hash(),
+            100,
+            0x33,
+        );
+        let duplicate_template =
+            signed_anchored_work_template(&mut duplicate, &mining_keypair, &policy, 101, 0x32);
+        apply_anchored_template(&mut state, duplicate_template, &policy);
+        assert!(matches!(
+            state.validate_idena_anchor_policy(&SharechainMessage::Share(duplicate), &policy,),
+            Err(SharechainReplayError::DuplicateBootstrapAnchor { .. })
+        ));
+
+        let mut backwards = mined_test_share_from_nonce(
+            "Miner-A",
+            MAX_SHARE_TARGET_HEX,
+            &"74".repeat(32),
+            &first.share_hash(),
+            200,
+            0x34,
+        );
+        let backwards_template =
+            signed_anchored_work_template(&mut backwards, &mining_keypair, &policy, 100, 0x35);
+        apply_anchored_template(&mut state, backwards_template, &policy);
+        assert!(matches!(
+            state.validate_idena_anchor_policy(&SharechainMessage::Share(backwards), &policy,),
+            Err(SharechainReplayError::NonIncreasingBootstrapAnchor)
+        ));
+    }
+
+    #[test]
+    fn network_bound_policy_rejects_legacy_template_without_rewriting_replay() {
+        let (registration, mining_keypair) = signed_registration();
+        let share = mined_test_share(
+            "MINER-A",
+            MAX_SHARE_TARGET_HEX,
+            &"ac".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        let template = signed_work_template(&share, &mining_keypair);
+        let mut state = SharechainReplayState::default();
+        state
+            .apply_message(&SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+        state.accept_bitcoin_work_template(&template).unwrap();
+
+        let message = SharechainMessage::BitcoinWorkTemplate(template.clone());
+        assert!(matches!(
+            state.validate_target_bound_message(&message),
+            Err(SharechainReplayError::InvalidSharechainSignature(
+                SharechainError::TargetBoundBitcoinWorkTemplateRequired
+            ))
+        ));
+        state.apply_message(&message).unwrap();
+    }
+
+    #[test]
     fn replay_ignores_duplicate_share_with_different_hex_casing() {
         let (registration, mining_keypair) = signed_registration();
         let mut share = mined_test_share(
@@ -1538,6 +2504,41 @@ mod tests {
             ApplyOutcome::DuplicateIgnored
         );
 
+        assert_eq!(state.hashrate_scores().get("miner-a"), Some(&1));
+    }
+
+    #[test]
+    fn replay_rejects_recrediting_the_same_bitcoin_work_hash() {
+        let (registration, mining_keypair) = signed_registration();
+        let mut first = mined_test_share(
+            "MINER-A",
+            MAX_SHARE_TARGET_HEX,
+            &"bb".repeat(32),
+            ZERO_SHARE_PARENT_HASH,
+        );
+        first.mining_signature_hex = sign(first.signing_hash(), &mining_keypair);
+
+        let mut replay = first.clone();
+        replay.idena_snapshot_proof_root = "cc".repeat(32);
+        replay.mining_signature_hex = sign(replay.signing_hash(), &mining_keypair);
+
+        let mut state = SharechainReplayState::default();
+        apply_registration_and_template(&mut state, registration, &first, &mining_keypair);
+        state
+            .apply_message(&SharechainMessage::Share(first.clone()))
+            .unwrap();
+
+        let err = state
+            .apply_message(&SharechainMessage::Share(replay))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SharechainReplayError::DuplicateShareWork {
+                work_hash,
+                existing_share_hash,
+            } if work_hash == first.work_hash && existing_share_hash == first.share_hash()
+        ));
+        assert_eq!(state.summary().stored_share_count, 1);
         assert_eq!(state.hashrate_scores().get("miner-a"), Some(&1));
     }
 

@@ -1,0 +1,121 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f3f5f6;
+  color: #172027;
+  letter-spacing: 0;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input { font: inherit; letter-spacing: 0; }
+
+.topbar {
+  min-height: 66px;
+  padding: 14px clamp(18px, 4vw, 52px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background: #172027;
+  color: #fff;
+}
+.topbar div { display: flex; flex-direction: column; gap: 3px; }
+.topbar strong { font-size: 20px; }
+.topbar span { font-size: 12px; color: #bfcbd0; }
+.topbar .no-value {
+  color: #172027;
+  background: #f5c84b;
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+main { width: min(920px, calc(100% - 32px)); margin: 28px auto 60px; }
+.status-band {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid #ced6da;
+  background: #e2e7e9;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.status-band div { min-width: 0; padding: 13px 15px; background: #fff; }
+.status-band span, .status-band strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+.status-band span { color: #65727a; font-size: 12px; margin-bottom: 4px; }
+.status-band strong { font-size: 14px; }
+
+.step {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 16px;
+  padding: 28px 0;
+  border-bottom: 1px solid #ced6da;
+}
+.step-index {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #2e6f5e;
+  color: #fff;
+  font-weight: 800;
+}
+.step-body { min-width: 0; }
+h1, h2 { margin: 2px 0 18px; font-size: 21px; line-height: 1.25; }
+form { display: grid; grid-template-columns: 1fr 1.35fr auto; align-items: end; gap: 12px; }
+label { display: grid; gap: 7px; color: #405058; font-size: 13px; font-weight: 700; }
+input[type="text"], input:not([type]) {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid #aebbc1;
+  border-radius: 4px;
+  background: #fff;
+  color: #172027;
+}
+input:focus { outline: 3px solid #a9d9ca; border-color: #2e6f5e; }
+
+button, .button {
+  min-height: 42px;
+  padding: 10px 15px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  font-weight: 800;
+  cursor: pointer;
+}
+.primary { background: #2e6f5e; color: #fff; }
+.secondary { background: #fff; color: #26363d; border-color: #9baab0; }
+.danger { background: #fff; color: #a33030; border-color: #cc9999; }
+button:disabled { cursor: not-allowed; opacity: .45; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.inline-status { margin: 12px 0 0; color: #5b6970; font-size: 14px; }
+.acknowledgement { grid-template-columns: 20px 1fr; align-items: start; font-weight: 600; line-height: 1.45; }
+.acknowledgement input { width: 17px; height: 17px; margin: 2px 0 0; accent-color: #2e6f5e; }
+
+.credentials { margin: 0; border-top: 1px solid #d7dee1; }
+.credentials div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; padding: 11px 0; border-bottom: 1px solid #d7dee1; }
+.credentials dt { color: #65727a; }
+.credentials dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.text-link { display: inline-block; margin-top: 15px; color: #245b8b; font-weight: 700; }
+.error-box { margin-top: 20px; padding: 13px 15px; border-left: 4px solid #b23a3a; background: #fff0f0; color: #772727; }
+
+@media (max-width: 760px) {
+  .status-band { grid-template-columns: 1fr 1fr; }
+  form { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  main { width: min(100% - 24px, 920px); margin-top: 18px; }
+  .status-band { grid-template-columns: 1fr; }
+  .step { grid-template-columns: 34px minmax(0, 1fr); gap: 11px; }
+  .credentials div { grid-template-columns: 1fr; gap: 5px; }
+}

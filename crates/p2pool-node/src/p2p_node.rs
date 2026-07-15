@@ -1,5 +1,6 @@
 use crate::bitcoin_rpc::{self, BitcoinRpcClient};
 use crate::fork_chain::ForkChainClient;
+use crate::idena_anchor_verifier::IdenaAnchorVerifier;
 use crate::local_node;
 use crate::peer_policy::{PeerDecision, PeerPolicy, PeerPolicyConfig};
 use anyhow::{bail, Context, Result};
@@ -76,6 +77,8 @@ pub struct WorkTemplateAdmissionConfig {
     pub bitcoin_rpc_client: Option<BitcoinRpcClient>,
     pub fork_chain_client: Option<ForkChainClient>,
     pub validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy,
+    pub allow_pohw_time_dependent_bits: bool,
+    pub idena_anchor_verifier: Option<IdenaAnchorVerifier>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -365,6 +368,13 @@ enum GossipWireResponse {
 }
 
 pub async fn run_gossip_server(config: GossipServerConfig) -> Result<()> {
+    run_gossip_server_with_admission(config, None).await
+}
+
+async fn run_gossip_server_with_admission(
+    config: GossipServerConfig,
+    work_template_admission: Option<WorkTemplateAdmissionConfig>,
+) -> Result<()> {
     validate_gossip_server_config(&config)?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -403,9 +413,18 @@ pub async fn run_gossip_server(config: GossipServerConfig) -> Result<()> {
         };
         let policy = Arc::clone(&policy);
         let config = Arc::clone(&shared_config);
+        let work_template_admission = work_template_admission.clone();
         tokio::spawn(async move {
             let _connection_guard = connection_guard;
-            if let Err(err) = handle_gossip_connection(stream, remote_addr, config, policy).await {
+            if let Err(err) = handle_gossip_connection_with_admission(
+                stream,
+                remote_addr,
+                config,
+                policy,
+                work_template_admission,
+            )
+            .await
+            {
                 eprintln!("warning: gossip peer {remote_addr} disconnected with error: {err:#}");
             }
         });
@@ -418,8 +437,11 @@ pub async fn run_gossip_mesh(
 ) -> Result<()> {
     validate_gossip_server_config(&server_config)?;
     validate_gossip_peer_loop_config(&peer_loop_config)?;
+    let inbound_admission = peer_loop_config.work_template_admission.clone();
+    bind_idena_anchor_policy_if_configured(&server_config.datadir, inbound_admission.as_ref())
+        .await?;
     tokio::select! {
-        result = run_gossip_server(server_config) => result,
+        result = run_gossip_server_with_admission(server_config, inbound_admission) => result,
         result = run_peer_sync_loop(peer_loop_config) => result,
     }
 }
@@ -657,13 +679,13 @@ async fn run_peer_sync_round_for_peer(
     }
 
     let sync_result = if let Some(admission) = config.work_template_admission.as_ref() {
-        sync_gossip_from_peer_with_work_template_admission(
+        sync_gossip_from_peer_inner(
             &config.datadir,
             peer_addr,
             config.inventory_limit,
             config.max_future_skew_seconds,
             config.max_age_seconds,
-            admission,
+            Some(admission),
         )
         .await
     } else {
@@ -1145,6 +1167,7 @@ pub async fn sync_gossip_from_peer_with_work_template_admission(
     max_age_seconds: i64,
     work_template_admission: &WorkTemplateAdmissionConfig,
 ) -> Result<GossipSyncSummary> {
+    bind_idena_anchor_policy_if_configured(datadir, Some(work_template_admission)).await?;
     sync_gossip_from_peer_inner(
         datadir,
         addr,
@@ -1154,6 +1177,21 @@ pub async fn sync_gossip_from_peer_with_work_template_admission(
         Some(work_template_admission),
     )
     .await
+}
+
+async fn bind_idena_anchor_policy_if_configured(
+    datadir: &Path,
+    admission: Option<&WorkTemplateAdmissionConfig>,
+) -> Result<()> {
+    if let Some(verifier) = admission.and_then(|value| value.idena_anchor_verifier.as_ref()) {
+        verifier
+            .verify_registry_deployment()
+            .await
+            .context("Idena miner registry deployment verification failed")?;
+        local_node::bind_idena_anchor_policy(datadir, verifier.policy())
+            .context("failed to bind Idena anchor policy to sharechain datadir")?;
+    }
+    Ok(())
 }
 
 async fn sync_gossip_from_peer_inner(
@@ -1225,6 +1263,18 @@ struct FetchAppendResult {
     failures: Vec<GossipSyncFailure>,
 }
 
+enum PendingEnvelope {
+    Fetch {
+        message_hash: String,
+        depth: usize,
+    },
+    AppendAfterParent {
+        message_hash: String,
+        envelope: Box<GossipEnvelope>,
+        parent_hash: String,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_append_gossip_envelope_and_missing_parents(
     datadir: &Path,
@@ -1240,99 +1290,188 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> FetchAppendResult {
     let mut result = FetchAppendResult::default();
-    let mut pending = vec![(message_hash, 0usize)];
+    let mut pending = vec![PendingEnvelope::Fetch {
+        message_hash,
+        depth: 0,
+    }];
 
-    while let Some((message_hash, depth)) = pending.pop() {
-        if known_hashes.contains(&message_hash) || !attempted_hashes.insert(message_hash.clone()) {
-            continue;
-        }
-        if depth > 0 && !parent_fetch_budget.try_spend() {
-            result.failures.push(GossipSyncFailure {
+    while let Some(item) = pending.pop() {
+        let (message_hash, envelope) = match item {
+            PendingEnvelope::Fetch {
                 message_hash,
-                error: "share parent fetch budget exhausted for this sync round".to_string(),
-            });
-            continue;
-        }
-        if depth > MAX_SHARE_PARENT_FETCH_DEPTH {
-            result.failures.push(GossipSyncFailure {
-                message_hash,
-                error: format!(
-                    "share parent dependency depth exceeds {MAX_SHARE_PARENT_FETCH_DEPTH}"
-                ),
-            });
-            continue;
-        }
+                depth,
+            } => {
+                let already_available = if depth == 0 {
+                    known_hashes.contains(&message_hash)
+                } else {
+                    match local_share_available(datadir, &message_hash) {
+                        Ok(available) => available,
+                        Err(err) => {
+                            result.failures.push(GossipSyncFailure {
+                                message_hash,
+                                error: format!(
+                                    "cannot verify local share dependency state: {err:#}"
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                };
+                if already_available || !attempted_hashes.insert(message_hash.clone()) {
+                    continue;
+                }
+                if depth > MAX_SHARE_PARENT_FETCH_DEPTH {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: format!(
+                            "share parent dependency depth exceeds {MAX_SHARE_PARENT_FETCH_DEPTH}"
+                        ),
+                    });
+                    continue;
+                }
+                if depth > 0 && !parent_fetch_budget.try_spend() {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: "share parent fetch budget exhausted for this sync round"
+                            .to_string(),
+                    });
+                    continue;
+                }
 
-        let envelope = match pull_gossip_envelope(addr, message_hash.clone()).await {
-            Ok(Some(envelope)) => {
-                result.fetched_count += 1;
-                envelope
+                let envelope = match pull_gossip_envelope(addr, message_hash.clone()).await {
+                    Ok(Some(envelope)) => {
+                        result.fetched_count += 1;
+                        envelope
+                    }
+                    Ok(None) => {
+                        result.failures.push(GossipSyncFailure {
+                            message_hash,
+                            error: "peer returned no envelope for requested hash".to_string(),
+                        });
+                        continue;
+                    }
+                    Err(err) => {
+                        result.failures.push(GossipSyncFailure {
+                            message_hash,
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                };
+
+                if depth > 0 && !matches!(&envelope.message, SharechainMessage::Share(_)) {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: "share parent dependency resolved to a non-share message"
+                            .to_string(),
+                    });
+                    continue;
+                }
+
+                if let Err(err) = fetch_append_missing_miner_registrations(
+                    datadir,
+                    addr,
+                    &envelope.message,
+                    max_future_skew_seconds,
+                    max_age_seconds,
+                    known_hashes,
+                    registration_fetch_budget,
+                    work_template_admission,
+                    &mut result,
+                )
+                .await
+                {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+
+                if let Err(err) = fetch_append_missing_bitcoin_work_template(
+                    datadir,
+                    addr,
+                    &envelope.message,
+                    max_future_skew_seconds,
+                    max_age_seconds,
+                    known_hashes,
+                    registration_fetch_budget,
+                    template_fetch_budget,
+                    work_template_admission,
+                    &mut result,
+                )
+                .await
+                {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+
+                if let Some(parent_hash) = share_parent_dependency(&envelope.message) {
+                    let parent_available = match local_share_available(datadir, &parent_hash) {
+                        Ok(available) => available,
+                        Err(err) => {
+                            result.failures.push(GossipSyncFailure {
+                                message_hash,
+                                error: format!("cannot verify local share parent state: {err:#}"),
+                            });
+                            continue;
+                        }
+                    };
+                    if !parent_available {
+                        if depth >= MAX_SHARE_PARENT_FETCH_DEPTH {
+                            result.failures.push(GossipSyncFailure {
+                                message_hash,
+                                error: format!(
+                                    "share parent dependency depth exceeds {MAX_SHARE_PARENT_FETCH_DEPTH}"
+                                ),
+                            });
+                            continue;
+                        }
+                        pending.push(PendingEnvelope::AppendAfterParent {
+                            message_hash: message_hash.clone(),
+                            envelope: Box::new(envelope),
+                            parent_hash: parent_hash.clone(),
+                        });
+                        pending.push(PendingEnvelope::Fetch {
+                            message_hash: parent_hash,
+                            depth: depth + 1,
+                        });
+                        continue;
+                    }
+                }
+                (message_hash, envelope)
             }
-            Ok(None) => {
-                result.failures.push(GossipSyncFailure {
-                    message_hash,
-                    error: "peer returned no envelope for requested hash".to_string(),
-                });
-                continue;
-            }
-            Err(err) => {
-                result.failures.push(GossipSyncFailure {
-                    message_hash,
-                    error: err.to_string(),
-                });
-                continue;
+            PendingEnvelope::AppendAfterParent {
+                message_hash,
+                envelope,
+                parent_hash,
+            } => {
+                let parent_available = match local_share_available(datadir, &parent_hash) {
+                    Ok(available) => available,
+                    Err(err) => {
+                        result.failures.push(GossipSyncFailure {
+                            message_hash,
+                            error: format!("cannot verify accepted share parent state: {err:#}"),
+                        });
+                        continue;
+                    }
+                };
+                if !parent_available {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: format!(
+                            "share parent dependency {parent_hash} was not accepted; child was not persisted"
+                        ),
+                    });
+                    continue;
+                }
+                (message_hash, *envelope)
             }
         };
 
-        if depth > 0 && !matches!(&envelope.message, SharechainMessage::Share(_)) {
-            result.failures.push(GossipSyncFailure {
-                message_hash,
-                error: "share parent dependency resolved to a non-share message".to_string(),
-            });
-            continue;
-        }
-
-        if let Err(err) = fetch_append_missing_miner_registrations(
-            datadir,
-            addr,
-            &envelope.message,
-            max_future_skew_seconds,
-            max_age_seconds,
-            known_hashes,
-            registration_fetch_budget,
-            &mut result,
-        )
-        .await
-        {
-            result.failures.push(GossipSyncFailure {
-                message_hash,
-                error: err.to_string(),
-            });
-            continue;
-        }
-
-        if let Err(err) = fetch_append_missing_bitcoin_work_template(
-            datadir,
-            addr,
-            &envelope.message,
-            max_future_skew_seconds,
-            max_age_seconds,
-            known_hashes,
-            registration_fetch_budget,
-            template_fetch_budget,
-            work_template_admission,
-            &mut result,
-        )
-        .await
-        {
-            result.failures.push(GossipSyncFailure {
-                message_hash,
-                error: err.to_string(),
-            });
-            continue;
-        }
-
-        let parent_hash = share_parent_dependency(&envelope.message);
         match append_gossip_envelope_after_template_admission(
             datadir,
             envelope,
@@ -1348,20 +1487,6 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                     result.applied_count += 1;
                 } else {
                     result.duplicate_count += 1;
-                }
-                if let Some(parent_hash) = parent_hash {
-                    if !known_hashes.contains(&parent_hash) {
-                        if depth >= MAX_SHARE_PARENT_FETCH_DEPTH {
-                            result.failures.push(GossipSyncFailure {
-                                message_hash: parent_hash,
-                                error: format!(
-                                    "share parent dependency depth exceeds {MAX_SHARE_PARENT_FETCH_DEPTH}"
-                                ),
-                            });
-                        } else {
-                            pending.push((parent_hash, depth + 1));
-                        }
-                    }
                 }
             }
             Err(err) => result.failures.push(GossipSyncFailure {
@@ -1383,6 +1508,7 @@ async fn fetch_append_missing_miner_registrations(
     max_age_seconds: i64,
     known_hashes: &mut BTreeSet<String>,
     registration_fetch_budget: &mut RegistrationFetchBudget,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
     result: &mut FetchAppendResult,
 ) -> Result<()> {
     let dependencies = miner_registration_dependencies(message)?;
@@ -1413,7 +1539,7 @@ async fn fetch_append_missing_miner_registrations(
             registration_envelope,
             max_future_skew_seconds,
             max_age_seconds,
-            None,
+            work_template_admission,
         )
         .await?;
         known_hashes.insert(append.message_result.message_hash);
@@ -1476,6 +1602,7 @@ async fn fetch_append_missing_bitcoin_work_template(
         max_age_seconds,
         known_hashes,
         registration_fetch_budget,
+        work_template_admission,
         result,
     )
     .await?;
@@ -1515,17 +1642,184 @@ async fn append_gossip_envelope_after_template_admission(
     envelope.verify_durable_at(now, max_future_skew_seconds)?;
     let historical =
         max_age_seconds > 0 && envelope.created_at_unix < now.saturating_sub(max_age_seconds);
-    if let SharechainMessage::BitcoinWorkTemplate(template) = &envelope.message {
-        let Some(admission) = work_template_admission else {
-            return local_node::append_historical_gossip_envelope(
-                datadir,
-                envelope,
-                max_future_skew_seconds,
-            );
-        };
-        admit_bitcoin_work_template(datadir, template, admission, historical).await?;
-    }
+    admit_gossip_bitcoin_material(
+        datadir,
+        &envelope.message,
+        work_template_admission,
+        historical,
+    )
+    .await?;
     local_node::append_historical_gossip_envelope(datadir, envelope, max_future_skew_seconds)
+}
+
+async fn append_live_gossip_envelope_after_template_admission(
+    datadir: &Path,
+    envelope: GossipEnvelope,
+    max_future_skew_seconds: i64,
+    max_age_seconds: i64,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+) -> Result<local_node::AppendGossipEnvelopeResult> {
+    let now = current_unix_timestamp()?;
+    envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    admit_gossip_bitcoin_material(datadir, &envelope.message, work_template_admission, false)
+        .await?;
+    local_node::append_gossip_envelope(datadir, envelope, max_future_skew_seconds, max_age_seconds)
+}
+
+async fn admit_gossip_bitcoin_material(
+    datadir: &Path,
+    message: &SharechainMessage,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+    historical: bool,
+) -> Result<()> {
+    match message {
+        SharechainMessage::MinerRegistration(registration) => {
+            if let Some(verifier) = work_template_admission
+                .and_then(|admission| admission.idena_anchor_verifier.as_ref())
+            {
+                if historical {
+                    verifier
+                        .verify_historical_registration(registration)
+                        .await
+                        .context("local Idena miner registry rejected historical registration")?;
+                } else {
+                    verifier
+                        .verify_registration(registration)
+                        .await
+                        .context("local Idena miner registry rejected registration")?;
+                }
+                local_node::replay_state(datadir)?
+                    .validate_idena_anchor_policy(message, verifier.policy())
+                    .context("sharechain Idena anchor policy rejected registration")?;
+            }
+        }
+        SharechainMessage::BitcoinWorkTemplate(template) => {
+            let admission = work_template_admission
+                .context("Bitcoin work-template admission is required for peer templates")?;
+            admit_bitcoin_work_template(datadir, template, admission, historical).await?;
+        }
+        SharechainMessage::Share(share) => {
+            let admission = work_template_admission
+                .context("Bitcoin work-template admission is required for peer shares")?;
+            admit_bitcoin_share(datadir, share, admission, historical).await?;
+        }
+        SharechainMessage::SharechainCheckpoint(checkpoint) => {
+            let admission = work_template_admission
+                .context("Idena admission is required for sharechain checkpoints")?;
+            admit_sharechain_checkpoint(datadir, checkpoint, admission, historical).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn admit_sharechain_checkpoint(
+    datadir: &Path,
+    checkpoint: &pohw_core::idena_anchor::SharechainCheckpointAnchorV1,
+    admission: &WorkTemplateAdmissionConfig,
+    historical: bool,
+) -> Result<()> {
+    let verifier = admission
+        .idena_anchor_verifier
+        .as_ref()
+        .context("active Idena anchor policy is required for sharechain checkpoints")?;
+    verifier
+        .verify_checkpoint(checkpoint, !historical)
+        .await
+        .context("local Idena RPC rejected sharechain checkpoint")?;
+
+    let state = local_node::replay_state(datadir)?;
+    for miner_id in &checkpoint.registered_miners {
+        let registration = state.registrations().get(miner_id).with_context(|| {
+            format!("checkpoint registered miner {miner_id} is missing from local replay")
+        })?;
+        verifier
+            .verify_historical_registration(registration)
+            .await
+            .with_context(|| {
+                format!("checkpoint registered miner {miner_id} has no valid registry record")
+            })?;
+    }
+    if !historical {
+        for miner_id in &checkpoint.supporters {
+            let registration = state.registrations().get(miner_id).with_context(|| {
+                format!("checkpoint supporter {miner_id} is missing from local replay")
+            })?;
+            verifier
+                .verify_registration(registration)
+                .await
+                .with_context(|| {
+                    format!("checkpoint supporter {miner_id} is not currently eligible")
+                })?;
+        }
+    }
+
+    let message = SharechainMessage::SharechainCheckpoint(checkpoint.clone());
+    state
+        .validate_idena_anchor_policy(&message, verifier.policy())
+        .context("sharechain Idena anchor policy rejected checkpoint")?;
+    let mut candidate = state;
+    candidate
+        .apply_message(&message)
+        .context("sharechain replay rejected checkpoint")?;
+    Ok(())
+}
+
+async fn admit_bitcoin_share(
+    datadir: &Path,
+    share: &pohw_core::sharechain::Share,
+    admission: &WorkTemplateAdmissionConfig,
+    historical: bool,
+) -> Result<()> {
+    let share = share.clone().normalized();
+    let state = local_node::replay_state(datadir)?;
+    let registration = state
+        .registrations()
+        .get(&share.miner_id)
+        .context("share miner is not registered in local replay")?;
+    let template = state
+        .bitcoin_work_templates()
+        .get(&share.bitcoin_template_hash)
+        .cloned()
+        .context("share references a Bitcoin work template that is not locally admitted")?;
+    share
+        .verify_mining_signature_for_template(&registration.mining_pubkey_hex, &template)
+        .context("share signature or proof-of-work fields are invalid")?;
+    if let Some(verifier) = admission.idena_anchor_verifier.as_ref() {
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::Share(share.clone()),
+                verifier.policy(),
+            )
+            .context("sharechain Idena anchor policy rejected share")?;
+        verifier
+            .verify_template(registration, &template, !historical)
+            .await
+            .context("local Idena anchor verification rejected share template")?;
+    }
+    template
+        .verify_assigned_share_target(&share.target)
+        .context("share target does not match its admitted Bitcoin work template")?;
+    if let Some(client) = admission.fork_chain_client.as_ref() {
+        client
+            .validate_share(&template, &share)
+            .await
+            .context("fork-chain RPC rejected share against active chain")?;
+    } else {
+        admission
+            .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC admission source is not configured")?
+            .validate_bitcoin_share(
+                &template,
+                &share,
+                admission.validation_policy.clone(),
+                admission.allow_pohw_time_dependent_bits,
+            )
+            .await
+            .context("Bitcoin RPC rejected share against active chain")?;
+    }
+    Ok(())
 }
 
 async fn admit_bitcoin_work_template(
@@ -1564,16 +1858,37 @@ async fn admit_bitcoin_work_template(
             .await
             .context("Bitcoin RPC rejected work template")?;
     }
+    if let Some(verifier) = admission.idena_anchor_verifier.as_ref() {
+        verifier
+            .verify_template(registration, &template, !historical)
+            .await
+            .context("local Idena anchor verification rejected work template")?;
+        state
+            .validate_idena_anchor_policy(
+                &SharechainMessage::BitcoinWorkTemplate(template.clone()),
+                verifier.policy(),
+            )
+            .context("sharechain Idena anchor policy rejected work template")?;
+    }
     local_node::accept_bitcoin_work_template(datadir, template)?;
     Ok(())
 }
 
 fn share_parent_dependency(message: &SharechainMessage) -> Option<String> {
-    let SharechainMessage::Share(share) = message else {
-        return None;
+    let parent_hash = match message {
+        SharechainMessage::Share(share) => share.parent_share_hash.to_ascii_lowercase(),
+        SharechainMessage::SharechainCheckpoint(checkpoint) => {
+            checkpoint.share_tip_hash.to_ascii_lowercase()
+        }
+        _ => return None,
     };
-    let parent_hash = share.parent_share_hash.to_ascii_lowercase();
     (parent_hash != ZERO_SHARE_PARENT_HASH).then_some(parent_hash)
+}
+
+fn local_share_available(datadir: &Path, message_hash: &str) -> Result<bool> {
+    Ok(local_node::replay_state(datadir)?
+        .share_summary(message_hash)
+        .is_some())
 }
 
 fn bitcoin_template_dependency(message: &SharechainMessage) -> Option<String> {
@@ -1598,6 +1913,14 @@ fn miner_registration_dependencies(message: &SharechainMessage) -> Result<Vec<St
                 normalize_miner_id(&share.miner_id, "miner_id")
                     .map_err(|err| anyhow::anyhow!(err))?,
             );
+        }
+        SharechainMessage::SharechainCheckpoint(checkpoint) => {
+            for miner_id in &checkpoint.registered_miners {
+                dependencies.insert(
+                    normalize_miner_id(miner_id, "checkpoint registered miner_id")
+                        .map_err(|err| anyhow::anyhow!(err))?,
+                );
+            }
         }
         SharechainMessage::SnapshotVote(vote) => {
             dependencies.insert(
@@ -1819,11 +2142,22 @@ fn parse_gossip_wire_response(response: &str) -> Result<GossipWireResponse> {
     }
 }
 
+#[cfg(test)]
 async fn handle_gossip_connection(
     stream: TcpStream,
     remote_addr: SocketAddr,
     config: Arc<GossipServerConfig>,
     policy: Arc<Mutex<PeerPolicy>>,
+) -> Result<()> {
+    handle_gossip_connection_with_admission(stream, remote_addr, config, policy, None).await
+}
+
+async fn handle_gossip_connection_with_admission(
+    stream: TcpStream,
+    remote_addr: SocketAddr,
+    config: Arc<GossipServerConfig>,
+    policy: Arc<Mutex<PeerPolicy>>,
+    work_template_admission: Option<WorkTemplateAdmissionConfig>,
 ) -> Result<()> {
     let remote_ip = remote_addr.ip();
     let (reader, mut writer) = stream.into_split();
@@ -1848,17 +2182,34 @@ async fn handle_gossip_connection(
                 return Ok(());
             }
         };
-        let response =
-            handle_gossip_line(line.as_str(), remote_ip, &config, Arc::clone(&policy)).await;
+        let response = handle_gossip_line_with_admission(
+            line.as_str(),
+            remote_ip,
+            &config,
+            Arc::clone(&policy),
+            work_template_admission.as_ref(),
+        )
+        .await;
         write_response(&mut writer, &response, write_timeout).await?;
     }
 }
 
+#[cfg(test)]
 async fn handle_gossip_line(
     line: &str,
     remote_ip: IpAddr,
     config: &GossipServerConfig,
     policy: Arc<Mutex<PeerPolicy>>,
+) -> GossipWireResponse {
+    handle_gossip_line_with_admission(line, remote_ip, config, policy, None).await
+}
+
+async fn handle_gossip_line_with_admission(
+    line: &str,
+    remote_ip: IpAddr,
+    config: &GossipServerConfig,
+    policy: Arc<Mutex<PeerPolicy>>,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> GossipWireResponse {
     let now = match current_unix_timestamp() {
         Ok(now) => now,
@@ -1900,7 +2251,15 @@ async fn handle_gossip_line(
 
     match request {
         GossipWireRequest::Envelope(envelope) => GossipWireResponse::Submit(
-            handle_gossip_envelope(*envelope, remote_ip, config, policy, now).await,
+            handle_gossip_envelope(
+                *envelope,
+                remote_ip,
+                config,
+                policy,
+                now,
+                work_template_admission,
+            )
+            .await,
         ),
         GossipWireRequest::Inventory(request) => {
             if let Some(response) = read_request_rejection(remote_ip, &policy, now).await {
@@ -1950,6 +2309,7 @@ async fn handle_gossip_envelope(
     config: &GossipServerConfig,
     policy: Arc<Mutex<PeerPolicy>>,
     now: i64,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> GossipPeerResponse {
     let peer_id = match normalized_peer_id(&envelope.peer_pubkey_xonly_hex) {
         Ok(peer_id) => peer_id,
@@ -1997,12 +2357,15 @@ async fn handle_gossip_envelope(
         );
     }
 
-    match local_node::append_gossip_envelope(
+    match append_live_gossip_envelope_after_template_admission(
         &config.datadir,
         envelope,
         config.max_future_skew_seconds,
         config.max_age_seconds,
-    ) {
+        work_template_admission,
+    )
+    .await
+    {
         Ok(result) => {
             let mut policy = policy.lock().await;
             let _ = policy.record_valid_ip_envelope(remote_ip);
@@ -2018,7 +2381,11 @@ async fn handle_gossip_envelope(
             }
         }
         Err(err) => {
-            if err.downcast_ref::<local_node::LocalAppendError>().is_some() {
+            if err.downcast_ref::<local_node::LocalAppendError>().is_some()
+                || err
+                    .downcast_ref::<local_node::GossipPersistenceError>()
+                    .is_some()
+            {
                 return rejected(
                     Some(peer_id),
                     format!("local append is temporarily busy: {err}"),
@@ -2613,6 +2980,20 @@ mod tests {
         path
     }
 
+    #[test]
+    fn local_share_availability_fails_closed_on_corrupt_replay() {
+        let datadir = temp_dir("share-availability-corrupt-replay");
+        fs::write(datadir.join("sharechain.ndjson"), "not-json\n").unwrap();
+
+        let err = local_share_available(&datadir, &"11".repeat(32)).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("failed to parse"),
+            "unexpected error: {err:#}"
+        );
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
     fn keypair(byte: u8) -> Keypair {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[byte; 32]).unwrap();
@@ -2707,6 +3088,24 @@ mod tests {
         envelope
     }
 
+    fn envelope_for_network_message(
+        network_id: &str,
+        message: SharechainMessage,
+        keypair: &Keypair,
+        nonce_byte: u8,
+    ) -> GossipEnvelope {
+        let mut envelope = GossipEnvelope::unsigned_for_network(
+            network_id,
+            keypair.x_only_public_key().0.to_string(),
+            current_unix_timestamp().unwrap(),
+            format!("{nonce_byte:02x}{}", "00".repeat(31)),
+            message,
+        )
+        .unwrap();
+        envelope.sign(keypair).unwrap();
+        envelope
+    }
+
     #[tokio::test]
     async fn historical_sync_append_accepts_stale_signed_non_template_envelope() {
         let datadir = temp_dir("historical-sync-envelope");
@@ -2724,6 +3123,28 @@ mod tests {
         fs::remove_dir_all(datadir).unwrap();
     }
 
+    #[tokio::test]
+    async fn peer_bitcoin_templates_fail_closed_without_admission_source() {
+        let datadir = temp_dir("template-admission-required");
+        let (_registration, mining_keypair) = signed_registration();
+        let share = mined_test_share(&"11".repeat(32), ZERO_SHARE_PARENT_HASH, &mining_keypair);
+        let template = signed_work_template(&share, &mining_keypair);
+        let envelope = envelope_for_message(
+            SharechainMessage::BitcoinWorkTemplate(template),
+            &keypair(8),
+            0x08,
+        );
+
+        let err =
+            append_gossip_envelope_after_template_admission(&datadir, envelope, 300, 86_400, None)
+                .await
+                .unwrap_err();
+
+        assert!(err.to_string().contains("admission is required"));
+        assert_eq!(local_node::gossip_inventory(&datadir).unwrap().len(), 0);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
     fn signed_registration() -> (MinerRegistration, Keypair) {
         let mining_keypair = keypair(9);
         let claim_keypair = keypair(10);
@@ -2733,12 +3154,14 @@ mod tests {
             &idena_secret,
         ));
         let mut registration = MinerRegistration {
+            version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
             miner_id: "Miner-A".to_string(),
             idena_address,
             btc_payout_script_hex:
                 "51200000000000000000000000000000000000000000000000000000000000000000".to_string(),
             claim_owner_pubkey_hex: claim_keypair.x_only_public_key().0.to_string(),
             mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            registry_anchor: None,
             idena_signature_hex: String::new(),
             mining_signature_hex: String::new(),
         };
@@ -2757,6 +3180,23 @@ mod tests {
         )
         .unwrap();
         template.mining_signature_hex = sign_schnorr(template.signing_hash(), keypair);
+        template
+    }
+
+    fn signed_target_bound_work_template(
+        share: &mut Share,
+        keypair: &Keypair,
+    ) -> BitcoinWorkTemplate {
+        let mut template = BitcoinWorkTemplate::new_target_bound_unsigned(
+            share.miner_id.clone(),
+            share.bitcoin_header_prefix_hex().unwrap(),
+            share.target.clone(),
+            1,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign_schnorr(template.signing_hash(), keypair);
+        share.bitcoin_template_hash = template.template_hash.clone();
+        share.mining_signature_hex = sign_schnorr(share.signing_hash(), keypair);
         template
     }
 
@@ -2790,7 +3230,10 @@ mod tests {
 
     fn mined_test_share(proof_root: &str, parent_hash: &str, mining_keypair: &Keypair) -> Share {
         let target = "7fffff0000000000000000000000000000000000000000000000000000000000";
-        for nonce in 0..10_000 {
+        let proof_seed = u32::from_str_radix(&proof_root[..8], 16).unwrap();
+        let parent_seed = u32::from_str_radix(&parent_hash[..8], 16).unwrap();
+        let start_nonce = (proof_seed ^ parent_seed) % (u32::MAX - 10_000);
+        for nonce in start_nonce..start_nonce + 10_000 {
             let mut share = Share {
                 miner_id: "MINER-A".to_string(),
                 bitcoin_header_hex: test_bitcoin_header_hex(nonce),
@@ -3030,6 +3473,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_peer_share_uses_same_bitcoin_admission_as_sync() {
+        let datadir = temp_dir("live-share-admission");
+        let network_id = "ab".repeat(32);
+        local_node::initialize_gossip_network(&datadir, &network_id).unwrap();
+        let (registration, mining_keypair) = signed_registration();
+        local_node::append_message(&datadir, SharechainMessage::MinerRegistration(registration))
+            .unwrap();
+        let mut share = mined_test_share(&"11".repeat(32), ZERO_SHARE_PARENT_HASH, &mining_keypair);
+        let template = signed_target_bound_work_template(&mut share, &mining_keypair);
+        local_node::accept_bitcoin_work_template(&datadir, template.clone()).unwrap();
+        local_node::append_message(&datadir, SharechainMessage::BitcoinWorkTemplate(template))
+            .unwrap();
+        let envelope = envelope_for_network_message(
+            &network_id,
+            SharechainMessage::Share(share),
+            &keypair(52),
+            0x52,
+        );
+        let line = serde_json::to_string(&envelope).unwrap();
+        let server_config = config(datadir.clone());
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+        let no_admission_policy = Arc::new(Mutex::new(
+            PeerPolicy::new(server_config.peer_policy.clone()).unwrap(),
+        ));
+        let rejected = submit_response(
+            handle_gossip_line_with_admission(&line, ip, &server_config, no_admission_policy, None)
+                .await,
+        );
+        assert!(!rejected.accepted);
+        assert!(rejected
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("admission is required"));
+        assert!(local_node::gossip_inventory(&datadir).unwrap().is_empty());
+
+        let (rpc_url, rpc_handle) = spawn_mock_bitcoin_rpc().await;
+        let admission = WorkTemplateAdmissionConfig {
+            bitcoin_rpc_client: Some(BitcoinRpcClient::new(rpc_url, None).unwrap()),
+            fork_chain_client: None,
+            validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
+                allow_mutable_time: false,
+                max_time_drift_seconds: 7_200,
+                expected_header_merkle_root_hex: None,
+                allow_unverified_merkle_root: true,
+            },
+            allow_pohw_time_dependent_bits: false,
+            idena_anchor_verifier: None,
+        };
+        let admission_policy = Arc::new(Mutex::new(
+            PeerPolicy::new(server_config.peer_policy.clone()).unwrap(),
+        ));
+        let accepted = submit_response(
+            handle_gossip_line_with_admission(
+                &line,
+                ip,
+                &server_config,
+                admission_policy,
+                Some(&admission),
+            )
+            .await,
+        );
+        assert!(accepted.accepted, "unexpected rejection: {accepted:?}");
+        assert_eq!(local_node::gossip_inventory(&datadir).unwrap().len(), 1);
+
+        rpc_handle.abort();
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
     async fn inventory_and_fetch_return_accepted_signed_envelope() {
         let datadir = temp_dir("inventory");
         let keypair = keypair(54);
@@ -3221,10 +3735,30 @@ mod tests {
         local_node::append_gossip_envelope(&server_datadir, parent_envelope, 300, 86_400).unwrap();
         local_node::append_gossip_envelope(&server_datadir, child_envelope, 300, 86_400).unwrap();
         let (server_addr, server_handle) = spawn_test_gossip_server(server_datadir.clone()).await;
+        let (rpc_url, rpc_handle) = spawn_mock_bitcoin_rpc().await;
+        let admission = WorkTemplateAdmissionConfig {
+            bitcoin_rpc_client: Some(BitcoinRpcClient::new(rpc_url, None).unwrap()),
+            fork_chain_client: None,
+            validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
+                allow_mutable_time: false,
+                max_time_drift_seconds: 7_200,
+                expected_header_merkle_root_hex: None,
+                allow_unverified_merkle_root: true,
+            },
+            allow_pohw_time_dependent_bits: false,
+            idena_anchor_verifier: None,
+        };
 
-        let summary = sync_gossip_from_peer(&client_datadir, server_addr, 1, 300, 86_400)
-            .await
-            .unwrap();
+        let summary = sync_gossip_from_peer_with_work_template_admission(
+            &client_datadir,
+            server_addr,
+            1,
+            300,
+            86_400,
+            &admission,
+        )
+        .await
+        .unwrap();
         let replay = local_node::replay_state(&client_datadir).unwrap().summary();
 
         assert_eq!(summary.offered_count, 1);
@@ -3240,6 +3774,7 @@ mod tests {
         assert_eq!(replay.best_share_tip.as_deref(), Some(child_hash.as_str()));
 
         server_handle.abort();
+        rpc_handle.abort();
         fs::remove_dir_all(server_datadir).unwrap();
         fs::remove_dir_all(client_datadir).unwrap();
     }
@@ -3293,6 +3828,8 @@ mod tests {
                 expected_header_merkle_root_hex: None,
                 allow_unverified_merkle_root: true,
             },
+            allow_pohw_time_dependent_bits: false,
+            idena_anchor_verifier: None,
         };
 
         let summary = sync_gossip_from_peer_with_work_template_admission(
@@ -3325,7 +3862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parent_dependency_fetch_budget_exhaustion_keeps_child_inactive() {
+    async fn parent_dependency_fetch_budget_exhaustion_keeps_child_unpersisted() {
         let server_datadir = temp_dir("parent-budget-server");
         let client_datadir = temp_dir("parent-budget-client");
         let (registration, mining_keypair) = signed_registration();
@@ -3345,6 +3882,19 @@ mod tests {
         local_node::append_gossip_envelope(&server_datadir, parent_envelope, 300, 86_400).unwrap();
         local_node::append_gossip_envelope(&server_datadir, child_envelope, 300, 86_400).unwrap();
         let (server_addr, server_handle) = spawn_test_gossip_server(server_datadir.clone()).await;
+        let (rpc_url, rpc_handle) = spawn_mock_bitcoin_rpc().await;
+        let admission = WorkTemplateAdmissionConfig {
+            bitcoin_rpc_client: Some(BitcoinRpcClient::new(rpc_url, None).unwrap()),
+            fork_chain_client: None,
+            validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
+                allow_mutable_time: false,
+                max_time_drift_seconds: 7_200,
+                expected_header_merkle_root_hex: None,
+                allow_unverified_merkle_root: true,
+            },
+            allow_pohw_time_dependent_bits: false,
+            idena_anchor_verifier: None,
+        };
 
         let mut known_hashes = local_node::gossip_inventory(&client_datadir)
             .unwrap()
@@ -3365,23 +3915,27 @@ mod tests {
             &mut parent_fetch_budget,
             &mut registration_fetch_budget,
             &mut template_fetch_budget,
-            None,
+            Some(&admission),
         )
         .await;
         let replay = local_node::replay_state(&client_datadir).unwrap().summary();
 
         assert_eq!(result.fetched_count, 1);
-        assert_eq!(result.applied_count, 1);
-        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.applied_count, 0);
+        assert_eq!(result.failures.len(), 2);
         assert_eq!(
             result.failures[0].error,
             "share parent fetch budget exhausted for this sync round"
         );
-        assert_eq!(replay.stored_share_count, 1);
+        assert!(result.failures[1]
+            .error
+            .ends_with("was not accepted; child was not persisted"));
+        assert_eq!(replay.stored_share_count, 0);
         assert_eq!(replay.active_share_count, 0);
-        assert_eq!(replay.inactive_share_count, 1);
+        assert_eq!(replay.inactive_share_count, 0);
 
         server_handle.abort();
+        rpc_handle.abort();
         fs::remove_dir_all(server_datadir).unwrap();
         fs::remove_dir_all(client_datadir).unwrap();
     }

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.invalid/schemas/pohw/MinerRegistrationCommitmentV1.schema.json",
+  "title": "MinerRegistrationCommitmentV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "miner_id",
+    "idena_address",
+    "btc_payout_script_hex",
+    "claim_owner_pubkey_hex",
+    "mining_pubkey_hex"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiment_id": {"type": "string", "pattern": "^[a-z0-9._:/-]{1,64}$"},
+    "miner_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"},
+    "idena_address": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "btc_payout_script_hex": {"type": "string", "pattern": "^[0-9a-f]{44}$|^[0-9a-f]{68}$"},
+    "claim_owner_pubkey_hex": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "mining_pubkey_hex": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

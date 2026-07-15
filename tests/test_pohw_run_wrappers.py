@@ -13,10 +13,17 @@ FORK_CHAIN_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-fork-chain-node.sh"
 GOSSIP_MESH_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-gossip-mesh.sh"
 DASHBOARD_UI_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-ui.sh"
 DASHBOARD_API_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-dashboard-api.sh"
+DASHBOARD_MAIN = REPO_ROOT / "ui" / "pohw-dashboard" / "src" / "main.tsx"
 LOCAL_GOSSIP_PEER_WRAPPER = REPO_ROOT / "scripts" / "pohw-run-local-gossip-peer.sh"
 
 
 class RunWrapperValidationTest(unittest.TestCase):
+    def test_dashboard_source_rejects_build_time_api_tokens(self) -> None:
+        source = DASHBOARD_MAIN.read_text(encoding="utf-8")
+
+        self.assertNotIn("VITE_POHW_DASHBOARD_API_TOKEN", source)
+        self.assertIn("runtimeDashboardConfig.apiToken", source)
+
     def base_env(self, root: Path) -> dict[str, str]:
         env = dict(os.environ)
         env.update(
@@ -26,6 +33,8 @@ class RunWrapperValidationTest(unittest.TestCase):
                 "POHW_IDENA_SNAPSHOT_ID": "2026-07-05",
                 "POHW_IDENA_SNAPSHOT_PROOF_ROOT": "11" * 32,
                 "POHW_STRATUM_JOB_FILE": str(root / "job.json"),
+                "POHW_BITCOIN_EXPECTED_CHAIN": "pohw",
+                "POHW_GOSSIP_NETWORK_ID": "ab" * 32,
             }
         )
         return env
@@ -106,10 +115,96 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("run-mining-adapter", args)
+        self.assertIn("initialize-gossip-network", args)
+        self.assertIn("--network-id\n" + "ab" * 32, args)
         self.assertIn("--allow-example-mining-job", args)
         self.assertIn(str(root / "job.json"), args)
         self.assertIn("--block-candidate-dir", args)
         self.assertIn(str(root / "datadir" / "block-candidates"), args)
+
+    def test_mining_adapter_forwards_idena_anchor_policy_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-idena-anchor-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            policy = root / "idena-anchor-policy.json"
+            api_key = root / "idena-api.key"
+            policy.write_text("{}\n", encoding="utf-8")
+            api_key.write_text("local-test-key\n", encoding="utf-8")
+            env = self.base_env(root)
+            env.update(
+                {
+                    "POHW_IDENA_ANCHOR_POLICY": str(policy),
+                    "IDENA_RPC_URL": "http://127.0.0.1:9009",
+                    "IDENA_API_KEY_FILE": str(api_key),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+            Path(env["POHW_STRATUM_JOB_FILE"]).write_text(
+                '{ "job_id": "live-job" }\n', encoding="utf-8"
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--idena-anchor-policy\n" + str(policy), args)
+        self.assertIn("--idena-rpc-url\nhttp://127.0.0.1:9009", args)
+        self.assertIn("--idena-api-key-file\n" + str(api_key), args)
+        self.assertNotIn("--allow-remote-idena-rpc", args)
+
+    def test_mining_adapter_mandatory_anchor_policy_cannot_be_omitted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-required-anchor-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            env["POHW_REQUIRE_IDENA_ANCHOR_POLICY"] = "true"
+            env.pop("POHW_IDENA_ANCHOR_POLICY", None)
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required by this launch profile", result.stderr)
+
+    def test_pohw_rpc_mining_requires_a_gossip_network_id(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-network-id-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = self.base_env(root)
+            env.pop("POHW_GOSSIP_NETWORK_ID")
+            env.update(
+                {
+                    "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("POHW_GOSSIP_NETWORK_ID is required", result.stderr)
+        self.assertFalse(args_out.exists())
 
     def test_mining_adapter_can_refresh_job_from_local_rpc_before_start(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-rpc-job-") as temp:
@@ -164,6 +259,7 @@ class RunWrapperValidationTest(unittest.TestCase):
                     "POHW_STRATUM_DERIVE_POHW_PAYOUTS_FROM_STATE": "true",
                     "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
                     "POHW_STRATUM_ALLOW_MAINNET_SUBMIT": "true",
+                    "POHW_BITCOIN_EXPECTED_CHAIN": "main",
                     "POHW_STRATUM_POHW_COMMITMENT_FILE": str(commitment),
                     "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
                     "POHW_PAYOUT_CANDIDATE_DIR": str(root / "payout-candidates"),
@@ -193,6 +289,7 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn("--auto-submit-blocks", args)
         self.assertIn("--allow-mainnet-submit", args)
         self.assertIn("--rpc-url\nhttp://127.0.0.1:8332", args)
+        self.assertIn("--expected-rpc-chain\nmain", args)
         self.assertNotIn("--payout-schedule-file", args)
         self.assertNotIn("--job-file", args)
         self.assertNotIn("build-pohw-stratum-job-rpc", args)
@@ -326,6 +423,7 @@ class RunWrapperValidationTest(unittest.TestCase):
                 {
                     "POHW_STRATUM_AUTO_SUBMIT_BLOCKS": "true",
                     "POHW_STRATUM_ALLOW_MAINNET_SUBMIT": "true",
+                    "POHW_BITCOIN_EXPECTED_CHAIN": "main",
                     "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
                     "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
                 }
@@ -347,6 +445,32 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--auto-submit-blocks", args)
         self.assertIn("--allow-mainnet-submit", args)
+        self.assertIn("--expected-rpc-chain\nmain", args)
+
+    def test_mining_adapter_refuses_rpc_without_expected_chain(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-chain-binding-") as temp:
+            root = Path(temp)
+            env = self.base_env(root)
+            env.pop("POHW_BITCOIN_EXPECTED_CHAIN")
+            env.update(
+                {
+                    "POHW_STRATUM_BUILD_JOB_FROM_RPC": "true",
+                    "POHW_FAKE_NODE_ARGS_OUT": str(root / "args.txt"),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(MINING_ADAPTER_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("POHW_BITCOIN_EXPECTED_CHAIN must be pohw or main", result.stderr)
 
     def test_mining_adapter_rejects_conflicting_job_refresh_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-mining-wrapper-conflicting-jobs-") as temp:
@@ -703,6 +827,142 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertNotIn("--rpc-url", args)
         self.assertNotIn("must-not-be-forwarded", args)
 
+    def test_gossip_mesh_anchor_policy_requires_admission_and_api_key(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-idena-anchor-") as temp:
+            root = Path(temp)
+            policy = root / "idena-anchor-policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_IDENA_ANCHOR_POLICY": str(policy),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(root / "args.txt"),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+            env.pop("IDENA_API_KEY_FILE", None)
+
+            no_admission = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            env["POHW_ADMIT_PEER_WORK_TEMPLATES"] = "true"
+            no_key = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(no_admission.returncode, 0)
+        self.assertIn("requires POHW_ADMIT_PEER_WORK_TEMPLATES=true", no_admission.stderr)
+        self.assertNotEqual(no_key.returncode, 0)
+        self.assertIn("IDENA_API_KEY_FILE is required", no_key.stderr)
+
+    def test_gossip_mesh_forwards_idena_anchor_policy_to_local_rpc(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-idena-anchor-ok-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            policy = root / "idena-anchor-policy.json"
+            api_key = root / "idena-api.key"
+            manifest = root / "fork-activation.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            api_key.write_text("local-test-key\n", encoding="utf-8")
+            manifest.write_text("{}\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_ADMIT_PEER_WORK_TEMPLATES": "true",
+                    "POHW_STRATUM_FORK_CHAIN_RPC_ADDR": "127.0.0.1:40408",
+                    "POHW_FORK_ACTIVATION_MANIFEST": str(manifest),
+                    "POHW_IDENA_ANCHOR_POLICY": str(policy),
+                    "IDENA_RPC_URL": "http://127.0.0.1:9009",
+                    "IDENA_API_KEY_FILE": str(api_key),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--idena-anchor-policy\n" + str(policy), args)
+        self.assertIn("--idena-rpc-url\nhttp://127.0.0.1:9009", args)
+        self.assertIn("--idena-api-key-file\n" + str(api_key), args)
+        self.assertNotIn("--allow-remote-idena-rpc", args)
+
+    def test_gossip_mesh_mandatory_anchor_policy_requires_admission(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-required-anchor-") as temp:
+            root = Path(temp)
+            policy = root / "policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_REQUIRE_IDENA_ANCHOR_POLICY": "true",
+                    "POHW_IDENA_ANCHOR_POLICY": str(policy),
+                    "POHW_ADMIT_PEER_WORK_TEMPLATES": "false",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mandatory Idena anchor policy", result.stderr)
+
+    def test_gossip_mesh_initializes_the_configured_network_before_serving(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-gossip-network-init-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_GOSSIP_NETWORK_ID": "cd" * 32,
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(GOSSIP_MESH_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("initialize-gossip-network", args)
+        self.assertIn("--network-id\n" + "cd" * 32, args)
+        self.assertIn("run-gossip-mesh", args)
+
     def test_dashboard_ui_runner_uses_loopback_and_token_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-wrapper-") as temp:
             root = Path(temp)
@@ -810,6 +1070,49 @@ class RunWrapperValidationTest(unittest.TestCase):
         self.assertIn("--explorer-bitcoin-index-url", args)
         self.assertIn("http://127.0.0.1:3002", args)
         self.assertNotIn("cookie", args.lower())
+
+    def test_dashboard_api_forwards_experiment_1_core_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-core-") as temp:
+            root = Path(temp)
+            args_out = root / "args.txt"
+            manifest = root / "experiment-1.json"
+            cookie = root / "bitcoin.cookie"
+            manifest.write_text("{}\n", encoding="utf-8")
+            cookie.write_text("__cookie__:secret\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_WORKDIR": str(root),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_SNAPSHOT_DIR": str(root / "snapshots"),
+                    "POHW_EXPLORER_POHW_CORE_MANIFEST": str(manifest),
+                    "POHW_ENABLE_BITCOIN_RPC": "true",
+                    "BITCOIN_RPC_URL": "http://127.0.0.1:40414",
+                    "BITCOIN_RPC_COOKIE_FILE": str(cookie),
+                    "POHW_FAKE_NODE_ARGS_OUT": str(args_out),
+                    "POHW_P2POOL_NODE_BIN": str(self.write_fake_node(root)),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_API_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            args = args_out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--explorer-pohw-core-manifest", args)
+        self.assertIn(str(manifest), args)
+        self.assertIn("--enable-bitcoin-rpc", args)
+        self.assertIn("--bitcoin-rpc-url", args)
+        self.assertIn("http://127.0.0.1:40414", args)
+        self.assertIn("--bitcoin-rpc-cookie-file", args)
+        self.assertNotIn("__cookie__", args)
+        self.assertNotIn("secret", args)
 
     def test_dashboard_api_forwards_explicit_remote_index_opt_in(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-remote-index-") as temp:

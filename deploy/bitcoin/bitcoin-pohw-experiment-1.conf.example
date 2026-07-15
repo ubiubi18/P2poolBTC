@@ -1,0 +1,39 @@
+# P2poolBTC Experiment 1 Bitcoin Core configuration.
+# No RPC password, wallet key, identity address, or public host address belongs here.
+chain=pohw
+server=1
+
+# The coordinator keeps full history and indexes transactions for the hosted
+# explorer. Participants may omit txindex or prune only after understanding
+# that they will then provide less history to other peers.
+prune=0
+txindex=1
+blockfilterindex=1
+peerblockfilters=1
+maxconnections=64
+dbcache=8192
+maxmempool=300
+rpcthreads=8
+rpcworkqueue=64
+rpcservertimeout=120
+debuglogfile=debug.log
+
+[pohw]
+
+# P2P uses the fork-specific compiled network magic and port. Apply a host
+# firewall before exposing it. The systemd unit pins RPC to loopback; Core's
+# default is loopback-only when this file is used manually.
+listen=1
+port=40412
+rpcport=40414
+rpccookiefile=/run/bitcoin-pohw-rpc/.cookie
+rpccookieperms=group
+
+# Experiment 1 has no inherited public seeds. Exchange addnode entries out of
+# band after independently comparing the activation ID.
+dnsseed=0
+fixedseeds=0
+discover=0
+upnp=0
+natpmp=0
+listenonion=0

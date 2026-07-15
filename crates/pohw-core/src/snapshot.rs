@@ -64,6 +64,8 @@ pub enum SnapshotError {
         idena_address: String,
         reason: String,
     },
+    #[error("identity root must contain exactly 32 hexadecimal bytes")]
+    InvalidIdentityRoot,
 }
 
 impl SnapshotLeaf {
@@ -173,6 +175,19 @@ impl Snapshot {
             });
         }
         Ok(())
+    }
+
+    /// Return the chain identity root in the canonical unprefixed form used by
+    /// PoHW commitments. Idena RPC snapshots may encode the same 32 bytes with
+    /// a `0x` prefix; accepting that representation here avoids commitment
+    /// malleability while keeping snapshot source data unchanged.
+    pub fn identity_proof_root_hex(&self) -> Result<String, SnapshotError> {
+        let normalized = self.identity_root.to_ascii_lowercase();
+        let value = normalized.strip_prefix("0x").unwrap_or(&normalized);
+        if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+            return Err(SnapshotError::InvalidIdentityRoot);
+        }
+        Ok(value.to_string())
     }
 }
 
@@ -346,5 +361,32 @@ mod tests {
             snapshot.verify_score_root(),
             Err(SnapshotError::IdentityRootMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn commitment_identity_root_canonicalizes_optional_prefix() {
+        let day = NaiveDate::from_ymd_opt(2026, 6, 29).unwrap();
+        let expected = "ab".repeat(32);
+        let snapshot = Snapshot::build(
+            day,
+            1,
+            "0xaa",
+            format!("0x{expected}"),
+            FORMULA_VERSION,
+            Vec::new(),
+        );
+
+        assert_eq!(snapshot.identity_proof_root_hex().unwrap(), expected);
+    }
+
+    #[test]
+    fn commitment_identity_root_rejects_wrong_length() {
+        let day = NaiveDate::from_ymd_opt(2026, 6, 29).unwrap();
+        let snapshot = Snapshot::build(day, 1, "0xaa", "0x1234", FORMULA_VERSION, Vec::new());
+
+        assert_eq!(
+            snapshot.identity_proof_root_hex(),
+            Err(SnapshotError::InvalidIdentityRoot)
+        );
     }
 }

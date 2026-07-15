@@ -1,0 +1,74 @@
+{
+  "schema_version": "pohw-miner-registry-candidate/v1",
+  "status": "reviewed-local-candidate-not-deployed",
+  "experiment_id": "p2poolbtc-experiment-1",
+  "contract_schema_version": 3,
+  "contract_version": "0.3.0",
+  "eligible_identity_states": [
+    "Newbie",
+    "Verified",
+    "Human"
+  ],
+  "source_files": [
+    {
+      "path": "contracts/idena-pohw-miner-registry/asconfig.json",
+      "sha256": "e592476247c3126c5b3a79e6aabd13d118b2bb3a099cee34a5ffd3f0bfb04249"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/assembly/host.ts",
+      "sha256": "316f7878c412912aa2360d33274cbd816747f9fe8848b9ec8832e6e8c0a9ad32"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/assembly/index.ts",
+      "sha256": "4ee246a7f0503534fdaf876424508d70e40d97c642bf7a48f5fee553f0b8889d"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/assembly/math.ts",
+      "sha256": "a75910d32f5c9fac9ff01eb8fcacaf49be50ee26157f3e2a39f91ed73d18a2ee"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/package.json",
+      "sha256": "18807a0889c1ad907108efe7550dd27b5c6d1f5e5e6aacec764c0d51d82a526f"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/pnpm-lock.yaml",
+      "sha256": "b6ceed31e2f0e3904d26c23c9fb59c03c78eaafcacf6169775c07e71934059a1"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/scripts/check-abi.mjs",
+      "sha256": "bd61d8599e1df79441810c7b8a313e6ef904ab8fb419bfe7fc29416034277576"
+    },
+    {
+      "path": "contracts/idena-pohw-miner-registry/scripts/emulator-test.mjs",
+      "sha256": "8263187cf51436580610575d5ac42bff4a27fa178d78b413f968d39ab8b13461"
+    }
+  ],
+  "artifact": {
+    "path": "contracts/idena-pohw-miner-registry/build/idena-pohw-miner-registry.wasm",
+    "size": 55875,
+    "sha256": "7f5cbf0daeded9bc3ca04ade914e37688edccaa0a8ad025bb74842ec788ad601",
+    "cid": "bafkreid7ls7q3lw63g6dzick32iu4n3ir3omvifivubfxn2iilwhrcwwae"
+  },
+  "runtime_test": {
+    "path": "compatibility/experiment-1-runtime-tests/idena-go/miner_registry_contract_integration_test.go",
+    "target_path": "vm/wasm/pohw_miner_registry_contract_integration_test.go",
+    "test_name": "TestPohwMinerRegistryProductionRuntimeIdentityGate",
+    "size": 9935,
+    "sha256": "137a68223ead170cca1de725819b0bdebfb790e6d764224bf8cb02fb654a3f2e",
+    "cid": "bafkreiatpjucepvnc4gmuhphewazwc66x63zbzwxmqrex6glal5wksr7fy"
+  },
+  "runtime_binding": {
+    "idena_wasm_binding_commit": "67ba065fdb02aa07cced2a43a261e481ca5b39d9",
+    "go": "1.26.5",
+    "node": "24.18.0",
+    "pnpm": "11.11.0",
+    "assemblyscript": "0.27.37"
+  },
+  "deployment": null,
+  "release_gates": {
+    "independent_matching_builders_required": 2,
+    "independent_matching_builders_observed": 1,
+    "external_security_review_complete": false,
+    "deployment_receipt_verified": false
+  }
+}

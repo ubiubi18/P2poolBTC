@@ -24,7 +24,10 @@ python3 scripts/pohw-governance-runtime-gate.py \
 
 The last command deploys the exact lock-bound artifact twice through idena-go's
 production `WasmVM`, compares outputs and gas, and exercises storage, attached
-payment, stake scheduling, and epoch activation. For release evidence add
+payment rejection, identity-proof registration, stake scheduling, and epoch
+activation. Its cross-repository Go test is independently hash/CID-bound in the
+governance-fork lock and applied as a read-only build overlay, leaving the
+pinned idena-go checkout clean. For release evidence add
 `--require-locked-sources` plus a `--component-repo NAME=/absolute/path` for
 every non-idena-go component. That mode deliberately fails while any worktree
 is dirty, any revision differs, or the fork lock is not marked

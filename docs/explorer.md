@@ -1,5 +1,11 @@
 # PoHW Network Explorer
 
+Explorer labels are not wallet ownership or value claims. Experiment 0 keeps
+inherited outputs locked; Experiment 1 permits them only under its mixed-input
+replay rule. In both cases fork balances have no promised value, Bitcoin keys
+may still control real mainnet BTC, and Idena identity activity remains on the
+live Idena chain. See [Experiment 1](../EXPERIMENT-1.md).
+
 The combined UI has two modes built from the same Vite artifact:
 
 - **Explorer:** sanitized fork-chain, sharechain, and aggregate Idena state.
@@ -54,7 +60,10 @@ Every indexed Bitcoin object is labeled `inherited_history`,
 `bitcoin_mainnet_after_fork`, or `bitcoin_mainnet_unconfirmed`. Current-mainnet
 address aggregates are never presented as fork-spendable balances. Experiment 0
 keeps inherited outputs locked, so mainnet-to-fork transaction replay is not
-enabled by adding the explorer.
+enabled by adding the explorer. Experiment 1 deliberately enables inherited
+spends under its consensus mixed-input rule. The explorer must label those
+outputs and transactions as Experiment 1 data and must never claim that a key
+is safe merely because its currently indexed mainnet balance is zero.
 
 `/dashboard.json` remains the private participant endpoint. Enabling the public
 explorer does not remove its token requirement.
@@ -216,6 +225,11 @@ sudo systemctl daemon-reload
   Experiment 0 consensus deliberately remains coinbase-only and inherited
   outputs remain locked; the explorer does not silently turn a no-value testnet
   into a replayable asset fork.
+- The currently deployed custom fork RPC routes describe Experiment 0. A
+  Bitcoin-Core-backed Experiment 1 index must verify `chain=pohw`, the exact
+  activation manifest, and the Core block hash at every indexed height before
+  presenting Experiment 1 transactions. Mainnet-history index results alone
+  are not proof that an inherited output is spendable on the fork.
 - The host Esplora index covers Bitcoin history without requiring Core
   `txindex`. It is a read model only and has no influence on fork consensus,
   mining admission, share validation, or payout decisions.
