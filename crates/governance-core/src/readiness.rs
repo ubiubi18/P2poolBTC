@@ -1,7 +1,12 @@
 use crate::{
-    validate_proposal_scope_evidence, BuildAttestationV1, DataAvailabilityAttestationV1,
+    attestation_authentication_request, package_build_attestation, package_dag_cbor,
+    package_data_availability_attestation, package_external_audit_attestation,
+    package_proposal_scope_evidence, validate_proposal_scope_evidence,
+    verify_attestation_authentication, verify_dag_cbor_car, AttestationAuthenticationV1,
+    AttestationPackage, BuildAttestationV1, DagCborPackage, DataAvailabilityAttestationV1,
     ExternalAuditAttestationV1, ExternalAuditVerdictV1, ProposalScopeEvidenceV1, RepositoryCidV1,
-    RiskClass,
+    RiskClass, BUILD_ATTESTATION_COMMITMENT_DOMAIN, DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+    EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
 };
 use cid::{Cid, Version};
 use serde::{Deserialize, Serialize};
@@ -11,16 +16,33 @@ use thiserror::Error;
 const DAG_CBOR_CODEC: u64 = 0x71;
 const SHA2_256_CODE: u64 = 0x12;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddressedAttestationV1<T> {
     pub cid: String,
     pub value: T,
+    pub authentication: Option<AttestationAuthenticationV1>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeploymentReadinessEvidenceV1 {
+    pub schema_version: u16,
+    pub scope_evidence_cid: String,
+    pub scope: ProposalScopeEvidenceV1,
+    pub build_attestations: Vec<AddressedAttestationV1<BuildAttestationV1>>,
+    pub data_availability_attestations: Vec<AddressedAttestationV1<DataAvailabilityAttestationV1>>,
+    pub external_audit_attestations: Vec<AddressedAttestationV1<ExternalAuditAttestationV1>>,
+    pub required_availability_through_block: u64,
+}
+
+pub type DeploymentReadinessEvidencePackage = DagCborPackage<DeploymentReadinessEvidenceV1>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeploymentReadinessReportV1 {
     pub schema_version: u16,
+    pub evidence_bundle_cid: String,
     pub candidate_ecosystem_cid: String,
     pub scope_evidence_cid: String,
     pub risk_class: RiskClass,
@@ -52,6 +74,46 @@ pub fn evaluate_deployment_readiness(
     audits: &[AddressedAttestationV1<ExternalAuditAttestationV1>],
     required_availability_through_block: u64,
 ) -> Result<DeploymentReadinessReportV1, ReadinessError> {
+    let evidence = DeploymentReadinessEvidenceV1 {
+        schema_version: 1,
+        scope_evidence_cid: scope_evidence_cid.to_string(),
+        scope: scope.clone(),
+        build_attestations: builds.to_vec(),
+        data_availability_attestations: availability.to_vec(),
+        external_audit_attestations: audits.to_vec(),
+        required_availability_through_block,
+    };
+    evaluate_deployment_readiness_evidence(&evidence)
+}
+
+pub fn package_deployment_readiness_evidence(
+    evidence: DeploymentReadinessEvidenceV1,
+) -> Result<DeploymentReadinessEvidencePackage, ReadinessError> {
+    validate_deployment_readiness_evidence(&evidence)?;
+    package_dag_cbor(evidence).map_err(|error| ReadinessError::Invalid(error.to_string()))
+}
+
+pub fn verify_deployment_readiness_evidence_car(
+    bytes: &[u8],
+) -> Result<DeploymentReadinessEvidencePackage, ReadinessError> {
+    let package: DeploymentReadinessEvidencePackage =
+        verify_dag_cbor_car(bytes).map_err(|error| ReadinessError::Invalid(error.to_string()))?;
+    validate_deployment_readiness_evidence(&package.value)?;
+    Ok(package)
+}
+
+pub fn evaluate_deployment_readiness_evidence(
+    evidence: &DeploymentReadinessEvidenceV1,
+) -> Result<DeploymentReadinessReportV1, ReadinessError> {
+    validate_deployment_readiness_evidence(evidence)?;
+    let evidence_package = package_deployment_readiness_evidence(evidence.clone())?;
+    let evidence_bundle_cid = evidence_package.root_cid.to_string();
+    let scope_evidence_cid = evidence.scope_evidence_cid.as_str();
+    let scope = &evidence.scope;
+    let builds = evidence.build_attestations.as_slice();
+    let availability = evidence.data_availability_attestations.as_slice();
+    let audits = evidence.external_audit_attestations.as_slice();
+    let required_availability_through_block = evidence.required_availability_through_block;
     validate_proposal_scope_evidence(scope)
         .map_err(|error| ReadinessError::Invalid(error.to_string()))?;
     validate_dag_cbor_cid(scope_evidence_cid, "scope evidence")?;
@@ -100,6 +162,12 @@ pub fn evaluate_deployment_readiness(
                 .iter()
                 .map(|artifact| artifact.cid.clone()),
         );
+        let package = package_build_attestation(build.value.clone())
+            .map_err(|error| invalid_attestation_input("build", error))?;
+        if package.root_cid.to_string() != build.cid {
+            failures.insert("build.content-cid-mismatch".to_string());
+            continue;
+        }
         if build.value.candidate_ecosystem_cid != scope.candidate_ecosystem_cid {
             failures.insert("build.candidate-mismatch".to_string());
             continue;
@@ -114,6 +182,17 @@ pub fn evaluate_deployment_readiness(
         }
         if !build.value.tests_passed {
             failures.insert("build.tests-failed".to_string());
+            continue;
+        }
+        if !authentication_is_valid(
+            BUILD_ATTESTATION_COMMITMENT_DOMAIN,
+            &package,
+            &build.value.candidate_ecosystem_cid,
+            &build.value.builder_identity,
+            &build.value.authentication,
+            build.authentication.as_ref(),
+        ) {
+            failures.insert("build.unauthenticated-identity".to_string());
             continue;
         }
         let platform = format!(
@@ -170,6 +249,12 @@ pub fn evaluate_deployment_readiness(
                 .iter()
                 .map(|value| value.cid.clone()),
         );
+        let package = package_external_audit_attestation(audit.value.clone())
+            .map_err(|error| invalid_attestation_input("audit", error))?;
+        if package.root_cid.to_string() != audit.cid {
+            failures.insert("audit.content-cid-mismatch".to_string());
+            continue;
+        }
         if audit.value.candidate_ecosystem_cid != scope.candidate_ecosystem_cid {
             failures.insert("audit.candidate-mismatch".to_string());
             continue;
@@ -187,6 +272,17 @@ pub fn evaluate_deployment_readiness(
             || audit.value.unresolved_high_findings != 0
         {
             failures.insert("audit.unresolved-severe-finding".to_string());
+            continue;
+        }
+        if !authentication_is_valid(
+            EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
+            &package,
+            &audit.value.candidate_ecosystem_cid,
+            &audit.value.auditor_identity,
+            &audit.value.authentication,
+            audit.authentication.as_ref(),
+        ) {
+            failures.insert("audit.unauthenticated-identity".to_string());
             continue;
         }
         if !audit_owners.insert(audit.value.auditor_identity.clone()) {
@@ -223,6 +319,12 @@ pub fn evaluate_deployment_readiness(
     }
     for item in availability {
         validate_evidence_cid(&item.cid, &mut evidence_cids, &mut failures, "availability")?;
+        let package = package_data_availability_attestation(item.value.clone())
+            .map_err(|error| invalid_attestation_input("availability", error))?;
+        if package.root_cid.to_string() != item.cid {
+            failures.insert("availability.content-cid-mismatch".to_string());
+            continue;
+        }
         if item.value.candidate_ecosystem_cid != scope.candidate_ecosystem_cid {
             failures.insert("availability.candidate-mismatch".to_string());
             continue;
@@ -240,6 +342,17 @@ pub fn evaluate_deployment_readiness(
             || !verified.contains(&item.value.probe_result_cid)
         {
             failures.insert("availability.incomplete-content-coverage".to_string());
+            continue;
+        }
+        if !authentication_is_valid(
+            DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+            &package,
+            &item.value.candidate_ecosystem_cid,
+            &item.value.operator_identity,
+            &item.value.authentication,
+            item.authentication.as_ref(),
+        ) {
+            failures.insert("availability.unauthenticated-identity".to_string());
             continue;
         }
         if !availability_owners.insert(item.value.operator_identity.clone()) {
@@ -265,6 +378,7 @@ pub fn evaluate_deployment_readiness(
     let failure_codes = failures.into_iter().collect::<Vec<_>>();
     Ok(DeploymentReadinessReportV1 {
         schema_version: 1,
+        evidence_bundle_cid,
         candidate_ecosystem_cid: scope.candidate_ecosystem_cid.clone(),
         scope_evidence_cid: scope_evidence_cid.to_string(),
         risk_class: risk,
@@ -281,6 +395,61 @@ pub fn evaluate_deployment_readiness(
         required_content_cid_count,
         failure_codes,
     })
+}
+
+fn validate_deployment_readiness_evidence(
+    evidence: &DeploymentReadinessEvidenceV1,
+) -> Result<(), ReadinessError> {
+    if evidence.schema_version != 1 {
+        return Err(ReadinessError::Invalid(
+            "evidence schemaVersion must be 1".to_string(),
+        ));
+    }
+    if evidence.build_attestations.len() > 256
+        || evidence.data_availability_attestations.len() > 256
+        || evidence.external_audit_attestations.len() > 64
+    {
+        return Err(ReadinessError::Invalid(
+            "evidence list exceeds its deterministic limit".to_string(),
+        ));
+    }
+    validate_dag_cbor_cid(&evidence.scope_evidence_cid, "scope evidence")?;
+    let scope_package = package_proposal_scope_evidence(evidence.scope.clone())
+        .map_err(|error| ReadinessError::Invalid(error.to_string()))?;
+    if scope_package.root_cid.to_string() != evidence.scope_evidence_cid {
+        return Err(ReadinessError::Invalid(
+            "scope evidence content does not match scopeEvidenceCid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn authentication_is_valid<T>(
+    attestation_kind: &str,
+    package: &AttestationPackage<T>,
+    candidate_ecosystem_cid: &str,
+    identity: &str,
+    authentication_intent: &str,
+    authentication: Option<&AttestationAuthenticationV1>,
+) -> bool {
+    let Some(authentication) = authentication else {
+        return false;
+    };
+    let request = match attestation_authentication_request(
+        attestation_kind,
+        &package.root_cid.to_string(),
+        &package.root_sha256,
+        candidate_ecosystem_cid,
+        identity,
+    ) {
+        Ok(request) => request,
+        Err(_) => return false,
+    };
+    verify_attestation_authentication(&request, authentication_intent, authentication).is_ok()
+}
+
+fn invalid_attestation_input(kind: &str, error: impl std::fmt::Display) -> ReadinessError {
+    ReadinessError::Invalid(format!("{kind} attestation is invalid: {error}"))
 }
 
 fn scope_required_content(
@@ -336,14 +505,18 @@ fn validate_dag_cbor_cid(value: &str, label: &str) -> Result<(), ReadinessError>
 mod tests {
     use super::*;
     use crate::{
-        cid_for, core_artifact_set_digest, package_build_attestation,
-        package_data_availability_attestation, package_external_audit_attestation,
-        package_proposal_scope_evidence,
+        attestation_authentication_request, cid_for, core_artifact_set_digest,
+        package_build_attestation, package_data_availability_attestation,
+        package_external_audit_attestation, package_proposal_scope_evidence,
+        signature_attestation_authentication,
         source::{encode_source_manifest, encode_source_patch},
-        BuildArtifactV1, CommandExecutionV1, RepositoryScopeEvidenceV1, ScopeChangeV1,
-        SourceFileEntryV1, SourcePatchV1, SourceTreeManifestV1,
+        AttestationAuthenticationV1, BuildArtifactV1, CommandExecutionV1,
+        RepositoryScopeEvidenceV1, ScopeChangeV1, SourceFileEntryV1, SourcePatchV1,
+        SourceTreeManifestV1, DETACHED_IDENA_SIGNATURE_AUTHENTICATION,
     };
+    use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use sha2::{Digest, Sha256};
+    use tiny_keccak::{Hasher, Keccak};
 
     fn dag(label: &str) -> String {
         cid_for(0x71, label.as_bytes()).to_string()
@@ -354,7 +527,39 @@ mod tests {
     }
 
     fn address(index: u8) -> String {
-        format!("0x{}", format!("{index:02x}").repeat(20))
+        let secret_key = SecretKey::from_slice(&[index; 32]).unwrap();
+        let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
+        let serialized = public_key.serialize_uncompressed();
+        let hash = keccak256(&serialized[1..]);
+        format!("0x{}", hex::encode(&hash[12..]))
+    }
+
+    fn keccak256(value: &[u8]) -> [u8; 32] {
+        let mut hasher = Keccak::v256();
+        let mut output = [0u8; 32];
+        hasher.update(value);
+        hasher.finalize(&mut output);
+        output
+    }
+
+    fn signed_authentication(
+        kind: &str,
+        cid: &str,
+        sha256: &str,
+        candidate: &str,
+        identity: &str,
+        secret_index: u8,
+    ) -> AttestationAuthenticationV1 {
+        let request =
+            attestation_authentication_request(kind, cid, sha256, candidate, identity).unwrap();
+        let digest = keccak256(&keccak256(request.challenge.as_bytes()));
+        let secret_key = SecretKey::from_slice(&[secret_index; 32]).unwrap();
+        let signature =
+            Secp256k1::new().sign_ecdsa_recoverable(&Message::from_digest(digest), &secret_key);
+        let (recovery_id, compact) = signature.serialize_compact();
+        let mut signature_bytes = compact.to_vec();
+        signature_bytes.push(recovery_id.to_i32() as u8 + 27);
+        signature_attestation_authentication(&request, hex::encode(signature_bytes)).unwrap()
     }
 
     fn command() -> CommandExecutionV1 {
@@ -469,12 +674,21 @@ mod tests {
                     core_artifact_digest: digest.clone(),
                     builder_bond_atoms: "1".to_string(),
                     creation_block_or_timestamp: 10,
-                    authentication: "on-chain-submitter".to_string(),
+                    authentication: DETACHED_IDENA_SIGNATURE_AUTHENTICATION.to_string(),
                 })
                 .unwrap();
+                let authentication = signed_authentication(
+                    BUILD_ATTESTATION_COMMITMENT_DOMAIN,
+                    &package.root_cid.to_string(),
+                    &package.root_sha256,
+                    &package.value.candidate_ecosystem_cid,
+                    &package.value.builder_identity,
+                    index,
+                );
                 AddressedAttestationV1 {
                     cid: package.root_cid.to_string(),
                     value: package.value,
+                    authentication: Some(authentication),
                 }
             })
             .collect::<Vec<_>>();
@@ -495,12 +709,21 @@ mod tests {
             unresolved_high_findings: 0,
             verdict: ExternalAuditVerdictV1::Pass,
             creation_block_or_timestamp: 11,
-            authentication: "on-chain-submitter".to_string(),
+            authentication: DETACHED_IDENA_SIGNATURE_AUTHENTICATION.to_string(),
         })
         .unwrap();
+        let audit_authentication = signed_authentication(
+            EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
+            &audit_package.root_cid.to_string(),
+            &audit_package.root_sha256,
+            &audit_package.value.candidate_ecosystem_cid,
+            &audit_package.value.auditor_identity,
+            3,
+        );
         let audits = vec![AddressedAttestationV1 {
             cid: audit_package.root_cid.to_string(),
             value: audit_package.value,
+            authentication: Some(audit_authentication),
         }];
         let pinset_cid = dag("pinset");
         let mut required = scope_required_content(&scope_cid, &scope);
@@ -542,12 +765,21 @@ mod tests {
                         observed_at_block_or_timestamp: 12,
                         expires_at_block: 100,
                         bond_atoms: "1".to_string(),
-                        authentication: "on-chain-submitter".to_string(),
+                        authentication: DETACHED_IDENA_SIGNATURE_AUTHENTICATION.to_string(),
                     })
                     .unwrap();
+                let authentication = signed_authentication(
+                    DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+                    &package.root_cid.to_string(),
+                    &package.root_sha256,
+                    &package.value.candidate_ecosystem_cid,
+                    &package.value.operator_identity,
+                    index,
+                );
                 AddressedAttestationV1 {
                     cid: package.root_cid.to_string(),
                     value: package.value,
+                    authentication: Some(authentication),
                 }
             })
             .collect::<Vec<_>>();
@@ -556,6 +788,29 @@ mod tests {
             evaluate_deployment_readiness(&scope_cid, &scope, &builds, &availability, &audits, 90)
                 .unwrap();
         assert!(report.ready, "{:?}", report.failure_codes);
+        let evidence = DeploymentReadinessEvidenceV1 {
+            schema_version: 1,
+            scope_evidence_cid: scope_cid.clone(),
+            scope: scope.clone(),
+            build_attestations: builds.clone(),
+            data_availability_attestations: availability.clone(),
+            external_audit_attestations: audits.clone(),
+            required_availability_through_block: 90,
+        };
+        let evidence_package = package_deployment_readiness_evidence(evidence).unwrap();
+        assert_eq!(
+            report.evidence_bundle_cid,
+            evidence_package.root_cid.to_string()
+        );
+        let verified =
+            verify_deployment_readiness_evidence_car(&evidence_package.car_bytes).unwrap();
+        assert_eq!(
+            evaluate_deployment_readiness_evidence(&verified.value).unwrap(),
+            report
+        );
+        let mut tampered = evidence_package.car_bytes;
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(verify_deployment_readiness_evidence_car(&tampered).is_err());
 
         let report =
             evaluate_deployment_readiness(&scope_cid, &scope, &builds, &availability, &[], 90)
@@ -564,5 +819,73 @@ mod tests {
         assert!(report
             .failure_codes
             .contains(&"audit.insufficient-independent-audits".to_string()));
+
+        let mut unauthenticated_builds = builds.clone();
+        unauthenticated_builds[1].authentication = None;
+        let report = evaluate_deployment_readiness(
+            &scope_cid,
+            &scope,
+            &unauthenticated_builds,
+            &availability,
+            &audits,
+            90,
+        )
+        .unwrap();
+        assert!(!report.ready);
+        assert_eq!(report.matching_builder_count, 1);
+        assert!(report
+            .failure_codes
+            .contains(&"build.unauthenticated-identity".to_string()));
+        assert!(report
+            .failure_codes
+            .contains(&"build.insufficient-independent-builders".to_string()));
+
+        let mut replayed_authentication = builds.clone();
+        replayed_authentication[1].authentication = builds[0].authentication.clone();
+        let report = evaluate_deployment_readiness(
+            &scope_cid,
+            &scope,
+            &replayed_authentication,
+            &availability,
+            &audits,
+            90,
+        )
+        .unwrap();
+        assert_eq!(report.matching_builder_count, 1);
+        assert!(report
+            .failure_codes
+            .contains(&"build.unauthenticated-identity".to_string()));
+
+        let mut unauthenticated_availability = availability.clone();
+        unauthenticated_availability[1].authentication = None;
+        let report = evaluate_deployment_readiness(
+            &scope_cid,
+            &scope,
+            &builds,
+            &unauthenticated_availability,
+            &audits,
+            90,
+        )
+        .unwrap();
+        assert_eq!(report.complete_availability_count, 1);
+        assert!(report
+            .failure_codes
+            .contains(&"availability.unauthenticated-identity".to_string()));
+
+        let mut unauthenticated_audits = audits.clone();
+        unauthenticated_audits[0].authentication = None;
+        let report = evaluate_deployment_readiness(
+            &scope_cid,
+            &scope,
+            &builds,
+            &availability,
+            &unauthenticated_audits,
+            90,
+        )
+        .unwrap();
+        assert_eq!(report.passing_external_audit_count, 0);
+        assert!(report
+            .failure_codes
+            .contains(&"audit.unauthenticated-identity".to_string()));
     }
 }

@@ -867,6 +867,7 @@ dependencies = [
 name = "governance-core"
 version = "0.1.0"
 dependencies = [
+ "bitcoin",
  "cid",
  "hex",
  "ipld-core",
@@ -879,6 +880,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
+ "tiny-keccak",
  "unicode-normalization",
 ]
 

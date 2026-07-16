@@ -87,8 +87,11 @@ eliminate, long-term availability risk.
 Application-layer contracts, indexers, Merkle proofs, and public IPFS work
 without changing mainnet consensus. Any new host function, identity-state
 counter, genesis change, network ID, or validation rule belongs exclusively in
-`compatibility/governance-fork-lock.json`, with a distinct network identifier,
+a separate governance-fork profile with a distinct network identifier,
 activation mechanism, replay/migration gates, source CIDs, and artifact digests.
+`governance-fork-lock.json` preserves the historical inactive prototype;
+`governance-day-fork-candidate-lock.json` is the current, still inactive
+candidate and does not inherit authority from that historical file.
 
 The legacy-compatible host ABI cannot authenticate a Governance Day epoch
 anchor. The disabled `governance-day-fork-candidate-lock.json` therefore binds

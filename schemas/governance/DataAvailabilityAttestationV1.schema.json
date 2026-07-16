@@ -17,6 +17,6 @@
     "observedAtBlockOrTimestamp":{"type":"integer","minimum":0},
     "expiresAtBlock":{"type":"integer","minimum":0},
     "bondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
-    "authentication":{"const":"on-chain-submitter"}
+    "authentication":{"enum":["on-chain-submitter","detached-idena-signature-v1"],"description":"Authentication intent only. Deployment readiness also requires a detached AttestationAuthenticationV1 proof bound to this payload's exact CID."}
   }
 }

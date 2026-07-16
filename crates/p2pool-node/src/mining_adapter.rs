@@ -419,12 +419,11 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             }
         }
     } else if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
-        let material = config
+        let client = config
             .bitcoin_rpc_client
             .as_ref()
-            .context("Bitcoin RPC is required for dynamic PoHW payouts")?
-            .mining_job_template()
-            .await?;
+            .context("Bitcoin RPC is required for dynamic PoHW payouts")?;
+        let (_, material) = crate::mining_job_template_if_ready(client).await?;
         build_dynamic_active_job(
             config.datadir.clone(),
             dynamic.clone(),
@@ -565,13 +564,12 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
     let material = if let Some(client) = state.config.fork_chain_client.as_ref() {
         client.mining_template().await?
     } else {
-        state
+        let client = state
             .config
             .bitcoin_rpc_client
             .as_ref()
-            .context("live mining template source is not configured")?
-            .mining_job_template()
-            .await?
+            .context("live mining template source is not configured")?;
+        crate::mining_job_template_if_ready(client).await?.1
     };
     let active_job = if let Some(dynamic) = state.config.dynamic_pohw_payout.as_ref() {
         build_dynamic_active_job(
@@ -658,14 +656,6 @@ fn build_job_for_template_source(
             "payout schedule and PoHW commitment must be supplied together"
         )),
     }
-}
-
-pub(crate) async fn build_stratum_job_from_rpc(
-    client: &BitcoinRpcClient,
-    extranonce2_size: usize,
-) -> Result<BuiltStratumJob> {
-    let material = client.mining_job_template().await?;
-    build_stratum_job_from_template(&material, extranonce2_size)
 }
 
 pub(crate) fn build_stratum_job_from_template(

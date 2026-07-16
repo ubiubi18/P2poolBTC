@@ -22,7 +22,7 @@
     "coreArtifactDigest":{"$ref":"common.schema.json#/$defs/Sha256","description":"Domain-separated digest of every artifact whose core flag is true."},
     "builderBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
     "creationBlockOrTimestamp":{"type":"integer","minimum":0},
-    "authentication":{"const":"on-chain-submitter"}
+    "authentication":{"enum":["on-chain-submitter","detached-idena-signature-v1"],"description":"Authentication intent only. Deployment readiness also requires a detached AttestationAuthenticationV1 proof bound to this payload's exact CID."}
   },
   "$defs":{
     "BuildArtifact":{

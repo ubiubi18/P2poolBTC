@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/DeploymentReadinessEvidenceV1.schema.json",
+  "title": "DeploymentReadinessEvidenceV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scopeEvidenceCid",
+    "scope",
+    "buildAttestations",
+    "dataAvailabilityAttestations",
+    "externalAuditAttestations",
+    "requiredAvailabilityThroughBlock"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scopeEvidenceCid": {"$ref": "#/$defs/DagCborCid"},
+    "scope": {"$ref": "ProposalScopeEvidenceV1.schema.json"},
+    "buildAttestations": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/AuthenticatedBuildAttestation"
+      }
+    },
+    "dataAvailabilityAttestations": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/AuthenticatedDataAvailabilityAttestation"
+      }
+    },
+    "externalAuditAttestations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/AuthenticatedExternalAuditAttestation"
+      }
+    },
+    "requiredAvailabilityThroughBlock": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "DagCborCid": {
+      "type": "string",
+      "pattern": "^bafyrei[a-z2-7]{52}$"
+    },
+    "AuthenticatedBuildAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "value", "authentication"],
+      "properties": {
+        "cid": {"$ref": "#/$defs/DagCborCid"},
+        "value": {"$ref": "BuildAttestationV1.schema.json"},
+        "authentication": {"$ref": "AttestationAuthenticationV1.schema.json"}
+      }
+    },
+    "AuthenticatedDataAvailabilityAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "value", "authentication"],
+      "properties": {
+        "cid": {"$ref": "#/$defs/DagCborCid"},
+        "value": {"$ref": "DataAvailabilityAttestationV1.schema.json"},
+        "authentication": {"$ref": "AttestationAuthenticationV1.schema.json"}
+      }
+    },
+    "AuthenticatedExternalAuditAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "value", "authentication"],
+      "properties": {
+        "cid": {"$ref": "#/$defs/DagCborCid"},
+        "value": {"$ref": "ExternalAuditAttestationV1.schema.json"},
+        "authentication": {"$ref": "AttestationAuthenticationV1.schema.json"}
+      }
+    }
+  }
+}

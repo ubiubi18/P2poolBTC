@@ -22,10 +22,12 @@ The idea is simple:
 
 This repo is not a production Bitcoin node, not a token bridge, and not ready for real funds.
 
-> **Experiment 1 is the current full-consensus successor.** It uses a pinned
-> Bitcoin Core v31.1 patch, supports all upstream transaction and script paths,
-> and explicitly permits inherited-mainnet UTXO spending under a mixed-input
-> replay rule. Experiment 0 remains immutable and coinbase-only. Read
+> **Experiment 1 revision 3 is the current full-consensus successor.** It uses
+> a pinned Bitcoin Core v31.1 patch, supports all upstream transaction and
+> script paths, and permits inherited-mainnet UTXO spending only with both the
+> fork marker and fork-domain-separated signatures after the revision-3
+> checkpoint. Experiment 0 and Experiment 1 revision 2 remain immutable
+> historical profiles. Read
 > [Experiment 1](EXPERIMENT-1.md) before building or connecting a miner.
 
 > **Public-join status: blocked technical preview.** The idea, source, tests,
@@ -37,8 +39,12 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > acceptance. Two matching registry builds by one operator are reproducibility
 > evidence, but do not satisfy builder independence. Runtime wrappers fail
 > closed for `chain=pohw` unless the reviewed Idena anchor policy is mandatory.
-> A ready policy must also bind the canonical deployment-readiness report CID
-> and CAR digest; editable status flags alone cannot open public joining.
+> A ready policy must bind the canonical deployment-readiness report CID and
+> CAR digest plus the evidence-bundle CID and CAR digest. The installed
+> `pohw-governance` verifier reconstructs the report from the exact
+> authenticated scope, builder, availability, and audit attestations before any
+> Experiment 1 service starts; editable status flags or aggregate counts cannot
+> open public joining.
 > The public `vibe/experiment-1-release-readiness` branch is a review candidate,
 > not a canonical release or permission to connect a miner. Its head may move
 > during review. A live join must use the later exact release commit and the
@@ -89,9 +95,12 @@ for ordinary testing.
 
 ![Sanitized P2poolBTC Experiment 1 sharechain](docs/assets/experiment-1-sharechain.png)
 
-Live acceptance on 2026-07-15 used bounded, low-priority loopback mining
-attempts on the dedicated host. Each accepted submission advanced both the
-Experiment 1 Core height and the sharechain stored-share count by one. The
+Historical revision-2 acceptance on 2026-07-15 used bounded, low-priority
+loopback mining attempts on the dedicated host. Each accepted submission
+advanced both the Experiment 1 Core height and the sharechain stored-share
+count by one. Mining is now paused while revision 3 is rebuilt and independently
+verified; these screenshots are historical UI evidence, not a claim that the
+current successor profile is running. The
 bootstrap timer performs at most one ten-second attempt every ten minutes under
 a 5% CPU quota and skips all hashing after Core reports the normal-difficulty
 handoff. The adapter otherwise waits idle when no miner is connected. The
@@ -146,8 +155,9 @@ the candidate branch is not a release identifier.
    reviewed Experiment 1 patch. Keep `chain=pohw`, the fork datadir, and RPC
    credentials isolated from Bitcoin mainnet.
 3. **Verify Core.** Confirm the activation ID, manifest digest, P2P connection,
-   `initialblockdownload=false`, and a loopback-only RPC endpoint before using
-   an identity.
+   `initialblockdownload=false`, equal block/header heights at or above the
+   pinned height-`958175` revision-3 checkpoint, its exact block hash, and a
+   loopback-only RPC endpoint before using an identity or starting mining.
 4. **Register an identity.** Publish only the eligible Idena address and a
    signature over the exact registration challenge. Never export the identity
    key, backup, password, or node API key.
@@ -298,8 +308,9 @@ Working prototype pieces:
   cumulative-work fork choice, bootstrap difficulty, irreversible Bitcoin-2016
   difficulty handoff, peer synchronization, and a loopback control RPC,
 - pinned Experiment 1 Bitcoin Core v31.1 full-consensus fork with all upstream
-  script paths, wallet/PSBT support, inherited UTXO spending, mixed-input replay
-  isolation, fork-specific network identity, and a permanent difficulty-handoff marker,
+  script paths, wallet/PSBT support, inherited UTXO spending, marker plus
+  signature-domain replay isolation, revision-specific network identity, and a
+  permanent difficulty-handoff marker,
 - live fork templates and fork-only block submission wired into the Stratum adapter,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
@@ -350,6 +361,8 @@ Not done yet:
   authenticated-epoch fork candidate,
 - independent clean-room governance builders, public IPFS replication and
   availability attestations, external audit, and WASM deployment, and
+- a policy-bound deployment-readiness report CAR and transitive evidence CAR
+  reproduced by the installed governance verifier on every service start, and
 - Idena SDK/bindgen packaging decision for the eventual governed client path.
 
 ## Repository Layout

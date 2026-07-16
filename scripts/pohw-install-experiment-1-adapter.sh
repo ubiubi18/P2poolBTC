@@ -19,9 +19,11 @@ fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 SOURCE="target/release/p2pool-node"
+GOVERNANCE_SOURCE="target/release/pohw-governance"
 DEFAULT_RUNTIME_DIR="/usr/local/libexec/p2pool-experiment-1"
 DEFAULT_SYSTEMD_DIR="/etc/systemd/system"
 DEFAULT_DESTINATION="$DEFAULT_RUNTIME_DIR/p2pool-node"
+DEFAULT_GOVERNANCE_DESTINATION="$DEFAULT_RUNTIME_DIR/pohw-governance"
 DESTINATION="$DEFAULT_DESTINATION"
 INSTALL_ROOT=""
 BUILD_EVIDENCE=""
@@ -29,7 +31,11 @@ EXPECTED_EVIDENCE_SHA256=""
 EXPECTED_SOURCE_CID=""
 BUILD_PLAN="$REPO_ROOT/compatibility/governance-build-plan-v1.json"
 SOURCE_ROOT="$REPO_ROOT"
-SERVICES=(pohw-mining-adapter.service pohw-gossip-mesh.service)
+SERVICES=(
+  bitcoind-pohw-experiment-1.service
+  pohw-mining-adapter.service
+  pohw-gossip-mesh.service
+)
 
 usage() {
   cat <<'EOF'
@@ -37,6 +43,8 @@ Usage: pohw-install-experiment-1-adapter.sh [options]
 
 Options:
   --binary PATH       Release p2pool-node binary to install.
+  --governance-binary PATH
+                      Release pohw-governance evidence verifier to install.
   --build-evidence FILE
                       Verified rust-workspace build-evidence.json.
   --expected-evidence-sha256 HEX
@@ -60,6 +68,11 @@ while (($#)); do
     --binary)
       [[ $# -ge 2 ]] || { echo "--binary requires a path" >&2; exit 2; }
       SOURCE="$2"
+      shift 2
+      ;;
+    --governance-binary)
+      [[ $# -ge 2 ]] || { echo "--governance-binary requires a path" >&2; exit 2; }
+      GOVERNANCE_SOURCE="$2"
       shift 2
       ;;
     --build-evidence)
@@ -139,9 +152,11 @@ if [[ -n "$INSTALL_ROOT" ]]; then
     exit 1
   fi
   DESTINATION="$INSTALL_ROOT$DEFAULT_DESTINATION"
+  GOVERNANCE_DESTINATION="$INSTALL_ROOT$DEFAULT_GOVERNANCE_DESTINATION"
   RUNTIME_DIR="$INSTALL_ROOT$DEFAULT_RUNTIME_DIR"
   SYSTEMD_DIR="$INSTALL_ROOT$DEFAULT_SYSTEMD_DIR"
 else
+  GOVERNANCE_DESTINATION="$DEFAULT_GOVERNANCE_DESTINATION"
   RUNTIME_DIR="$DEFAULT_RUNTIME_DIR"
   SYSTEMD_DIR="$DEFAULT_SYSTEMD_DIR"
 fi
@@ -157,13 +172,17 @@ if [[ ! -x "$SOURCE" ]]; then
   echo "Adapter binary is not executable: $SOURCE" >&2
   exit 1
 fi
+if [[ -L "$GOVERNANCE_SOURCE" || ! -f "$GOVERNANCE_SOURCE" || ! -x "$GOVERNANCE_SOURCE" ]]; then
+  echo "Governance verifier must be an executable regular non-symlink file: $GOVERNANCE_SOURCE" >&2
+  exit 1
+fi
 # Verify a governance build-evidence package without importing or executing
 # anything from the candidate source tree. The evidence package binds the
 # exact artifact, dependency lock, source CID, command results, build plan,
 # and clean-room properties. Its CID must still be checked through an
 # independent channel by the operator; this installer is not a trust oracle.
 EXPECTED_SHA256=$(python3 -I - \
-  "$SOURCE" "$BUILD_EVIDENCE" "$BUILD_PLAN" "$SOURCE_ROOT" \
+  "$SOURCE" "$GOVERNANCE_SOURCE" "$BUILD_EVIDENCE" "$BUILD_PLAN" "$SOURCE_ROOT" \
   "$EXPECTED_EVIDENCE_SHA256" "$EXPECTED_SOURCE_CID" <<'PY'
 import base64
 import hashlib
@@ -253,17 +272,20 @@ def verify_reference(actual, raw, label):
     require(isinstance(actual, dict) and actual == reference(raw), f"{label} content reference mismatch")
 
 source = Path(sys.argv[1])
-evidence_path = Path(sys.argv[2])
-plan_path = Path(sys.argv[3])
-source_root = Path(sys.argv[4])
-expected_evidence_sha256 = sys.argv[5]
-expected_source_cid = sys.argv[6]
+governance_source = Path(sys.argv[2])
+evidence_path = Path(sys.argv[3])
+plan_path = Path(sys.argv[4])
+source_root = Path(sys.argv[5])
+expected_evidence_sha256 = sys.argv[6]
+expected_source_cid = sys.argv[7]
 
 root_meta = source_root.lstat()
 require(stat.S_ISDIR(root_meta.st_mode) and not source_root.is_symlink(), "source root must be a non-symlink directory")
 source_root = source_root.resolve(strict=True)
 source_resolved = source.resolve(strict=True)
+governance_source_resolved = governance_source.resolve(strict=True)
 require(source_root in source_resolved.parents, "adapter binary must be inside the declared source root")
+require(source_root in governance_source_resolved.parents, "governance verifier must be inside the declared source root")
 
 evidence, evidence_raw = load_json(evidence_path, "build evidence")
 plan, _ = load_json(plan_path, "build plan")
@@ -298,13 +320,21 @@ declarations_by_name = {item["name"]: item for item in declarations}
 evidence_by_name = {item["name"]: item for item in artifact_entries}
 runtime_specs = (
     ("p2pool-node", "target/release/p2pool-node", source_resolved, "adapter binary", "builder-platform", "builder-platform", False, 1024 * 1024 * 1024),
+    ("pohw-governance", "target/release/pohw-governance", governance_source_resolved, "governance verifier", "builder-platform", "builder-platform", False, 1024 * 1024 * 1024),
     ("pohw-run-mining-adapter.sh", "scripts/pohw-run-mining-adapter.sh", source_root / "scripts/pohw-run-mining-adapter.sh", "mining adapter wrapper", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-run-gossip-mesh.sh", "scripts/pohw-run-gossip-mesh.sh", source_root / "scripts/pohw-run-gossip-mesh.sh", "gossip mesh wrapper", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-health-status.py", "scripts/pohw-health-status.py", source_root / "scripts/pohw-health-status.py", "health status checker", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-experiment-1-launch-policy.py", "scripts/pohw-experiment-1-launch-policy.py", source_root / "scripts/pohw-experiment-1-launch-policy.py", "launch policy verifier", "linux", "any", True, MAX_JSON_BYTES),
+    ("experiment-1-full-consensus.json", "compatibility/experiment-1-full-consensus.json", source_root / "compatibility/experiment-1-full-consensus.json", "consensus manifest", "all", "any", True, MAX_JSON_BYTES),
+    ("experiment-1-launch-policy.json", "compatibility/experiment-1-launch-policy.json", source_root / "compatibility/experiment-1-launch-policy.json", "launch policy", "all", "any", True, MAX_JSON_BYTES),
+    ("experiment-1-miner-registry-candidate.json", "compatibility/experiment-1-miner-registry-candidate.json", source_root / "compatibility/experiment-1-miner-registry-candidate.json", "registry candidate", "all", "any", True, MAX_JSON_BYTES),
+    ("bitcoind-pohw-experiment-1.service", "deploy/systemd/bitcoind-pohw-experiment-1.service", source_root / "deploy/systemd/bitcoind-pohw-experiment-1.service", "Bitcoin Core Experiment 1 unit", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-mining-adapter.service", "deploy/systemd/pohw-mining-adapter.service", source_root / "deploy/systemd/pohw-mining-adapter.service", "mining adapter unit", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-gossip-mesh.service", "deploy/systemd/pohw-gossip-mesh.service", source_root / "deploy/systemd/pohw-gossip-mesh.service", "gossip mesh unit", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-mining-adapter-server.conf", "deploy/systemd/pohw-mining-adapter-server.conf", source_root / "deploy/systemd/pohw-mining-adapter-server.conf", "mining adapter server drop-in", "linux", "any", True, MAX_JSON_BYTES),
     ("pohw-gossip-mesh-server.conf", "deploy/systemd/pohw-gossip-mesh-server.conf", source_root / "deploy/systemd/pohw-gossip-mesh-server.conf", "gossip mesh server drop-in", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-mining-experiment-1.conf", "deploy/systemd/pohw-mining-experiment-1.conf", source_root / "deploy/systemd/pohw-mining-experiment-1.conf", "mining Experiment 1 gate", "linux", "any", True, MAX_JSON_BYTES),
+    ("pohw-gossip-experiment-1.conf", "deploy/systemd/pohw-gossip-experiment-1.conf", source_root / "deploy/systemd/pohw-gossip-experiment-1.conf", "gossip Experiment 1 gate", "linux", "any", True, MAX_JSON_BYTES),
 )
 verified_sha256s = []
 for name, path_hint, local_path, label, platform, architecture, pinned, maximum in runtime_specs:
@@ -322,6 +352,9 @@ for name, path_hint, local_path, label, platform, architecture, pinned, maximum 
     if name == "p2pool-node":
         relative_source = source_resolved.relative_to(source_root).as_posix()
         require(relative_source == path_hint, "adapter binary does not match its build-plan path")
+    elif name == "pohw-governance":
+        relative_source = governance_source_resolved.relative_to(source_root).as_posix()
+        require(relative_source == path_hint, "governance verifier does not match its build-plan path")
     raw = read_regular(local_path, label, maximum)
     measured = reference(raw)
     artifact = evidence_by_name[name]
@@ -407,10 +440,13 @@ PY
   echo "Adapter runtime source/build evidence verification failed" >&2
   exit 1
 }
-read -r EXPECTED_SHA256 MINING_WRAPPER_SHA256 GOSSIP_WRAPPER_SHA256 \
-  HEALTH_SCRIPT_SHA256 MINING_UNIT_SHA256 GOSSIP_UNIT_SHA256 \
-  MINING_SERVER_DROPIN_SHA256 GOSSIP_SERVER_DROPIN_SHA256 <<< "$EXPECTED_SHA256"
-if [[ -z "${GOSSIP_SERVER_DROPIN_SHA256:-}" ]]; then
+read -r EXPECTED_SHA256 GOVERNANCE_SHA256 MINING_WRAPPER_SHA256 GOSSIP_WRAPPER_SHA256 \
+  HEALTH_SCRIPT_SHA256 LAUNCH_POLICY_SCRIPT_SHA256 CONSENSUS_MANIFEST_SHA256 \
+  LAUNCH_POLICY_SHA256 REGISTRY_CANDIDATE_SHA256 BITCOIN_CORE_UNIT_SHA256 \
+  MINING_UNIT_SHA256 GOSSIP_UNIT_SHA256 MINING_SERVER_DROPIN_SHA256 \
+  GOSSIP_SERVER_DROPIN_SHA256 MINING_EXPERIMENT_DROPIN_SHA256 \
+  GOSSIP_EXPERIMENT_DROPIN_SHA256 <<< "$EXPECTED_SHA256"
+if [[ -z "${GOSSIP_EXPERIMENT_DROPIN_SHA256:-}" ]]; then
   echo "Adapter runtime source/build evidence verification returned incomplete digests" >&2
   exit 1
 fi
@@ -465,64 +501,113 @@ done
 MINING_WRAPPER_SOURCE="$SOURCE_ROOT/scripts/pohw-run-mining-adapter.sh"
 GOSSIP_WRAPPER_SOURCE="$SOURCE_ROOT/scripts/pohw-run-gossip-mesh.sh"
 HEALTH_SCRIPT_SOURCE="$SOURCE_ROOT/scripts/pohw-health-status.py"
+LAUNCH_POLICY_SCRIPT_SOURCE="$SOURCE_ROOT/scripts/pohw-experiment-1-launch-policy.py"
+CONSENSUS_MANIFEST_SOURCE="$SOURCE_ROOT/compatibility/experiment-1-full-consensus.json"
+LAUNCH_POLICY_SOURCE="$SOURCE_ROOT/compatibility/experiment-1-launch-policy.json"
+REGISTRY_CANDIDATE_SOURCE="$SOURCE_ROOT/compatibility/experiment-1-miner-registry-candidate.json"
+BITCOIN_CORE_UNIT_SOURCE="$SOURCE_ROOT/deploy/systemd/bitcoind-pohw-experiment-1.service"
 MINING_UNIT_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-mining-adapter.service"
 GOSSIP_UNIT_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-gossip-mesh.service"
 MINING_SERVER_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-mining-adapter-server.conf"
 GOSSIP_SERVER_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-gossip-mesh-server.conf"
+MINING_EXPERIMENT_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-mining-experiment-1.conf"
+GOSSIP_EXPERIMENT_DROPIN_SOURCE="$SOURCE_ROOT/deploy/systemd/pohw-gossip-experiment-1.conf"
+GOVERNANCE_DESTINATION="$RUNTIME_DIR/pohw-governance"
 MINING_WRAPPER_DESTINATION="$RUNTIME_DIR/pohw-run-mining-adapter.sh"
 GOSSIP_WRAPPER_DESTINATION="$RUNTIME_DIR/pohw-run-gossip-mesh.sh"
 HEALTH_SCRIPT_DESTINATION="$RUNTIME_DIR/pohw-health-status.py"
+LAUNCH_POLICY_SCRIPT_DESTINATION="$RUNTIME_DIR/pohw-experiment-1-launch-policy.py"
+COMPATIBILITY_DIR="$RUNTIME_DIR/compatibility"
+CONSENSUS_MANIFEST_DESTINATION="$COMPATIBILITY_DIR/experiment-1-full-consensus.json"
+LAUNCH_POLICY_DESTINATION="$COMPATIBILITY_DIR/experiment-1-launch-policy.json"
+REGISTRY_CANDIDATE_DESTINATION="$COMPATIBILITY_DIR/experiment-1-miner-registry-candidate.json"
+BITCOIN_CORE_UNIT_DESTINATION="$SYSTEMD_DIR/bitcoind-pohw-experiment-1.service"
 MINING_UNIT_DESTINATION="$SYSTEMD_DIR/pohw-mining-adapter.service"
 GOSSIP_UNIT_DESTINATION="$SYSTEMD_DIR/pohw-gossip-mesh.service"
 MINING_SERVER_DROPIN_DIR="$SYSTEMD_DIR/pohw-mining-adapter.service.d"
 GOSSIP_SERVER_DROPIN_DIR="$SYSTEMD_DIR/pohw-gossip-mesh.service.d"
 MINING_SERVER_DROPIN_DESTINATION="$MINING_SERVER_DROPIN_DIR/server.conf"
 GOSSIP_SERVER_DROPIN_DESTINATION="$GOSSIP_SERVER_DROPIN_DIR/server.conf"
+MINING_EXPERIMENT_DROPIN_DESTINATION="$MINING_SERVER_DROPIN_DIR/experiment-1.conf"
+GOSSIP_EXPERIMENT_DROPIN_DESTINATION="$GOSSIP_SERVER_DROPIN_DIR/experiment-1.conf"
 
 ARTIFACT_SOURCES=(
   "$SOURCE"
+  "$GOVERNANCE_SOURCE"
   "$MINING_WRAPPER_SOURCE"
   "$GOSSIP_WRAPPER_SOURCE"
   "$HEALTH_SCRIPT_SOURCE"
+  "$LAUNCH_POLICY_SCRIPT_SOURCE"
+  "$CONSENSUS_MANIFEST_SOURCE"
+  "$LAUNCH_POLICY_SOURCE"
+  "$REGISTRY_CANDIDATE_SOURCE"
+  "$BITCOIN_CORE_UNIT_SOURCE"
   "$MINING_UNIT_SOURCE"
   "$GOSSIP_UNIT_SOURCE"
   "$MINING_SERVER_DROPIN_SOURCE"
   "$GOSSIP_SERVER_DROPIN_SOURCE"
+  "$MINING_EXPERIMENT_DROPIN_SOURCE"
+  "$GOSSIP_EXPERIMENT_DROPIN_SOURCE"
 )
 ARTIFACT_DESTINATIONS=(
   "$DESTINATION"
+  "$GOVERNANCE_DESTINATION"
   "$MINING_WRAPPER_DESTINATION"
   "$GOSSIP_WRAPPER_DESTINATION"
   "$HEALTH_SCRIPT_DESTINATION"
+  "$LAUNCH_POLICY_SCRIPT_DESTINATION"
+  "$CONSENSUS_MANIFEST_DESTINATION"
+  "$LAUNCH_POLICY_DESTINATION"
+  "$REGISTRY_CANDIDATE_DESTINATION"
+  "$BITCOIN_CORE_UNIT_DESTINATION"
   "$MINING_UNIT_DESTINATION"
   "$GOSSIP_UNIT_DESTINATION"
   "$MINING_SERVER_DROPIN_DESTINATION"
   "$GOSSIP_SERVER_DROPIN_DESTINATION"
+  "$MINING_EXPERIMENT_DROPIN_DESTINATION"
+  "$GOSSIP_EXPERIMENT_DROPIN_DESTINATION"
 )
-ARTIFACT_MODES=(0755 0755 0755 0755 0644 0644 0644 0644)
+ARTIFACT_MODES=(0755 0755 0755 0755 0755 0755 0644 0644 0644 0644 0644 0644 0644 0644 0644 0644)
 ARTIFACT_SHA256S=(
   "$EXPECTED_SHA256"
+  "$GOVERNANCE_SHA256"
   "$MINING_WRAPPER_SHA256"
   "$GOSSIP_WRAPPER_SHA256"
   "$HEALTH_SCRIPT_SHA256"
+  "$LAUNCH_POLICY_SCRIPT_SHA256"
+  "$CONSENSUS_MANIFEST_SHA256"
+  "$LAUNCH_POLICY_SHA256"
+  "$REGISTRY_CANDIDATE_SHA256"
+  "$BITCOIN_CORE_UNIT_SHA256"
   "$MINING_UNIT_SHA256"
   "$GOSSIP_UNIT_SHA256"
   "$MINING_SERVER_DROPIN_SHA256"
   "$GOSSIP_SERVER_DROPIN_SHA256"
+  "$MINING_EXPERIMENT_DROPIN_SHA256"
+  "$GOSSIP_EXPERIMENT_DROPIN_SHA256"
 )
 ARTIFACT_LABELS=(
   "adapter binary"
+  "governance verifier"
   "mining adapter wrapper"
   "gossip mesh wrapper"
   "health status checker"
+  "launch policy verifier"
+  "consensus manifest"
+  "launch policy"
+  "registry candidate"
+  "Bitcoin Core Experiment 1 unit"
   "mining adapter unit"
   "gossip mesh unit"
   "mining adapter server drop-in"
   "gossip mesh server drop-in"
+  "mining Experiment 1 gate"
+  "gossip Experiment 1 gate"
 )
 
 for directory in \
   "$RUNTIME_DIR" \
+  "$COMPATIBILITY_DIR" \
   "$SYSTEMD_DIR" \
   "$MINING_SERVER_DROPIN_DIR" \
   "$GOSSIP_SERVER_DROPIN_DIR"; do
@@ -567,10 +652,17 @@ install_fixed_copy() {
   fi
 }
 
-STAGED_PATHS=("" "" "" "" "" "" "" "")
-TRANSACTION_BACKUPS=("" "" "" "" "" "" "" "")
-EXISTED=(false false false false false false false false)
-REPLACED=(false false false false false false false false)
+STAGED_PATHS=()
+TRANSACTION_BACKUPS=()
+EXISTED=()
+REPLACED=()
+SYSTEMD_REPLACED=false
+for index in "${!ARTIFACT_DESTINATIONS[@]}"; do
+  STAGED_PATHS[index]=""
+  TRANSACTION_BACKUPS[index]=""
+  EXISTED[index]=false
+  REPLACED[index]=false
+done
 backup_temp=""
 
 rollback() {
@@ -593,10 +685,7 @@ rollback() {
     fi
     [[ -z "${TRANSACTION_BACKUPS[$index]}" ]] || rm -f "${TRANSACTION_BACKUPS[$index]}"
   done
-  if [[ "${REPLACED[4]}" == true \
-    || "${REPLACED[5]}" == true \
-    || "${REPLACED[6]}" == true \
-    || "${REPLACED[7]}" == true ]]; then
+  if [[ "${SYSTEMD_REPLACED:-false}" == true ]]; then
     "$SYSTEMCTL_BIN" daemon-reload >/dev/null 2>&1 || true
   fi
   exit "$status"
@@ -629,6 +718,9 @@ for index in "${!ARTIFACT_DESTINATIONS[@]}"; do
     cp -p "$destination" "$transaction_backup"
   fi
   REPLACED[index]=true
+  if [[ "$destination" == "$SYSTEMD_DIR/"* ]]; then
+    SYSTEMD_REPLACED=true
+  fi
   mv -f "${STAGED_PATHS[$index]}" "$destination"
   STAGED_PATHS[index]=""
   verify_installed_artifact "$destination" "${ARTIFACT_SHA256S[$index]}" \

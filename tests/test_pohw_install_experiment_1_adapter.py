@@ -23,6 +23,21 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
         "pohw-run-mining-adapter.sh": Path("scripts/pohw-run-mining-adapter.sh"),
         "pohw-run-gossip-mesh.sh": Path("scripts/pohw-run-gossip-mesh.sh"),
         "pohw-health-status.py": Path("scripts/pohw-health-status.py"),
+        "pohw-experiment-1-launch-policy.py": Path(
+            "scripts/pohw-experiment-1-launch-policy.py"
+        ),
+        "experiment-1-full-consensus.json": Path(
+            "compatibility/experiment-1-full-consensus.json"
+        ),
+        "experiment-1-launch-policy.json": Path(
+            "compatibility/experiment-1-launch-policy.json"
+        ),
+        "experiment-1-miner-registry-candidate.json": Path(
+            "compatibility/experiment-1-miner-registry-candidate.json"
+        ),
+        "bitcoind-pohw-experiment-1.service": Path(
+            "deploy/systemd/bitcoind-pohw-experiment-1.service"
+        ),
         "pohw-mining-adapter.service": Path(
             "deploy/systemd/pohw-mining-adapter.service"
         ),
@@ -32,6 +47,12 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
         ),
         "pohw-gossip-mesh-server.conf": Path(
             "deploy/systemd/pohw-gossip-mesh-server.conf"
+        ),
+        "pohw-mining-experiment-1.conf": Path(
+            "deploy/systemd/pohw-mining-experiment-1.conf"
+        ),
+        "pohw-gossip-experiment-1.conf": Path(
+            "deploy/systemd/pohw-gossip-experiment-1.conf"
         ),
     }
 
@@ -81,6 +102,8 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             )
         )
         target = next(item for item in plan["targets"] if item["id"] == "rust-workspace")
+        governance_source = source_root / "target" / "release" / "pohw-governance"
+        self.write_binary(governance_source, "governance-verifier")
         (source_root / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
         for relative_path in self.FIXED_ARTIFACTS.values():
             fixture_path = source_root / relative_path
@@ -140,6 +163,8 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             name = declaration["name"]
             if name == "p2pool-node":
                 artifact_raw = source.read_bytes()
+            elif name == "pohw-governance":
+                artifact_raw = governance_source.read_bytes()
             elif name in self.FIXED_ARTIFACTS:
                 artifact_raw = (source_root / self.FIXED_ARTIFACTS[name]).read_bytes()
             else:
@@ -261,6 +286,8 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                 str(INSTALLER),
                 "--binary",
                 str(source),
+                "--governance-binary",
+                str(source_root / "target" / "release" / "pohw-governance"),
                 "--source-root",
                 str(source_root),
                 "--build-plan",
@@ -312,8 +339,52 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                     source_root / self.FIXED_ARTIFACTS["pohw-health-status.py"],
                     0o755,
                 ),
+                install_root / self.RUNTIME_DIR / "pohw-governance": (
+                    source_root / "target" / "release" / "pohw-governance",
+                    0o755,
+                ),
+                install_root
+                / self.RUNTIME_DIR
+                / "pohw-experiment-1-launch-policy.py": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["pohw-experiment-1-launch-policy.py"],
+                    0o755,
+                ),
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-full-consensus.json": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["experiment-1-full-consensus.json"],
+                    0o644,
+                ),
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-launch-policy.json": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["experiment-1-launch-policy.json"],
+                    0o644,
+                ),
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-miner-registry-candidate.json": (
+                    source_root
+                    / self.FIXED_ARTIFACTS[
+                        "experiment-1-miner-registry-candidate.json"
+                    ],
+                    0o644,
+                ),
                 install_root / self.SYSTEMD_DIR / "pohw-mining-adapter.service": (
                     source_root / self.FIXED_ARTIFACTS["pohw-mining-adapter.service"],
+                    0o644,
+                ),
+                install_root
+                / self.SYSTEMD_DIR
+                / "bitcoind-pohw-experiment-1.service": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["bitcoind-pohw-experiment-1.service"],
                     0o644,
                 ),
                 install_root / self.SYSTEMD_DIR / "pohw-gossip-mesh.service": (
@@ -326,6 +397,22 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                 / "server.conf": (
                     source_root
                     / self.FIXED_ARTIFACTS["pohw-mining-adapter-server.conf"],
+                    0o644,
+                ),
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-mining-adapter.service.d"
+                / "experiment-1.conf": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["pohw-mining-experiment-1.conf"],
+                    0o644,
+                ),
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-gossip-mesh.service.d"
+                / "experiment-1.conf": (
+                    source_root
+                    / self.FIXED_ARTIFACTS["pohw-gossip-experiment-1.conf"],
                     0o644,
                 ),
                 install_root
@@ -345,6 +432,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                     )
             self.assertIn("# old", Path(f"{destination}.previous").read_text())
             service_checks = log.read_text(encoding="utf-8")
+            self.assertIn("bitcoind-pohw-experiment-1.service", service_checks)
             self.assertIn("pohw-mining-adapter.service", service_checks)
             self.assertIn("pohw-gossip-mesh.service", service_checks)
             self.assertIn("daemon-reload", service_checks)
@@ -360,11 +448,30 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             evidence = self.write_build_evidence(source_root, source)
             installed = {
                 install_root / self.RUNTIME_DIR / "p2pool-node": 0o700,
+                install_root / self.RUNTIME_DIR / "pohw-governance": 0o700,
                 install_root
                 / self.RUNTIME_DIR
                 / "pohw-run-mining-adapter.sh": 0o700,
                 install_root / self.RUNTIME_DIR / "pohw-run-gossip-mesh.sh": 0o700,
                 install_root / self.RUNTIME_DIR / "pohw-health-status.py": 0o700,
+                install_root
+                / self.RUNTIME_DIR
+                / "pohw-experiment-1-launch-policy.py": 0o700,
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-full-consensus.json": 0o600,
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-launch-policy.json": 0o600,
+                install_root
+                / self.RUNTIME_DIR
+                / "compatibility"
+                / "experiment-1-miner-registry-candidate.json": 0o600,
+                install_root
+                / self.SYSTEMD_DIR
+                / "bitcoind-pohw-experiment-1.service": 0o600,
                 install_root
                 / self.SYSTEMD_DIR
                 / "pohw-mining-adapter.service": 0o600,
@@ -373,6 +480,14 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                 / self.SYSTEMD_DIR
                 / "pohw-mining-adapter.service.d"
                 / "server.conf": 0o600,
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-mining-adapter.service.d"
+                / "experiment-1.conf": 0o600,
+                install_root
+                / self.SYSTEMD_DIR
+                / "pohw-gossip-mesh.service.d"
+                / "experiment-1.conf": 0o600,
                 install_root
                 / self.SYSTEMD_DIR
                 / "pohw-gossip-mesh.service.d"

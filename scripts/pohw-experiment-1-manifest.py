@@ -18,11 +18,18 @@ TAG = b"POHW_EXPERIMENT_1_ACTIVATION_V1\0"
 HEX_32 = re.compile(r"^[0-9a-f]{64}$")
 HEX_20 = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_UPSTREAM_COMMIT = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
-PREVIOUS_ACTIVATION_ID = "3aed5c759ab096064957555c1f374c0fba6e35c88a3e0ca069ac392df4fec63a"
-EXPECTED_ACTIVATION_ID = "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8"
+REVISION_1_ACTIVATION_ID = "3aed5c759ab096064957555c1f374c0fba6e35c88a3e0ca069ac392df4fec63a"
+PREVIOUS_ACTIVATION_ID = "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8"
+EXPERIMENT_ZERO_ACTIVATION_ID = "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e"
+EXPECTED_ACTIVATION_ID = "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8"
 EXPECTED_FIRST_FORK_HASH = "64d2122b44c111f2f593869ce404117d34c6c830f4390eb70245c11dcc503d01"
-ACTIVATION_PATCH_SHA256 = "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4"
-EXPECTED_PATCH_SHA256 = "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab"
+EXPECTED_REPLAY_PARENT_HEIGHT = 958175
+EXPECTED_REPLAY_PARENT_HASH = "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6"
+EXPECTED_PATCH_SHA256 = "d5b2534a894d3193b72867741a191203a005cd18f050d372efbc209a0d6ee9bb"
+REVISION_2_ACTIVATION_PATCH_SHA256 = "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4"
+REVISION_2_PATCH_SHA256 = "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab"
+REVISION_2_HISTORICAL_PATCH_PATH = "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch"
+REVISION_2_ARCHIVE_PATCH_PATH = "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1-revision-2.patch"
 
 
 class ManifestError(ValueError):
@@ -32,12 +39,13 @@ class ManifestError(ValueError):
 def canonical_payload(manifest: dict[str, Any]) -> bytes:
     payload = copy.deepcopy(manifest)
     payload.pop("activation_id", None)
-    # Test-only patch revisions are artifact metadata, not a new activation.
-    # Preserve the published activation preimage and validate the live artifact
-    # digest independently in validate().
-    build = payload.get("build")
-    if isinstance(build, dict) and "patch_sha256" in build:
-        build["patch_sha256"] = ACTIVATION_PATCH_SHA256
+    if payload.get("profile_revision") == 2:
+        # Revision 2 kept its activation ID while the test-only patch artifact
+        # was hardened. Reconstruct that published activation preimage exactly;
+        # validate() binds the final artifact digest independently.
+        build = payload.get("build")
+        if isinstance(build, dict) and "patch_sha256" in build:
+            build["patch_sha256"] = REVISION_2_ACTIVATION_PATCH_SHA256
     return json.dumps(
         payload,
         sort_keys=True,
@@ -48,15 +56,6 @@ def canonical_payload(manifest: dict[str, Any]) -> bytes:
 
 def activation_id(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(TAG + canonical_payload(manifest)).hexdigest()
-
-
-def activation_manifest_bytes(manifest: dict[str, Any]) -> bytes:
-    """Reconstruct the immutable activation-era manifest serialization."""
-    payload = copy.deepcopy(manifest)
-    build = payload.get("build")
-    if isinstance(build, dict):
-        build["patch_sha256"] = ACTIVATION_PATCH_SHA256
-    return (json.dumps(payload, indent=2, ensure_ascii=True) + "\n").encode("ascii")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -85,14 +84,289 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _validate_revision_two(
+    manifest: dict[str, Any], repo_root: Path, verify_patch: bool
+) -> None:
+    """Validate the superseded revision-2 activation and its archived artifact."""
+    _require(
+        manifest.get("supersedes_activation_id") == REVISION_1_ACTIVATION_ID,
+        "revision 2 must supersede the pinned revision-1 activation ID",
+    )
+    _require(
+        manifest.get("supersedes_activation_id") != manifest.get("activation_id"),
+        "revision 2 must not reuse its predecessor activation ID",
+    )
+
+    predecessor = manifest.get("predecessor", {})
+    _require(
+        predecessor.get("experiment_id") == "pohw-experiment-0",
+        "revision 2 predecessor must be Experiment 0",
+    )
+    _require(
+        predecessor.get("activation_id") == EXPERIMENT_ZERO_ACTIVATION_ID,
+        "revision 2 predecessor activation ID changed",
+    )
+    _require(
+        predecessor.get("history_reinterpreted") is False,
+        "Experiment 0 history must not be reinterpreted",
+    )
+
+    upstream = manifest.get("upstream", {})
+    _require(
+        upstream.get("repository") == "https://github.com/bitcoin/bitcoin.git",
+        "unexpected Bitcoin Core upstream",
+    )
+    _require(upstream.get("tag") == "v31.1", "Bitcoin Core tag must be v31.1")
+    _require(
+        bool(HEX_20.fullmatch(str(upstream.get("commit", "")))),
+        "upstream commit must be an exact 40-character revision",
+    )
+    _require(
+        upstream.get("commit") == EXPECTED_UPSTREAM_COMMIT,
+        "Bitcoin Core commit does not match the pinned v31.1 revision",
+    )
+
+    fork = manifest.get("fork_point", {})
+    height = fork.get("inherited_tip_height")
+    fork_hash = str(fork.get("inherited_tip_hash", ""))
+    first_fork_hash = str(fork.get("first_fork_hash", ""))
+    _require(isinstance(height, int) and height > 0, "inherited tip height must be positive")
+    _require(
+        bool(HEX_32.fullmatch(fork_hash)),
+        "inherited tip hash must be lowercase 32-byte hex",
+    )
+    _require(
+        fork.get("first_fork_height") == height + 1,
+        "first fork height must immediately follow inherited tip",
+    )
+    _require(
+        bool(HEX_32.fullmatch(first_fork_hash)),
+        "first fork hash must be lowercase 32-byte hex",
+    )
+    _require(first_fork_hash != fork_hash, "first fork hash must differ from inherited tip")
+    _require(
+        first_fork_hash == EXPECTED_FIRST_FORK_HASH,
+        "first fork checkpoint does not match live history",
+    )
+
+    network = manifest.get("network", {})
+    expected_magic = hashlib.sha256(
+        f"{manifest['experiment_id']}|{height}|{fork_hash}".encode("ascii")
+    ).hexdigest()[:8]
+    _require(
+        network.get("message_start_hex") == expected_magic,
+        "revision-2 message start does not match its deterministic network identity",
+    )
+    _require(network.get("chain_argument") == "pohw", "chain argument must be pohw")
+    _require(
+        network.get("data_subdirectory") == "pohw-experiment-1",
+        "unexpected data subdirectory",
+    )
+    _require(
+        network.get("dns_seeds") == [] and network.get("fixed_seeds") == [],
+        "Experiment 1 must not inherit Bitcoin mainnet seeds",
+    )
+    _require(
+        network.get("address_encoding") == "bitcoin-mainnet-compatible",
+        "inherited scripts require explicit mainnet-compatible address encoding",
+    )
+    _require(network.get("p2p_port") == 40412, "unexpected Experiment 1 P2P port")
+    _require(network.get("rpc_port") == 40414, "unexpected Experiment 1 RPC port")
+    _require(
+        network.get("p2p_port") != network.get("rpc_port"),
+        "P2P and RPC ports must differ",
+    )
+
+    consensus = manifest.get("consensus", {})
+    _require(
+        consensus.get("engine") == "bitcoin-core-v31.1-full",
+        "full Bitcoin Core consensus engine is required",
+    )
+    _require(
+        consensus.get("all_upstream_transaction_and_script_rules_enabled") is True,
+        "all upstream script paths must remain enabled",
+    )
+    required_script_classes = {
+        "legacy-p2pk",
+        "legacy-p2pkh",
+        "legacy-bare-multisig",
+        "p2sh-and-arbitrary-redeem-scripts",
+        "segwit-v0-p2wpkh",
+        "segwit-v0-p2wsh",
+        "nested-segwit",
+        "taproot-key-path",
+        "taproot-script-path-and-tapscript",
+        "cltv-and-csv-timelocks",
+        "all-other-bitcoin-core-v31.1-consensus-valid-scripts",
+    }
+    script_classes = consensus.get("supported_transaction_and_script_classes", [])
+    _require(
+        isinstance(script_classes, list),
+        "supported transaction and script classes must be a list",
+    )
+    _require(
+        required_script_classes.issubset(set(script_classes)),
+        "full upstream transaction and script surface is not declared",
+    )
+    _require(
+        consensus.get("policy_and_wallet_behavior")
+        == "unchanged-from-bitcoin-core-v31.1-except-for-fork-replay-protection",
+        "revision-2 wallet and relay policy must remain explicit",
+    )
+    _require(
+        consensus.get("inherited_utxo_spending_enabled") is True,
+        "inherited UTXO spending must be explicit",
+    )
+    replay = consensus.get("replay_protection", {})
+    _require(replay.get("required") is True, "replay protection cannot be disabled")
+    _require(
+        replay.get("rule") == "inherited-input-requires-fork-only-marker-v2",
+        "unexpected revision-2 replay-protection rule",
+    )
+    _require(
+        replay.get("marker_activation_height") == height + 2,
+        "unexpected replay-marker activation height",
+    )
+    _require(replay.get("marker_script_hex") == "5150", "unexpected replay-marker script")
+    _require(
+        "100-block" in str(replay.get("bootstrap_constraint", "")),
+        "inherited-spend bootstrap constraint must be explicit",
+    )
+
+    proof = consensus.get("proof_of_work", {})
+    _require(
+        proof.get("algorithm") == "bootstrap-then-bitcoin-2016-v1",
+        "unexpected PoW algorithm",
+    )
+    _require(proof.get("bootstrap_pow_limit_bits") == "207fffff", "unexpected bootstrap target")
+    _require(
+        proof.get("bootstrap_handoff_hashrate_hps") == 1_000_000_000_000_000,
+        "unexpected handoff hashrate",
+    )
+    _require(proof.get("handoff_version_bit") == 27, "unexpected handoff version bit")
+    _require(proof.get("target_spacing_seconds") == 600, "target spacing must be 600 seconds")
+    _require(
+        proof.get("post_handoff_retarget_interval") == 2016,
+        "post-handoff retarget interval must be 2016",
+    )
+
+    bootstrap = manifest.get("bootstrap", {})
+    _require(bootstrap.get("copy_wallets") is False, "bootstrap must not copy wallets")
+    _require(
+        bootstrap.get("copy_rpc_credentials") is False,
+        "bootstrap must not copy RPC credentials",
+    )
+    _require(bootstrap.get("copy_peer_state") is False, "bootstrap must not copy peer state")
+
+    build = manifest.get("build", {})
+    _require(
+        build.get("cmake_flags")
+        == [
+            "-DBUILD_GUI=OFF",
+            "-DBUILD_TESTS=ON",
+            "-DBUILD_BENCH=OFF",
+            "-DBUILD_FUZZ_BINARY=OFF",
+            "-DENABLE_IPC=OFF",
+        ],
+        "canonical CMake flags must remain exact and ordered",
+    )
+    _require(
+        build.get("patch_path") == REVISION_2_HISTORICAL_PATCH_PATH,
+        "revision-2 historical patch reference changed",
+    )
+    patch_hash = str(build.get("patch_sha256", ""))
+    _require(
+        patch_hash == REVISION_2_PATCH_SHA256,
+        "revision-2 patch_sha256 does not match the released artifact",
+    )
+    # The historical manifest used a stable generic filename. Resolve it to a
+    # revision-qualified archive so later profiles cannot substitute its bytes.
+    patch_path = (repo_root / REVISION_2_ARCHIVE_PATCH_PATH).resolve()
+    _require(repo_root.resolve() in patch_path.parents, "archived patch path escapes repository")
+    if verify_patch:
+        try:
+            patch_bytes = patch_path.read_bytes()
+        except OSError as exc:
+            raise ManifestError(f"cannot read archived revision-2 patch {patch_path}: {exc}") from exc
+        _require(
+            hashlib.sha256(patch_bytes).hexdigest() == patch_hash,
+            "archived revision-2 Bitcoin Core patch SHA-256 mismatch",
+        )
+        patch_text = patch_bytes.decode("utf-8", errors="strict")
+        for required in (
+            f"FORK_HEIGHT{{{height}}}",
+            f"REPLAY_MARKER_ACTIVATION_HEIGHT{{{height + 2}}}",
+            fork_hash,
+            first_fork_hash,
+            "pohw_first_fork_hash",
+            "wrong_first_fork_block",
+            "coin->IsCoinBase() && coin->out.nValue == 0",
+            "MESSAGE_START{0xd9, 0x70, 0x38, 0xba}",
+            "P2P_PORT{40412}",
+            "RPC_PORT{40414}",
+            "BOOTSTRAP_HANDOFF_HASHRATE_HPS{1'000'000'000'000'000ULL}",
+            "HANDOFF_VERSION_BIT{1 << 27}",
+            'NETWORK_ID[] = "pohw-experiment-1-full-consensus"',
+            "CheckPoHWForkReplayProtection",
+            "SCRIPT_VERIFY_POHW_REPLAY_MARKER",
+            "CScript{} << OP_1 << OP_RESERVED",
+            "IsBlockFileMessageStart",
+            "FindAnyByte",
+            "CChainParams::PoHW",
+            "ChainType::POHW",
+            "feature_pohw_replay.py",
+            "pohw_replay_test",
+            "-testactivationheight=pohw-replay@",
+            "self.setup_clean_chain = True",
+            'assert_equal(unprotected_result["reject-reason"], REPLAY_REJECT_REASON)',
+            'assert_equal(protected_result["allowed"], True)',
+        ):
+            _require(
+                required in patch_text,
+                f"archived revision-2 patch is missing consensus marker: {required}",
+            )
+
+    actual_activation = str(manifest.get("activation_id", ""))
+    _require(
+        bool(HEX_32.fullmatch(actual_activation)),
+        "activation_id must be lowercase 32-byte hex",
+    )
+    _require(
+        actual_activation == PREVIOUS_ACTIVATION_ID,
+        "revision-2 activation ID must remain pinned",
+    )
+    _require(
+        actual_activation == activation_id(manifest),
+        "revision-2 activation_id does not match its historical canonical payload",
+    )
+
+    risks = manifest.get("risk_acknowledgements", [])
+    _require(
+        isinstance(risks, list) and len(risks) >= 5,
+        "risk acknowledgements are incomplete",
+    )
+    risk_text = " ".join(str(item).lower() for item in risks)
+    for term in (
+        "no promised monetary value",
+        "same private keys",
+        "idena",
+        "replay",
+        "real mainnet btc",
+    ):
+        _require(term in risk_text, f"risk acknowledgements must mention {term!r}")
+
+
 def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = True) -> None:
     _require(manifest.get("schema_version") == SCHEMA, f"schema_version must be {SCHEMA}")
     _require(manifest.get("experiment_id") == "pohw-experiment-1-full-consensus", "unexpected experiment_id")
-    _require(manifest.get("profile_revision") == 2, "Experiment 1 profile revision must be 2")
     _require(manifest.get("status") == "experimental-no-value", "status must remain experimental-no-value")
+    if manifest.get("profile_revision") == 2:
+        _validate_revision_two(manifest, repo_root, verify_patch)
+        return
+    _require(manifest.get("profile_revision") == 3, "Experiment 1 profile revision must be 2 or 3")
     _require(
         manifest.get("supersedes_activation_id") == PREVIOUS_ACTIVATION_ID,
-        "profile revision must supersede the pinned revision-1 activation ID",
+        "profile revision must supersede the pinned revision-2 activation ID",
     )
     _require(
         manifest.get("supersedes_activation_id") != manifest.get("activation_id"),
@@ -100,7 +374,15 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
     )
 
     predecessor = manifest.get("predecessor", {})
-    _require(predecessor.get("history_reinterpreted") is False, "Experiment 0 history must not be reinterpreted")
+    _require(predecessor.get("experiment_id") == manifest.get("experiment_id"), "revision 3 must identify revision 2 as its predecessor")
+    _require(predecessor.get("profile_revision") == 2, "predecessor profile revision must be 2")
+    _require(predecessor.get("activation_id") == PREVIOUS_ACTIVATION_ID, "predecessor activation ID must match revision 2")
+    _require(predecessor.get("history_reinterpreted") is False, "revision 2 history must not be reinterpreted")
+    lineage = manifest.get("lineage", [])
+    _require(isinstance(lineage, list) and len(lineage) == 1, "Experiment 0 lineage must remain explicit")
+    _require(lineage[0].get("experiment_id") == "pohw-experiment-0", "unexpected Experiment 1 lineage")
+    _require(lineage[0].get("activation_id") == EXPERIMENT_ZERO_ACTIVATION_ID, "Experiment 0 lineage activation ID changed")
+    _require(lineage[0].get("history_reinterpreted") is False, "Experiment 0 history must not be reinterpreted")
 
     upstream = manifest.get("upstream", {})
     _require(upstream.get("repository") == "https://github.com/bitcoin/bitcoin.git", "unexpected Bitcoin Core upstream")
@@ -121,9 +403,13 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
 
     network = manifest.get("network", {})
     expected_magic = hashlib.sha256(
-        f"{manifest['experiment_id']}|{height}|{fork_hash}".encode("ascii")
+        f"{manifest['experiment_id']}|{height}|{fork_hash}|3".encode("ascii")
     ).hexdigest()[:8]
     _require(network.get("message_start_hex") == expected_magic, "message start does not match the deterministic network identity")
+    _require(
+        network.get("legacy_block_file_message_start_hex") == ["f9beb4d9", "d97038ba"],
+        "revision 3 must read both inherited and revision-2 block-file magics",
+    )
     _require(network.get("chain_argument") == "pohw", "chain argument must be pohw")
     _require(network.get("data_subdirectory") == "pohw-experiment-1", "unexpected data subdirectory")
     _require(network.get("dns_seeds") == [] and network.get("fixed_seeds") == [], "Experiment 1 must not inherit Bitcoin mainnet seeds")
@@ -153,16 +439,43 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
     _require(required_script_classes.issubset(set(script_classes)), "full upstream transaction and script surface is not declared")
     _require(
         consensus.get("policy_and_wallet_behavior")
-        == "unchanged-from-bitcoin-core-v31.1-except-for-fork-replay-protection",
-        "upstream wallet and relay policy must remain explicit",
+        == "bitcoin-core-v31.1-with-fork-replay-domain-versioning-and-marker-validation",
+        "fork wallet and relay policy must remain explicit",
     )
     _require(consensus.get("inherited_utxo_spending_enabled") is True, "inherited UTXO spending must be explicit")
     replay = consensus.get("replay_protection", {})
     _require(replay.get("required") is True, "replay protection cannot be disabled")
-    _require(replay.get("rule") == "inherited-input-requires-fork-only-marker-v2", "unexpected replay-protection rule")
+    _require(replay.get("rule") == "inherited-input-requires-fork-marker-and-signature-domain-v3", "unexpected replay-protection rule")
     _require(replay.get("marker_activation_height") == height + 2, "unexpected replay-marker activation height")
     _require(replay.get("marker_script_hex") == "5150", "unexpected replay-marker script")
     _require("100-block" in str(replay.get("bootstrap_constraint", "")), "inherited-spend bootstrap constraint must be explicit")
+    domain = replay.get("signature_domain", {})
+    _require(domain.get("activation_height") == EXPECTED_REPLAY_PARENT_HEIGHT + 1, "unexpected replay-domain activation height")
+    _require(domain.get("activation_parent_height") == EXPECTED_REPLAY_PARENT_HEIGHT, "unexpected replay-domain parent height")
+    _require(domain.get("activation_parent_hash") == EXPECTED_REPLAY_PARENT_HASH, "unexpected replay-domain parent checkpoint")
+    _require(domain.get("transaction_version_bit") == 30, "unexpected replay-domain transaction version bit")
+    _require(domain.get("transaction_version_mask") == 1 << 30, "unexpected replay-domain transaction version mask")
+    _require(
+        domain.get("domain") == "pohw-experiment-1-full-consensus/replay-sighash-v3",
+        "unexpected replay signature domain",
+    )
+    _require(
+        domain.get("mempool_transition")
+        == "purge-all-transactions-on-domain-boundary-including-reorg-crossings",
+        "replay signature-domain mempool transition must remain fail-closed",
+    )
+    _require(
+        domain.get("covered_signature_paths")
+        == ["legacy", "segwit-v0", "taproot-key-path", "taproot-script-path-and-tapscript"],
+        "replay signature coverage must remain exact and ordered",
+    )
+    _require(domain.get("required_for_inherited_input_spends") is True, "inherited inputs must require the replay signature domain")
+    _require(domain.get("wallet_and_raw_transaction_creation_set_bit_automatically") is True, "wallet and raw transaction creation must select the replay version")
+    history = replay.get("pre_activation_history", {})
+    _require(history.get("first_height") == fork.get("first_fork_height"), "unexpected replay audit start")
+    _require(history.get("last_height") == EXPECTED_REPLAY_PARENT_HEIGHT, "unexpected replay audit end")
+    _require(history.get("observed_non_coinbase_transaction_count") == 0, "revision-3 checkpoint prefix must remain transaction-free")
+    _require(history.get("checkpoint_enforced") is True, "revision-3 activation parent must be consensus-pinned")
 
     proof = consensus.get("proof_of_work", {})
     _require(proof.get("algorithm") == "bootstrap-then-bitcoin-2016-v1", "unexpected PoW algorithm")
@@ -210,7 +523,8 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
             "pohw_first_fork_hash",
             "wrong_first_fork_block",
             "coin->IsCoinBase() && coin->out.nValue == 0",
-            "{0xd9, 0x70, 0x38, 0xba}",
+            "PREVIOUS_MESSAGE_START{0xd9, 0x70, 0x38, 0xba}",
+            "MESSAGE_START{0x90, 0x21, 0x63, 0x1e}",
             "P2P_PORT{40412}",
             "RPC_PORT{40414}",
             "BOOTSTRAP_HANDOFF_HASHRATE_HPS{1'000'000'000'000'000ULL}",
@@ -218,6 +532,19 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
             'NETWORK_ID[] = "pohw-experiment-1-full-consensus"',
             "CheckPoHWForkReplayProtection",
             "SCRIPT_VERIFY_POHW_REPLAY_MARKER",
+            "REPLAY_DOMAIN_PARENT_HEIGHT{958175}",
+            EXPECTED_REPLAY_PARENT_HASH,
+            "REPLAY_SIGHASH_VERSION_BIT{1U << 30}",
+            'REPLAY_SIGHASH_DOMAIN[] =',
+            "pohw-experiment-1-full-consensus/replay-sighash-v3",
+            "bad-pohw-replay-domain",
+            "ReplayProtectedVersion",
+            "pohw_replay_sighash_domain_resists_marker_stripping",
+            "PurgeMempoolForPoHWReplaySighashTransition",
+            "purges pre-activation transactions",
+            "ActiveChainReplaySighashCheckpointMatches",
+            "Loaded PoHW chainstate does not contain the pinned replay-sighash parent checkpoint",
+            "pohw_active_chain_replay_checkpoint_is_fail_closed",
             "CScript{} << OP_1 << OP_RESERVED",
             "IsBlockFileMessageStart",
             "FindAnyByte",
@@ -227,6 +554,8 @@ def validate(manifest: dict[str, Any], repo_root: Path, verify_patch: bool = Tru
             "pohw_replay_test",
             "-testactivationheight=pohw-replay@",
             "self.setup_clean_chain = True",
+            "--configfile",
+            "--testsdir",
             'assert_equal(unprotected_result["reject-reason"], REPLAY_REJECT_REASON)',
             'assert_equal(protected_result["allowed"], True)',
         ):

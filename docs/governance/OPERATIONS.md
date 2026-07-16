@@ -216,7 +216,7 @@ For the governance-contract target, the worker result record is:
     {"command": "go -C ../idena-go mod download", "exitCode": 0},
     {"command": "corepack pnpm --dir contracts/idena-code-governance build", "exitCode": 0},
     {"command": "corepack pnpm --dir contracts/idena-code-governance test", "exitCode": 0},
-    {"command": "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm --component-repo wasmer=../wasmer --component-repo idena-sdk-js-lite=../idena-sdk-js-lite --require-locked-sources", "exitCode": 0}
+    {"command": "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm", "exitCode": 0}
   ]
 }
 ```
@@ -370,12 +370,107 @@ The attestation inputs contain public Idena addresses and authentication, so
 generate them in a protected working directory. Never put private keys or RPC
 credentials in the JSON.
 
+The payload `authentication` field is an intent marker, not proof by itself.
+Use `detached-idena-signature-v1` for evidence consumed by the offline
+deployment-readiness verifier. `on-chain-submitter` remains valid only inside
+contract execution, where the runtime supplies the caller; receipt-shaped JSON
+is not accepted as a substitute for an authenticated chain proof. Review,
+build, availability, and external-audit packaging commands write a deterministic
+`*.authentication-request.json`. Sign its exact
+`challenge` with the declared Idena address, place the public recoverable
+signature in a file, and assemble the detached envelope:
+
+```sh
+cargo run -p governance-cli -- attestation-authenticate \
+  --kind build \
+  --car /tmp/build-attestation/build-attestation.car \
+  --signature-file /protected/build-attestation.signature \
+  --output-dir /tmp/build-attestation-auth
+
+cargo run -p governance-cli -- attestation-verify \
+  --kind build \
+  --car /tmp/build-attestation/build-attestation.car \
+  --authentication /tmp/build-attestation-auth/build-attestation.authentication.json
+```
+
+The signature uses the existing Idena sign-in convention and covers a
+domain-separated digest of the attestation kind, exact DAG-CBOR CID and
+content digest, candidate ecosystem CID, and role identity. Reusing a
+signature for another CAR, candidate, builder, auditor, or pin operator fails.
+The signature is public; private keys must remain in the wallet.
+
+`FinalizedOnChainAttestationReceiptV1` is reserved for a later authenticated
+Idena inclusion/finality verifier. The current offline verifier rejects it even
+when all JSON fields look plausible, because those fields can otherwise be
+fabricated. Contract submissions remain authenticated by the actual runtime
+caller.
+
 Each packaging command writes a `*.dag-cbor.hex` file next to its CAR. Submit
 the exact CID and canonical bytes together with the Merkle proof. The contract
 recomputes the CID, checks the caller and attached bond against the payload,
 and derives all gate claims from those verified bytes. A caller-supplied model
 family, digest, platform, verdict, test result, availability result, or owner
 is not authoritative.
+
+Deployment readiness additionally requires a detached authentication envelope
+for every build, availability, and external-audit CAR. Relative paths resolve
+from the readiness input file:
+
+```json
+{
+  "schemaVersion": 1,
+  "scopeCar": "proposal-scope.car",
+  "buildAttestations": [
+    {
+      "car": "builder-a/build-attestation.car",
+      "authentication": "builder-a/build-attestation.authentication.json"
+    },
+    {
+      "car": "builder-b/build-attestation.car",
+      "authentication": "builder-b/build-attestation.authentication.json"
+    }
+  ],
+  "dataAvailabilityAttestations": [
+    {
+      "car": "pin-a/data-availability-attestation.car",
+      "authentication": "pin-a/data-availability-attestation.authentication.json"
+    },
+    {
+      "car": "pin-b/data-availability-attestation.car",
+      "authentication": "pin-b/data-availability-attestation.authentication.json"
+    }
+  ],
+  "externalAuditAttestations": [
+    {
+      "car": "audit-a/external-audit-attestation.car",
+      "authentication": "audit-a/external-audit-attestation.authentication.json"
+    }
+  ],
+  "requiredAvailabilityThroughBlock": 123456
+}
+```
+
+```sh
+cargo run -p governance-cli -- deployment-readiness-verify \
+  --input /verified/readiness/deployment-readiness.json \
+  --output-dir /verified/readiness/report
+
+cargo run -p governance-cli -- deployment-readiness-evidence-verify \
+  --car /verified/readiness/report/deployment-readiness-evidence.car
+```
+
+The verifier reconstructs every canonical content CID and authentication
+binding offline. A self-declared identity, the legacy intent marker alone, or
+an envelope copied from another attestation contributes zero to independence
+thresholds; the builder, availability, and audit thresholds are unchanged.
+The output directory contains `deployment-readiness-report.car` and
+`deployment-readiness-evidence.car`, with CID and SHA-256 sidecars for each.
+The report commits to the evidence-bundle CID. The second command replays the
+actual canonical scope and authenticated attestation packages from that bundle
+and recomputes the complete report; a report containing only favorable copied
+counts is therefore insufficient. A production launch policy must bind both
+CARs, and its service interlock must compare the recomputed report byte for byte
+with the policy-bound report.
 
 Three distinct eligible operator identities must submit matching canonical
 `IdentityMetricsAttestationV1` objects before a metrics root/epoch can be used.

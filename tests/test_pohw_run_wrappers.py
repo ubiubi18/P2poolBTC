@@ -210,7 +210,7 @@ class RunWrapperValidationTest(unittest.TestCase):
             env = self.base_env(root)
             env.pop("POHW_BITCOIN_EXPECTED_CHAIN", None)
             env["POHW_GOSSIP_NETWORK_ID"] = (
-                "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8"
+                "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8"
             )
             env["POHW_REQUIRE_IDENA_ANCHOR_POLICY"] = "false"
 
@@ -1012,7 +1012,7 @@ class RunWrapperValidationTest(unittest.TestCase):
             env.update(
                 {
                     "POHW_DATADIR": str(root / "datadir"),
-                    "POHW_GOSSIP_NETWORK_ID": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+                    "POHW_GOSSIP_NETWORK_ID": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
                     "POHW_REQUIRE_IDENA_ANCHOR_POLICY": "false",
                 }
             )

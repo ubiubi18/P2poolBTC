@@ -529,6 +529,11 @@ enum Command {
         #[arg(long)]
         policy_file: PathBuf,
     },
+    /// Verify the exact registry deployment and immutable parameters through live Idena RPC.
+    VerifyIdenaRegistryDeployment {
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
+    },
     ReadMinerRegistryAnchor {
         #[arg(long)]
         contract_address: String,
@@ -2414,6 +2419,12 @@ async fn main() -> Result<()> {
                 }))?
             );
         }
+        Command::VerifyIdenaRegistryDeployment { idena_anchor } => {
+            let verifier = idena_anchor_verifier_from_options(&idena_anchor)?
+                .context("--idena-anchor-policy is required")?;
+            verifier.verify_registry_deployment().await?;
+            println!("Idena registry deployment verified against synchronized local RPC");
+        }
         Command::ReadMinerRegistryAnchor {
             contract_address,
             experiment_id,
@@ -2959,7 +2970,7 @@ async fn main() -> Result<()> {
                 if let Some(client) = bitcoin_rpc_client.as_ref() {
                     let chain_info = client.get_blockchain_info().await?;
                     ensure_expected_rpc_chain(&chain_info, expected_rpc_chain.as_deref())?;
-                    ensure_bitcoin_mining_ready(&chain_info)?;
+                    ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
                     if auto_submit_blocks {
                         ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
                     }
@@ -3061,8 +3072,9 @@ async fn main() -> Result<()> {
                 rpc_cookie_file,
                 allow_remote_rpc,
             )?;
+            let (_, material) = mining_job_template_if_ready(&client).await?;
             let built =
-                mining_adapter::build_stratum_job_from_rpc(&client, extranonce2_size).await?;
+                mining_adapter::build_stratum_job_from_template(&material, extranonce2_size)?;
             if replace {
                 write_json_file_replace_existing_regular(&job_out, &built.job)?;
             } else {
@@ -3104,7 +3116,7 @@ async fn main() -> Result<()> {
                 rpc_cookie_file,
                 allow_remote_rpc,
             )?;
-            let material = client.mining_job_template().await?;
+            let (_, material) = mining_job_template_if_ready(&client).await?;
             let built = mining_adapter::build_pohw_stratum_job_from_template(
                 &material,
                 &payout_schedule,
@@ -3156,7 +3168,7 @@ async fn main() -> Result<()> {
                 rpc_cookie_file,
                 allow_remote_rpc,
             )?;
-            let material = client.mining_job_template().await?;
+            let (_, material) = mining_job_template_if_ready(&client).await?;
             let built = mining_adapter::build_dynamic_pohw_stratum_job_from_template(
                 &datadir,
                 &snapshot_dir,
@@ -3205,9 +3217,7 @@ async fn main() -> Result<()> {
                 rpc_cookie_file,
                 allow_remote_rpc,
             )?;
-            let chain_info = client.get_blockchain_info().await?;
-            ensure_bitcoin_mining_ready(&chain_info)?;
-            let template = client.mining_job_template().await?;
+            let (chain_info, template) = mining_job_template_if_ready(&client).await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -6325,8 +6335,40 @@ async fn detect_pohw_time_dependent_bits_admission(
     if !chain_info.chain.eq_ignore_ascii_case("pohw") {
         return Ok(false);
     }
-    ensure_bitcoin_mining_ready(&chain_info)?;
+    ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
     Ok(true)
+}
+
+async fn ensure_bitcoin_mining_ready_with_rpc(
+    client: &BitcoinRpcClient,
+    chain_info: &BlockchainInfoResponse,
+) -> Result<()> {
+    ensure_bitcoin_mining_ready(chain_info)?;
+    if chain_info.chain.eq_ignore_ascii_case("pohw") {
+        let checkpoint_height = bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT - 1;
+        let checkpoint_hash = client.get_block_hash(checkpoint_height).await?;
+        ensure_pohw_active_chain_checkpoint_hash(&checkpoint_hash)?;
+    }
+    Ok(())
+}
+
+async fn mining_job_template_if_ready(
+    client: &BitcoinRpcClient,
+) -> Result<(
+    BlockchainInfoResponse,
+    bitcoin_rpc::BitcoinMiningJobTemplate,
+)> {
+    let chain_info = client.get_blockchain_info().await?;
+    ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
+    let template = client.mining_job_template_unchecked().await?;
+    Ok((chain_info, template))
+}
+
+fn ensure_pohw_active_chain_checkpoint_hash(checkpoint_hash: &str) -> Result<()> {
+    if checkpoint_hash != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH {
+        bail!("pohw active chain does not contain the pinned revision-3 replay checkpoint");
+    }
+    Ok(())
 }
 
 fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
@@ -6365,19 +6407,22 @@ fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()
             .pohw_experiment
             .as_ref()
             .context("pohw RPC is missing Experiment 1 consensus metadata")?;
-        if chain_info.blocks < profile.fork_height {
-            bail!("pohw RPC has not reached its inherited fork point");
-        }
-        if profile.replay_marker_activation_height != profile.fork_height.saturating_add(2)
-            || !profile.inherited_utxo_spending
-            || profile.replay_protection != "inherited-input-requires-fork-only-marker-v2"
-            || profile.bootstrap_handoff_hashrate_hps == 0
-        {
-            bail!("pohw RPC consensus metadata does not match the required mining profile");
+        let required_checkpoint_height =
+            bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT - 1;
+        if chain_info.blocks < required_checkpoint_height {
+            bail!(
+                "pohw RPC has not reached the pinned revision-3 checkpoint: blocks={} required={}",
+                chain_info.blocks,
+                required_checkpoint_height
+            );
         }
         for (label, value) in [
             ("fork hash", profile.fork_hash.as_str()),
             ("first fork hash", profile.first_fork_hash.as_str()),
+            (
+                "replay-sighash parent hash",
+                profile.replay_sighash_parent_hash.as_str(),
+            ),
         ] {
             if value.len() != 64
                 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
@@ -6385,6 +6430,25 @@ fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()
             {
                 bail!("pohw RPC {label} is not canonical");
             }
+        }
+        if profile.fork_height != bitcoin_rpc::POHW_EXPERIMENT_1_FORK_HEIGHT
+            || profile.fork_hash != bitcoin_rpc::POHW_EXPERIMENT_1_FORK_HASH
+            || profile.first_fork_hash != bitcoin_rpc::POHW_EXPERIMENT_1_FIRST_FORK_HASH
+            || profile.replay_marker_activation_height
+                != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_MARKER_ACTIVATION_HEIGHT
+            || profile.replay_sighash_activation_height
+                != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT
+            || profile.replay_sighash_parent_hash
+                != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH
+            || profile.replay_sighash_version_bit
+                != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_VERSION_BIT
+            || profile.replay_sighash_domain != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_DOMAIN
+            || !profile.inherited_utxo_spending
+            || profile.replay_protection != bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE
+            || profile.bootstrap_handoff_hashrate_hps
+                != bitcoin_rpc::POHW_EXPERIMENT_1_BOOTSTRAP_HANDOFF_HASHRATE_HPS
+        {
+            bail!("pohw RPC consensus metadata does not match the required mining profile");
         }
     }
     Ok(())
@@ -7944,24 +8008,39 @@ mod tests {
     fn pohw_mining_readiness_uses_fork_metadata_not_mainnet_progress_estimation() {
         let ready = BlockchainInfoResponse {
             chain: "pohw".to_string(),
-            blocks: 958_020,
-            headers: 958_020,
+            blocks: 958_175,
+            headers: 958_175,
             initial_block_download: false,
             verificationprogress: 0.999_9,
             pruned: false,
             pohw_experiment: Some(bitcoin_rpc::PohwExperimentInfoResponse {
                 fork_height: 958_016,
-                fork_hash: "11".repeat(32),
-                first_fork_hash: "22".repeat(32),
+                fork_hash: bitcoin_rpc::POHW_EXPERIMENT_1_FORK_HASH.to_string(),
+                first_fork_hash: bitcoin_rpc::POHW_EXPERIMENT_1_FIRST_FORK_HASH.to_string(),
                 inherited_utxo_spending: true,
-                replay_protection: "inherited-input-requires-fork-only-marker-v2".to_string(),
+                replay_protection: bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE
+                    .to_string(),
                 replay_marker_activation_height: 958_018,
+                replay_sighash_activation_height: 958_176,
+                replay_sighash_parent_hash:
+                    bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH.to_string(),
+                replay_sighash_version_bit: 1 << 30,
+                replay_sighash_domain: bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_DOMAIN
+                    .to_string(),
                 bootstrap_handoff_hashrate_hps: 1_000_000_000_000_000,
                 handoff_active: false,
             }),
         };
 
         assert!(ensure_bitcoin_mining_ready(&ready).is_ok());
+
+        let mut before_checkpoint = ready.clone();
+        before_checkpoint.blocks = 958_174;
+        before_checkpoint.headers = 958_174;
+        assert!(ensure_bitcoin_mining_ready(&before_checkpoint)
+            .unwrap_err()
+            .to_string()
+            .contains("pinned revision-3 checkpoint"));
 
         let mut missing_profile = ready.clone();
         missing_profile.pohw_experiment = None;
@@ -7991,6 +8070,18 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not canonical"));
+    }
+
+    #[test]
+    fn pohw_active_chain_checkpoint_hash_is_verified_independently() {
+        assert!(ensure_pohw_active_chain_checkpoint_hash(
+            bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH
+        )
+        .is_ok());
+        assert!(ensure_pohw_active_chain_checkpoint_hash(&"00".repeat(32))
+            .unwrap_err()
+            .to_string()
+            .contains("active chain"));
     }
 
     #[test]

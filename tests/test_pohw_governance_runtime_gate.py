@@ -20,6 +20,104 @@ SPEC.loader.exec_module(MODULE)
 
 
 class GovernanceRuntimeGateTests(unittest.TestCase):
+    def test_staged_candidate_patch_includes_new_files_and_rejects_dirty_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            repository = temporary_root / "component"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "candidate-gate@example.invalid"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Candidate Gate Test"],
+                cwd=repository,
+                check=True,
+            )
+            tracked = repository / "tracked.txt"
+            untouched = repository / "untouched.txt"
+            tracked.write_text("before\n", encoding="utf-8")
+            untouched.write_text("untouched\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "--", tracked.name, untouched.name],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "base"],
+                cwd=repository,
+                check=True,
+            )
+
+            added = repository / "new.txt"
+            tracked.write_text("after\n", encoding="utf-8")
+            added.write_text("new candidate source\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "--", tracked.name, added.name],
+                cwd=repository,
+                check=True,
+            )
+            patch_payload = subprocess.run(
+                ["git", "diff", "--cached", "--binary", "HEAD", "--", tracked.name, added.name],
+                cwd=repository,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            patch_path = temporary_root / "candidate.patch"
+            patch_path.write_bytes(patch_payload)
+            subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "apply", "--index", str(patch_path)],
+                cwd=repository,
+                check=True,
+            )
+
+            paths = MODULE.candidate_patch_paths(patch_payload)
+            self.assertEqual(paths, {tracked.name, added.name})
+            MODULE.verify_staged_candidate_patch(
+                repository,
+                patch_path,
+                patch_payload,
+                paths,
+                "fixture",
+                allowed_unstaged_paths=set(),
+                state_label="source",
+            )
+            self.assertFalse(
+                subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", added.name],
+                    cwd=repository,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
+            )
+
+            untouched.write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.GateError, "unexpected candidate source changes"):
+                MODULE.verify_staged_candidate_patch(
+                    repository,
+                    patch_path,
+                    patch_payload,
+                    paths,
+                    "fixture",
+                    allowed_unstaged_paths=set(),
+                    state_label="source",
+                )
+            untouched.write_text("untouched\n", encoding="utf-8")
+            (repository / "untracked.txt").write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.GateError, "untracked candidate source files"):
+                MODULE.verify_staged_candidate_patch(
+                    repository,
+                    patch_path,
+                    patch_payload,
+                    paths,
+                    "fixture",
+                    allowed_unstaged_paths=set(),
+                    state_label="source",
+                )
+
     def test_raw_cid_matches_locked_contract_artifact(self):
         digest = "8d05fd842aefd3d4a078038c8fbf8744af8a22d88b1fc7a56be27f7fe835da49"
         self.assertEqual(
@@ -196,6 +294,21 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
         self.assertEqual(artifact["expectedCid"], locked["cid"])
         self.assertEqual(artifact["expectedSha256"], locked["sha256"])
         self.assertEqual(artifact["expectedSize"], locked["size"])
+        dependencies = {
+            item["path"]: item["sha256"] for item in target["dependencyLocks"]
+        }
+        candidate_path = "compatibility/governance-day-fork-candidate-lock.json"
+        self.assertEqual(
+            dependencies[candidate_path],
+            hashlib.sha256((ROOT / candidate_path).read_bytes()).hexdigest(),
+        )
+        runtime_command = next(
+            command
+            for command in target["commands"]
+            if "pohw-governance-runtime-gate.py" in command
+        )
+        self.assertIn(f"--fork-candidate-lock {candidate_path}", runtime_command)
+        self.assertNotIn("--require-locked-sources", runtime_command)
 
     def test_current_and_historical_contract_locks_remain_distinct(self):
         current = MODULE.load_json(

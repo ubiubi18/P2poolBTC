@@ -75,7 +75,10 @@ This implementation is safe only for local, no-value testing.
   coordinated identity-farming or censorship attack, so public-testnet
   parameters still require adversarial capacity testing.
 - Model family, runtime family, architecture, provider, and pin-operator labels
-  are authenticated to the submitting Idena identity but remain self-asserted.
+  are bound to an Idena identity by a verified detached signature before
+  deployment readiness counts them, but remain self-asserted. Receipt-shaped
+  JSON is deliberately rejected until an authenticated Idena chain-proof
+  verifier exists.
   Diversity counts therefore resist duplicate identities, not coordinated
   operators lying about infrastructure. External attestation or measured
   execution is still required before these labels can be treated as strong
@@ -132,21 +135,30 @@ This implementation is safe only for local, no-value testing.
   profile.
 - Source CIDs for the five legacy-pinned components are exact, but public CAR
   replication and independent availability attestations have not been run.
-- The contract artifact in the fork lock is bound to a committed experimental
-  prototype. It is explicitly unauthorized and not a release.
+- `governance-fork-lock.json` is a historical inactive prototype lock. The
+  current contract and host-ABI patches are instead bound by the separate
+  `governance-day-fork-candidate-lock.json`; that candidate has no commits,
+  activation height, release authorization, or canonical authority.
 - Exact locked Rust 1.97.0 and Go 1.26.5 builds must be performed by attested
   clean-room builders. A local development build with different versions is
   non-attested and its tool versions must be reported.
-- `pohw-governance-runtime-gate.py --require-locked-sources` intentionally
-  fails while the fork lock is not marked `canonical-locked-source` or any
-  component is dirty/revision-mismatched. The local production-runtime pass is
-  not a clean-room or independent-builder attestation. Normal CI verifies that
-  such a prototype remains inactive and unauthorized, then skips the release-
-  grade invocation; this skip is not release evidence.
+- The current candidate runtime gate deliberately cannot be combined with
+  `--require-locked-sources`: its candidate commits are unset. The local
+  production-runtime pass is not a clean-room or independent-builder
+  attestation. Normal CI verifies that the candidate remains inactive and
+  unauthorized, then skips the release-grade invocation; this skip is not
+  release evidence.
 - A deterministic build-evidence generator and SBOM workflow exist and have
   local fixture coverage. No independent clean-room builder attestations,
   reviewer attestations, public evidence replication, or external security
   audit exist yet.
+- Deployment readiness now packages the exact scope and authenticated builder,
+  availability, and audit attestations in a canonical evidence CAR. The report
+  commits to that CAR, and the launch interlock recomputes the report through an
+  evidence-bound governance binary. This removes trust in copied aggregate
+  counts, but it does not make the underlying builders, pin operators, or
+  auditors independent; their eligibility and signatures still require
+  external evidence and review.
 - Desktop renderer output can be deterministic, but signed/notarized installers
   may retain platform-specific nondeterminism and centralized signing
   constraints.

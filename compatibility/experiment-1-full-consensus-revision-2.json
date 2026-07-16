@@ -1,23 +1,15 @@
 {
   "schema_version": "pohw-bitcoin-core-fork-manifest/v1",
   "experiment_id": "pohw-experiment-1-full-consensus",
-  "profile_revision": 3,
+  "profile_revision": 2,
   "status": "experimental-no-value",
-  "activation_id": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
-  "supersedes_activation_id": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+  "activation_id": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+  "supersedes_activation_id": "3aed5c759ab096064957555c1f374c0fba6e35c88a3e0ca069ac392df4fec63a",
   "predecessor": {
-    "experiment_id": "pohw-experiment-1-full-consensus",
-    "profile_revision": 2,
-    "activation_id": "9bf5931b2947e42fcfdf019184368c1da103b50caaa1edc28159efd2057a91e8",
+    "experiment_id": "pohw-experiment-0",
+    "activation_id": "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e",
     "history_reinterpreted": false
   },
-  "lineage": [
-    {
-      "experiment_id": "pohw-experiment-0",
-      "activation_id": "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e",
-      "history_reinterpreted": false
-    }
-  ],
   "upstream": {
     "repository": "https://github.com/bitcoin/bitcoin.git",
     "tag": "v31.1",
@@ -33,11 +25,7 @@
   "network": {
     "chain_argument": "pohw",
     "data_subdirectory": "pohw-experiment-1",
-    "message_start_hex": "9021631e",
-    "legacy_block_file_message_start_hex": [
-      "f9beb4d9",
-      "d97038ba"
-    ],
+    "message_start_hex": "d97038ba",
     "p2p_port": 40412,
     "rpc_port": 40414,
     "dns_seeds": [],
@@ -60,37 +48,14 @@
       "cltv-and-csv-timelocks",
       "all-other-bitcoin-core-v31.1-consensus-valid-scripts"
     ],
-    "policy_and_wallet_behavior": "bitcoin-core-v31.1-with-fork-replay-domain-versioning-and-marker-validation",
+    "policy_and_wallet_behavior": "unchanged-from-bitcoin-core-v31.1-except-for-fork-replay-protection",
     "inherited_utxo_spending_enabled": true,
     "replay_protection": {
-      "rule": "inherited-input-requires-fork-marker-and-signature-domain-v3",
+      "rule": "inherited-input-requires-fork-only-marker-v2",
       "required": true,
       "marker_activation_height": 958018,
       "marker_script_hex": "5150",
-      "signature_domain": {
-        "activation_height": 958176,
-        "activation_parent_height": 958175,
-        "activation_parent_hash": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
-        "transaction_version_bit": 30,
-        "transaction_version_mask": 1073741824,
-        "domain": "pohw-experiment-1-full-consensus/replay-sighash-v3",
-        "mempool_transition": "purge-all-transactions-on-domain-boundary-including-reorg-crossings",
-        "covered_signature_paths": [
-          "legacy",
-          "segwit-v0",
-          "taproot-key-path",
-          "taproot-script-path-and-tapscript"
-        ],
-        "required_for_inherited_input_spends": true,
-        "wallet_and_raw_transaction_creation_set_bit_automatically": true
-      },
-      "pre_activation_history": {
-        "first_height": 958017,
-        "last_height": 958175,
-        "observed_non_coinbase_transaction_count": 0,
-        "checkpoint_enforced": true
-      },
-      "description": "The first fork block and the revision-3 activation parent are immutable consensus checkpoints. Every inherited-input transaction after marker activation must consume an activated zero-value coinbase marker. At revision-3 activation it must also set the replay version bit, which domain-separates legacy, SegWit, Taproot key-path, and Tapscript signatures from Bitcoin mainnet. The marker executes OP_RESERVED and remains invalid on Bitcoin mainnet.",
+      "description": "The first fork block is an immutable consensus checkpoint. Every transaction at or after the marker activation height with an inherited input must also consume an activated zero-value coinbase output carrying the exact fork-only replay marker. The marker executes OP_RESERVED and is invalid on Bitcoin mainnet even if an outpoint collides.",
       "bootstrap_constraint": "The first inherited spend can occur only after an activated fork coinbase marker is mature under Bitcoin Core's unchanged 100-block coinbase-maturity rule."
     },
     "proof_of_work": {
@@ -116,7 +81,7 @@
   },
   "build": {
     "patch_path": "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch",
-    "patch_sha256": "d5b2534a894d3193b72867741a191203a005cd18f050d372efbc209a0d6ee9bb",
+    "patch_sha256": "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab",
     "cmake_flags": [
       "-DBUILD_GUI=OFF",
       "-DBUILD_TESTS=ON",
@@ -129,8 +94,6 @@
     "Fork coins and inherited balances have no promised monetary value.",
     "Inherited scripts are controlled by the same private keys as Bitcoin mainnet scripts.",
     "Fork-only marker replay protection makes inherited-input transactions invalid on Bitcoin mainnet but does not make reused private keys independent.",
-    "Revision 3 domain-separates standard Bitcoin signature paths; inherited anyone-can-spend outputs have no signature to domain-separate and were already publicly spendable on Bitcoin mainnet.",
-    "The marker supply is limited by fork coinbase production and maturity, so inherited-input throughput remains intentionally constrained during bootstrap.",
     "Never reuse a Bitcoin mainnet private key for convenience; an exposed key can lose real mainnet BTC even when fork coins have no value.",
     "Never import an Idena private key into P2poolBTC or Bitcoin Core; Idena identity registration uses signatures only.",
     "Idena identity actions, delegation, stake, validation participation, and contract calls can affect assets or identity state on the live Idena chain."

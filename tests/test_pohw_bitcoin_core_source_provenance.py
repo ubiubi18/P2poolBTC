@@ -1,4 +1,6 @@
 import os
+import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -9,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "pohw-verify-bitcoin-core-source.sh"
 MANIFEST = ROOT / "compatibility" / "experiment-1-full-consensus.json"
+BUILDER = ROOT / "scripts" / "pohw-build-bitcoin-core-fork.sh"
+EVIDENCE = ROOT / "scripts" / "pohw-bitcoin-core-build-evidence.py"
 
 
 class BitcoinCoreSourceProvenanceTests(unittest.TestCase):
@@ -105,6 +109,22 @@ class BitcoinCoreSourceProvenanceTests(unittest.TestCase):
         self.assertIn("refusing to configure, build, test, or execute source as root", builder)
         self.assertIn("pohw-depends-prefix.json", installer)
         self.assertIn("pohw-depends-prefix.json", builder)
+        self.assertIn("PYTHON3=$(resolve_tool python3)", builder)
+        self.assertIn('"$PYTHON3" "$FUNCTIONAL_RUNNER"', builder)
+
+    def test_builder_step_order_matches_the_evidence_schema(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        recorded = re.findall(
+            r"^\s*run_step ([a-z][a-z0-9_]*)", builder, re.MULTILINE
+        )
+        collapsed = []
+        for label in recorded:
+            if collapsed and collapsed[-1] == label:
+                self.assertEqual(label, "build")
+                continue
+            collapsed.append(label)
+        required = tuple(runpy.run_path(str(EVIDENCE))["REQUIRED_STEPS"])
+        self.assertEqual(tuple(collapsed), required)
 
 
 if __name__ == "__main__":

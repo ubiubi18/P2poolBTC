@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/FinalizedOnChainAttestationReceiptV1.schema.json",
+  "title": "FinalizedOnChainAttestationReceiptV1 reserved chain-proof input",
+  "description": "Reserved interchange shape for a future authenticated Idena inclusion/finality verifier. Current offline readiness verification rejects receipt JSON because its fields alone do not prove chain inclusion or finality.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "chainId",
+    "contractAddress",
+    "transactionHash",
+    "transactionBlockHeight",
+    "transactionBlockHash",
+    "finalizedAtHeight",
+    "finalityConfirmations",
+    "submitterIdentity",
+    "callDataCommitment",
+    "success"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "chainId": {"type": "string", "pattern": "^[a-z0-9._-]{1,80}$"},
+    "contractAddress": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "transactionHash": {"type": "string", "pattern": "^0x[0-9a-f]{64}$"},
+    "transactionBlockHeight": {"type": "integer", "minimum": 1},
+    "transactionBlockHash": {"type": "string", "pattern": "^0x[0-9a-f]{64}$"},
+    "finalizedAtHeight": {"type": "integer", "minimum": 1},
+    "finalityConfirmations": {"type": "integer", "minimum": 6},
+    "submitterIdentity": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "callDataCommitment": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "success": {"const": true}
+  }
+}

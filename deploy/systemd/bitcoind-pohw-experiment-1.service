@@ -13,6 +13,10 @@ Group=bitcoin-pohw-rpc
 SupplementaryGroups=bitcoin-pohw bitcoin-chain-read
 RuntimeDirectory=bitcoin-pohw-rpc
 RuntimeDirectoryMode=0750
+ExecStartPre=/usr/bin/python3 -I /usr/local/libexec/p2pool-experiment-1/pohw-experiment-1-launch-policy.py /usr/local/libexec/p2pool-experiment-1/compatibility/experiment-1-launch-policy.json --repo-root /usr/local/libexec/p2pool-experiment-1 --readiness-car /etc/pohw/experiment-1-deployment-readiness.car --readiness-evidence-car /etc/pohw/experiment-1-deployment-readiness-evidence.car --governance-cli /usr/local/libexec/p2pool-experiment-1/pohw-governance --idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json --require-ready
+# Only this fixed preflight receives root credentials to read the root:pohw API
+# key. The long-running bitcoind process never joins the pohw group.
+ExecStartPre=!/usr/local/libexec/p2pool-experiment-1/p2pool-node verify-idena-registry-deployment --idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json --idena-rpc-url http://127.0.0.1:9009 --idena-api-key-file /etc/pohw/secrets/idena-api.key
 ExecStart=/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoind -datadir=/srv/bitcoin/pohw -chain=pohw -daemon=0 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1
 Restart=on-failure
 RestartSec=10
@@ -44,7 +48,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadOnlyPaths=/usr/local/libexec/pohw-bitcoin-core-v31.1
+ReadOnlyPaths=/usr/local/libexec/pohw-bitcoin-core-v31.1 /usr/local/libexec/p2pool-experiment-1 /etc/pohw
 ReadWritePaths=/srv/bitcoin/pohw /run/bitcoin-pohw-rpc
 
 [Install]

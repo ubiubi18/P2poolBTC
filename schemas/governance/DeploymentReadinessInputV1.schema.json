@@ -8,32 +8,43 @@
   "required": [
     "schemaVersion",
     "scopeCar",
-    "buildAttestationCars",
-    "dataAvailabilityAttestationCars",
-    "externalAuditAttestationCars",
+    "buildAttestations",
+    "dataAvailabilityAttestations",
+    "externalAuditAttestations",
     "requiredAvailabilityThroughBlock"
   ],
   "properties": {
     "schemaVersion": {"const": 1},
     "scopeCar": {"type": "string", "minLength": 1},
-    "buildAttestationCars": {
+    "buildAttestations": {
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": {"$ref": "#/$defs/AuthenticatedAttestationInput"}
     },
-    "dataAvailabilityAttestationCars": {
+    "dataAvailabilityAttestations": {
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": {"$ref": "#/$defs/AuthenticatedAttestationInput"}
     },
-    "externalAuditAttestationCars": {
+    "externalAuditAttestations": {
       "type": "array",
       "maxItems": 64,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": {"$ref": "#/$defs/AuthenticatedAttestationInput"}
     },
     "requiredAvailabilityThroughBlock": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "AuthenticatedAttestationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["car", "authentication"],
+      "properties": {
+        "car": {"type": "string", "minLength": 1},
+        "authentication": {"type": "string", "minLength": 1}
+      }
+    }
   }
 }

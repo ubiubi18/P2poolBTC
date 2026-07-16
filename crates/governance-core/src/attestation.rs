@@ -1,11 +1,16 @@
 use crate::{
     normalize_address, package_dag_cbor, verify_dag_cbor_car, DagCborPackage, SourceError,
 };
+use bitcoin::secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, PublicKey, Secp256k1,
+};
 use cid::{Cid, Version};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+use tiny_keccak::{Hasher, Keccak};
 
 const SHA2_256_CODE: u64 = 0x12;
 const CORE_ARTIFACT_SET_DOMAIN: &[u8] = b"IDENA_GOV_CORE_ARTIFACT_SET_V1\0";
@@ -16,6 +21,12 @@ const MAX_BUILD_ARTIFACTS: usize = 4_096;
 const MAX_VERIFIED_CIDS: usize = 4_096;
 const MAX_ARTIFACT_NAME_BYTES: usize = 128;
 const MAX_CONTRACT_DAG_CBOR_BYTES: usize = 65_536;
+const ATTESTATION_AUTHENTICATION_DOMAIN: &[u8] = b"IDENA_GOV_ATTESTATION_AUTH_V1\0";
+const ATTESTATION_SIGNIN_PREFIX: &str = "signin-pohw1-governance-attestation-";
+const IDENA_RECOVERABLE_SIGNATURE_HEX_LEN: usize = 130;
+pub const DETACHED_IDENA_SIGNATURE_AUTHENTICATION: &str = "detached-idena-signature-v1";
+pub const ON_CHAIN_SUBMITTER_AUTHENTICATION: &str = "on-chain-submitter";
+pub const EXTERNAL_AUDIT_ATTESTATION_DOMAIN: &str = "external_audit_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -182,6 +193,62 @@ pub struct IdentityMetricsAttestationV1 {
     pub authentication: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttestationAuthenticationRequestV1 {
+    pub schema_version: u16,
+    pub attestation_kind: String,
+    pub attestation_cid: String,
+    pub attestation_sha256: String,
+    pub candidate_ecosystem_cid: String,
+    pub identity: String,
+    pub binding_sha256: String,
+    pub challenge: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttestationAuthenticationV1 {
+    pub schema_version: u16,
+    pub attestation_kind: String,
+    pub attestation_cid: String,
+    pub attestation_sha256: String,
+    pub candidate_ecosystem_cid: String,
+    pub identity: String,
+    pub binding_sha256: String,
+    pub proof: AttestationAuthenticationProofV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase", deny_unknown_fields)]
+pub enum AttestationAuthenticationProofV1 {
+    #[serde(rename = "idena-signature-v1")]
+    IdenaSignature {
+        #[serde(rename = "signatureHex")]
+        signature_hex: String,
+    },
+    #[serde(rename = "finalized-on-chain-receipt-v1")]
+    FinalizedOnChainReceipt {
+        receipt: FinalizedOnChainAttestationReceiptV1,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinalizedOnChainAttestationReceiptV1 {
+    pub schema_version: u16,
+    pub chain_id: String,
+    pub contract_address: String,
+    pub transaction_hash: String,
+    pub transaction_block_height: u64,
+    pub transaction_block_hash: String,
+    pub finalized_at_height: u64,
+    pub finality_confirmations: u64,
+    pub submitter_identity: String,
+    pub call_data_commitment: String,
+    pub success: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AttestationPackage<T> {
     pub root_cid: Cid,
@@ -197,6 +264,130 @@ pub enum AttestationError {
     Invalid(String),
     #[error(transparent)]
     Source(#[from] SourceError),
+}
+
+pub fn attestation_authentication_request(
+    attestation_kind: &str,
+    attestation_cid: &str,
+    attestation_sha256: &str,
+    candidate_ecosystem_cid: &str,
+    identity: &str,
+) -> Result<AttestationAuthenticationRequestV1, AttestationError> {
+    validate_attestation_kind(attestation_kind)?;
+    let cid = validate_dag_cbor_cid(attestation_cid, "attestationCid")?;
+    validate_sha256(attestation_sha256)?;
+    if hex::encode(cid.hash().digest()) != attestation_sha256 {
+        return invalid("attestationCid and attestationSha256 disagree");
+    }
+    validate_dag_cbor_cid(candidate_ecosystem_cid, "candidateEcosystemCid")?;
+    let identity = normalize_attestation_address(identity)?;
+    let binding_sha256 = attestation_authentication_binding_sha256(
+        attestation_kind,
+        attestation_cid,
+        attestation_sha256,
+        candidate_ecosystem_cid,
+        &identity,
+    )?;
+    Ok(AttestationAuthenticationRequestV1 {
+        schema_version: 1,
+        attestation_kind: attestation_kind.to_string(),
+        attestation_cid: attestation_cid.to_string(),
+        attestation_sha256: attestation_sha256.to_string(),
+        candidate_ecosystem_cid: candidate_ecosystem_cid.to_string(),
+        identity,
+        challenge: format!("{ATTESTATION_SIGNIN_PREFIX}{binding_sha256}"),
+        binding_sha256,
+    })
+}
+
+pub fn signature_attestation_authentication(
+    request: &AttestationAuthenticationRequestV1,
+    signature_hex: impl Into<String>,
+) -> Result<AttestationAuthenticationV1, AttestationError> {
+    validate_authentication_request(request)?;
+    let authentication = authentication_for_request(
+        request,
+        AttestationAuthenticationProofV1::IdenaSignature {
+            signature_hex: signature_hex.into(),
+        },
+    );
+    verify_attestation_authentication(
+        request,
+        DETACHED_IDENA_SIGNATURE_AUTHENTICATION,
+        &authentication,
+    )?;
+    Ok(authentication)
+}
+
+pub fn receipt_attestation_authentication(
+    request: &AttestationAuthenticationRequestV1,
+    _receipt: FinalizedOnChainAttestationReceiptV1,
+) -> Result<AttestationAuthenticationV1, AttestationError> {
+    validate_authentication_request(request)?;
+    invalid(
+        "on-chain receipt authentication is disabled until an authenticated Idena inclusion and finality proof verifier is available",
+    )
+}
+
+pub fn verify_attestation_authentication(
+    expected: &AttestationAuthenticationRequestV1,
+    authentication_intent: &str,
+    authentication: &AttestationAuthenticationV1,
+) -> Result<(), AttestationError> {
+    validate_authentication_request(expected)?;
+    if authentication.schema_version != 1
+        || authentication.attestation_kind != expected.attestation_kind
+        || authentication.attestation_cid != expected.attestation_cid
+        || authentication.attestation_sha256 != expected.attestation_sha256
+        || authentication.candidate_ecosystem_cid != expected.candidate_ecosystem_cid
+        || authentication.identity != expected.identity
+        || authentication.binding_sha256 != expected.binding_sha256
+    {
+        return invalid(
+            "authentication does not bind the exact attestation kind, CID, content, candidate, and identity",
+        );
+    }
+    match &authentication.proof {
+        AttestationAuthenticationProofV1::IdenaSignature { signature_hex } => {
+            if authentication_intent != DETACHED_IDENA_SIGNATURE_AUTHENTICATION {
+                return invalid(
+                    "signature proof contradicts the attestation authentication intent",
+                );
+            }
+            let recovered = recover_idena_signin_address(&expected.challenge, signature_hex)?;
+            if recovered != expected.identity {
+                return invalid("Idena signature does not recover the attested identity");
+            }
+        }
+        AttestationAuthenticationProofV1::FinalizedOnChainReceipt { receipt } => {
+            if authentication_intent != ON_CHAIN_SUBMITTER_AUTHENTICATION {
+                return invalid(
+                    "on-chain receipt contradicts the attestation authentication intent",
+                );
+            }
+            let _ = receipt;
+            return invalid(
+                "on-chain receipt authentication is disabled until an authenticated Idena inclusion and finality proof verifier is available",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn authentication_for_request(
+    request: &AttestationAuthenticationRequestV1,
+    proof: AttestationAuthenticationProofV1,
+) -> AttestationAuthenticationV1 {
+    AttestationAuthenticationV1 {
+        schema_version: 1,
+        attestation_kind: request.attestation_kind.clone(),
+        attestation_cid: request.attestation_cid.clone(),
+        attestation_sha256: request.attestation_sha256.clone(),
+        candidate_ecosystem_cid: request.candidate_ecosystem_cid.clone(),
+        identity: request.identity.clone(),
+        binding_sha256: request.binding_sha256.clone(),
+        proof,
+    }
 }
 
 pub fn package_agent_review_attestation(
@@ -358,6 +549,7 @@ fn validate_agent_review(value: &AgentReviewAttestationV1) -> Result<(), Attesta
     if unresolved > u32::MAX as usize || value.unresolved_critical_findings != unresolved as u32 {
         return invalid("unresolvedCriticalFindings does not match securityFindings");
     }
+    normalize_attestation_address(&value.owner_idena_address)?;
     validate_amount(&value.reviewer_bond_atoms)?;
     validate_authentication(&value.authentication)
 }
@@ -372,6 +564,7 @@ fn validate_build(value: &BuildAttestationV1) -> Result<(), AttestationError> {
     validate_raw_cid(&value.sbom_cid, "sbomCid")?;
     validate_raw_cid(&value.test_results_cid, "testResultsCid")?;
     validate_repository_cids(&value.source_cids)?;
+    normalize_attestation_address(&value.builder_identity)?;
     validate_lower_label(&value.runtime_family, 31, "runtimeFamily")?;
     validate_lower_label(&value.architecture, 31, "architecture")?;
     validate_commands(&value.commands, value.tests_passed)?;
@@ -443,6 +636,110 @@ fn update_length_prefixed(
     Ok(())
 }
 
+fn attestation_authentication_binding_sha256(
+    attestation_kind: &str,
+    attestation_cid: &str,
+    attestation_sha256: &str,
+    candidate_ecosystem_cid: &str,
+    identity: &str,
+) -> Result<String, AttestationError> {
+    let mut hasher = Sha256::new();
+    hasher.update(ATTESTATION_AUTHENTICATION_DOMAIN);
+    for (value, field) in [
+        (attestation_kind, "attestation kind"),
+        (attestation_cid, "attestation CID"),
+        (attestation_sha256, "attestation SHA-256"),
+        (candidate_ecosystem_cid, "candidate ecosystem CID"),
+        (identity, "attested identity"),
+    ] {
+        update_length_prefixed(&mut hasher, value.as_bytes(), field)?;
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_authentication_request(
+    request: &AttestationAuthenticationRequestV1,
+) -> Result<(), AttestationError> {
+    if request.schema_version != 1 {
+        return invalid("authentication request schemaVersion must be 1");
+    }
+    let expected = attestation_authentication_request(
+        &request.attestation_kind,
+        &request.attestation_cid,
+        &request.attestation_sha256,
+        &request.candidate_ecosystem_cid,
+        &request.identity,
+    )?;
+    if &expected != request {
+        return invalid("authentication request binding or challenge is not canonical");
+    }
+    Ok(())
+}
+
+fn validate_attestation_kind(value: &str) -> Result<(), AttestationError> {
+    if !matches!(
+        value,
+        "agent_review_v1"
+            | "build_attestation_v1"
+            | "data_availability_v1"
+            | EXTERNAL_AUDIT_ATTESTATION_DOMAIN
+    ) {
+        return invalid("unsupported attestation authentication kind");
+    }
+    Ok(())
+}
+
+fn recover_idena_signin_address(
+    challenge: &str,
+    signature_hex: &str,
+) -> Result<String, AttestationError> {
+    let normalized = signature_hex.strip_prefix("0x").unwrap_or(signature_hex);
+    if normalized.len() != IDENA_RECOVERABLE_SIGNATURE_HEX_LEN
+        || normalized.bytes().any(|byte| !byte.is_ascii_hexdigit())
+    {
+        return invalid("Idena signature must be 65 bytes encoded as hexadecimal");
+    }
+    let bytes = hex::decode(normalized)
+        .map_err(|_| AttestationError::Invalid("Idena signature is invalid".to_string()))?;
+    let recovery_id = idena_recovery_id(bytes[64])?;
+    let signature = RecoverableSignature::from_compact(&bytes[..64], recovery_id)
+        .map_err(|_| AttestationError::Invalid("Idena signature is invalid".to_string()))?;
+    let message = Message::from_digest(idena_signin_hash(challenge));
+    let public_key = Secp256k1::verification_only()
+        .recover_ecdsa(&message, &signature)
+        .map_err(|_| AttestationError::Invalid("Idena signature recovery failed".to_string()))?;
+    Ok(idena_address_from_pubkey(&public_key))
+}
+
+fn idena_recovery_id(value: u8) -> Result<RecoveryId, AttestationError> {
+    let id = match value {
+        0..=3 => i32::from(value),
+        27..=30 => i32::from(value - 27),
+        _ => return invalid("Idena signature has an unsupported recovery id"),
+    };
+    RecoveryId::from_i32(id).map_err(|_| {
+        AttestationError::Invalid("Idena signature recovery id is invalid".to_string())
+    })
+}
+
+fn idena_signin_hash(challenge: &str) -> [u8; 32] {
+    keccak256(&keccak256(challenge.as_bytes()))
+}
+
+fn idena_address_from_pubkey(public_key: &PublicKey) -> String {
+    let serialized = public_key.serialize_uncompressed();
+    let hash = keccak256(&serialized[1..]);
+    format!("0x{}", hex::encode(&hash[12..]))
+}
+
+fn keccak256(value: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak::v256();
+    let mut output = [0u8; 32];
+    hasher.update(value);
+    hasher.finalize(&mut output);
+    output
+}
+
 fn validate_availability(value: &DataAvailabilityAttestationV1) -> Result<(), AttestationError> {
     if value.schema_version != 1 {
         return invalid("schemaVersion must be 1");
@@ -451,6 +748,7 @@ fn validate_availability(value: &DataAvailabilityAttestationV1) -> Result<(), At
     validate_dag_cbor_cid(&value.pinset_cid, "pinsetCid")?;
     validate_raw_cid(&value.probe_result_cid, "probeResultCid")?;
     validate_safe_label(&value.provider_id, 80, "providerId")?;
+    normalize_attestation_address(&value.operator_identity)?;
     if value.verified_cids.is_empty()
         || value.verified_cids.len() > MAX_VERIFIED_CIDS
         || !value
@@ -635,8 +933,13 @@ fn validate_string_map(
 }
 
 fn validate_authentication(value: &str) -> Result<(), AttestationError> {
-    if value != "on-chain-submitter" {
-        return invalid("authentication must be on-chain-submitter in the experimental slice");
+    if !matches!(
+        value,
+        ON_CHAIN_SUBMITTER_AUTHENTICATION | DETACHED_IDENA_SIGNATURE_AUTHENTICATION
+    ) {
+        return invalid(
+            "authentication must declare an on-chain submitter or detached Idena signature",
+        );
     }
     Ok(())
 }
@@ -790,6 +1093,7 @@ fn invalid<T>(message: &str) -> Result<T, AttestationError> {
 mod tests {
     use super::*;
     use crate::cid_for;
+    use bitcoin::secp256k1::{PublicKey, SecretKey};
 
     fn cid(label: &str) -> String {
         cid_for(0x71, label.as_bytes()).to_string()
@@ -811,6 +1115,25 @@ mod tests {
             stdout_sha256: "11".repeat(32),
             stderr_sha256: "22".repeat(32),
         }
+    }
+
+    fn identity_for(secret_key: &SecretKey) -> String {
+        let public_key = PublicKey::from_secret_key(&Secp256k1::new(), secret_key);
+        idena_address_from_pubkey(&public_key)
+    }
+
+    fn sign_authentication_request(
+        request: &AttestationAuthenticationRequestV1,
+        secret_key: &SecretKey,
+    ) -> String {
+        let signature = Secp256k1::new().sign_ecdsa_recoverable(
+            &Message::from_digest(idena_signin_hash(&request.challenge)),
+            secret_key,
+        );
+        let (recovery_id, compact) = signature.serialize_compact();
+        let mut bytes = compact.to_vec();
+        bytes.push(recovery_id.to_i32() as u8 + 27);
+        hex::encode(bytes)
     }
 
     fn agent_attestation() -> AgentReviewAttestationV1 {
@@ -996,6 +1319,115 @@ mod tests {
         );
         assert!(reject_unredacted_secret("tool api_key=[REDACTED]suffix").is_err());
         assert!(reject_unredacted_secret("tool ghp_not-a-placeholder").is_err());
+    }
+
+    #[test]
+    fn detached_signature_binds_exact_attestation_content_candidate_and_identity() {
+        let secret_key = SecretKey::from_slice(&[7; 32]).unwrap();
+        let mut value = agent_attestation();
+        value.owner_idena_address = identity_for(&secret_key);
+        value.authentication = DETACHED_IDENA_SIGNATURE_AUTHENTICATION.to_string();
+        let package = package_agent_review_attestation(value).unwrap();
+        let request = attestation_authentication_request(
+            "agent_review_v1",
+            &package.root_cid.to_string(),
+            &package.root_sha256,
+            &package.value.candidate_ecosystem_cid,
+            &package.value.owner_idena_address,
+        )
+        .unwrap();
+        let authentication = signature_attestation_authentication(
+            &request,
+            sign_authentication_request(&request, &secret_key),
+        )
+        .unwrap();
+        verify_attestation_authentication(&request, &package.value.authentication, &authentication)
+            .unwrap();
+        let encoded = serde_json::to_value(&authentication).unwrap();
+        assert!(encoded["proof"].get("signatureHex").is_some());
+        assert!(encoded["proof"].get("signature_hex").is_none());
+        let decoded: AttestationAuthenticationV1 = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, authentication);
+
+        let mut substituted = authentication.clone();
+        substituted.attestation_cid = cid("different-attestation");
+        assert!(verify_attestation_authentication(
+            &request,
+            &package.value.authentication,
+            &substituted
+        )
+        .is_err());
+
+        let mut substituted = authentication.clone();
+        substituted.attestation_sha256 = "44".repeat(32);
+        assert!(verify_attestation_authentication(
+            &request,
+            &package.value.authentication,
+            &substituted
+        )
+        .is_err());
+
+        let mut substituted = authentication.clone();
+        substituted.candidate_ecosystem_cid = cid("different-candidate");
+        assert!(verify_attestation_authentication(
+            &request,
+            &package.value.authentication,
+            &substituted
+        )
+        .is_err());
+
+        let mut substituted = authentication.clone();
+        substituted.identity = format!("0x{}", "08".repeat(20));
+        assert!(verify_attestation_authentication(
+            &request,
+            &package.value.authentication,
+            &substituted
+        )
+        .is_err());
+
+        assert!(verify_attestation_authentication(
+            &request,
+            ON_CHAIN_SUBMITTER_AUTHENTICATION,
+            &authentication
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unverified_receipt_json_cannot_authenticate_an_attestation() {
+        let package = package_agent_review_attestation(agent_attestation()).unwrap();
+        let request = attestation_authentication_request(
+            "agent_review_v1",
+            &package.root_cid.to_string(),
+            &package.root_sha256,
+            &package.value.candidate_ecosystem_cid,
+            &package.value.owner_idena_address,
+        )
+        .unwrap();
+        let receipt = FinalizedOnChainAttestationReceiptV1 {
+            schema_version: 1,
+            chain_id: "idena-mainnet".to_string(),
+            contract_address: format!("0x{}", "a1".repeat(20)),
+            transaction_hash: format!("0x{}", "b2".repeat(32)),
+            transaction_block_height: 100,
+            transaction_block_hash: format!("0x{}", "c3".repeat(32)),
+            finalized_at_height: 106,
+            finality_confirmations: 6,
+            submitter_identity: request.identity.clone(),
+            call_data_commitment: request.binding_sha256.clone(),
+            success: true,
+        };
+        assert!(receipt_attestation_authentication(&request, receipt.clone()).is_err());
+        let authentication = authentication_for_request(
+            &request,
+            AttestationAuthenticationProofV1::FinalizedOnChainReceipt { receipt },
+        );
+        assert!(verify_attestation_authentication(
+            &request,
+            ON_CHAIN_SUBMITTER_AUTHENTICATION,
+            &authentication,
+        )
+        .is_err());
     }
 
     #[test]

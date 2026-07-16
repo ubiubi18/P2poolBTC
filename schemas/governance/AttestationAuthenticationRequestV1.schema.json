@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/AttestationAuthenticationRequestV1.schema.json",
+  "title": "AttestationAuthenticationRequestV1 deterministic signing request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "attestationKind",
+    "attestationCid",
+    "attestationSha256",
+    "candidateEcosystemCid",
+    "identity",
+    "bindingSha256",
+    "challenge"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "attestationKind": {"enum": ["agent_review_v1", "build_attestation_v1", "data_availability_v1", "external_audit_v1"]},
+    "attestationCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "attestationSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "candidateEcosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "identity": {"type": "string", "pattern": "^0x[0-9a-f]{40}$"},
+    "bindingSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "challenge": {"type": "string", "pattern": "^signin-pohw1-governance-attestation-[0-9a-f]{64}$"}
+  }
+}

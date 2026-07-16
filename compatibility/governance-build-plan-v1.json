@@ -21,7 +21,7 @@
         {
           "repository": "P2poolBTC",
           "path": "Cargo.lock",
-          "sha256": "887b5f7ba81b2d0cfee405e1e2f982d4505a22ec35d1409b9b7c90098954b07b",
+          "sha256": "fc7ca6f055f0da8ca179028d230efca31c67049f0416b354abef1dfcf0cc7e86",
           "format": "cargo-lock"
         }
       ],
@@ -78,8 +78,8 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreig7ojpnjyacy7nktphdhi7pfzyr3eols6rzrqraxzmkq4zar3opqm",
-          "expectedSha256": "df725ed4e002c7daa9bce33a3ef2e711d91cb97a398c220be58a873208edcf83",
+          "expectedCid": "bafkreia4pazulakvfig4ombnmslop3tqnfvldrj5rwautf2kjze3s3acde",
+          "expectedSha256": "1c78334581552a0dc7302d6496e7ee70696ab1c53d8d8149974a4e49b96c0219",
           "expectedSize": 16185
         },
         {
@@ -90,8 +90,8 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreierjvsgv2kuusohiqqngqukjewcwsjfwimgcj5pwu4vquea6xhhva",
-          "expectedSha256": "914d646ae954a49c74420d3428a492c2b4925b2186127afb539585080f5ce7a8",
+          "expectedCid": "bafkreihfjsd3qgvi2fjavzsq34r3ef42tw7v44yoi63sut4hxtsigd2eqi",
+          "expectedSha256": "e54c87b81aa8d1520ae650df23b2179a9dbf5e730e47b72a4f87bce4830f4482",
           "expectedSize": 5523
         },
         {
@@ -105,6 +105,66 @@
           "expectedCid": "bafkreibj4ufdmou2ondvypimul6mwfsbol2tzkhb5ralyci5y2wmuvlvtm",
           "expectedSha256": "29e50a363a9a73475c3d0ca2fccb164172f53ca8e1ec40bc091dc6acca55759b",
           "expectedSize": 29259
+        },
+        {
+          "name": "pohw-experiment-1-launch-policy.py",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "scripts/pohw-experiment-1-launch-policy.py",
+          "platform": "linux",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreibhe455ukvyxss6f5i27xwxf4fzmtvgh3sla4yh2hrhrxf62mruoi",
+          "expectedSha256": "27273bda2ab8bca5e2f51afded72f0b964ea63ee4b07307d1e278dcbed323472",
+          "expectedSize": 39176
+        },
+        {
+          "name": "experiment-1-full-consensus.json",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "compatibility/experiment-1-full-consensus.json",
+          "platform": "all",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreiga72h3cgkugn75oapefxr5jikp2rkeliysj6dtnvfudmrmvkpqae",
+          "expectedSha256": "c0fe8fb11954337fd701e42de3d4a14fd45445a3124f8736d4b41b22caa9f001",
+          "expectedSize": 6461
+        },
+        {
+          "name": "experiment-1-launch-policy.json",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "compatibility/experiment-1-launch-policy.json",
+          "platform": "all",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreiauk2wbidp75ngn5e5j4ig4ruouvabgeeclasmz66yqw4fncdracm",
+          "expectedSha256": "1456ac140dffeb4cde93a9e20dc8d1d4a80262104b04999f7b10b70ad10e2013",
+          "expectedSize": 3678
+        },
+        {
+          "name": "experiment-1-miner-registry-candidate.json",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "compatibility/experiment-1-miner-registry-candidate.json",
+          "platform": "all",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreiejuipguiie3o6dugdxvcl2wace6at5gqeps5bv3begi47xvozc6i",
+          "expectedSha256": "89a21e6a2104dbbc3a1877a897ab0044f027d3408f97435d8486473f7abb22f2",
+          "expectedSize": 2902
+        },
+        {
+          "name": "bitcoind-pohw-experiment-1.service",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "deploy/systemd/bitcoind-pohw-experiment-1.service",
+          "platform": "linux",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreibvaxdefuih4cv4snnjtcnbdkytwzfounjqqe347ld6ahdize4gsy",
+          "expectedSha256": "3505c642d107e0abc935a9989a11ab13b64aea35308137cfac7e01c68c938696",
+          "expectedSize": 2398
         },
         {
           "name": "pohw-mining-adapter.service",
@@ -153,6 +213,30 @@
           "expectedCid": "bafkreihkusklvpgkasejwhynunc2cguncxa7pisqd547ru6xwm5ym5kady",
           "expectedSha256": "eaa494babcca04889b1f0da345a11a8d15c1f7a2501f79f8d3d7b33b8675401e",
           "expectedSize": 482
+        },
+        {
+          "name": "pohw-mining-experiment-1.conf",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "deploy/systemd/pohw-mining-experiment-1.conf",
+          "platform": "linux",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreiddccq3byj6jyuzsojctyjhpa6jsuskyn4hdqp4mdhsfozmaud6dy",
+          "expectedSha256": "6310a1b0e13e4e299939229e127783c99524ac37871c1fc60cf22bb2c0507e1e",
+          "expectedSize": 1003
+        },
+        {
+          "name": "pohw-gossip-experiment-1.conf",
+          "repository": "P2poolBTC",
+          "kind": "file",
+          "pathHint": "deploy/systemd/pohw-gossip-experiment-1.conf",
+          "platform": "linux",
+          "architecture": "any",
+          "deterministic": true,
+          "expectedCid": "bafkreiddccq3byj6jyuzsojctyjhpa6jsuskyn4hdqp4mdhsfozmaud6dy",
+          "expectedSha256": "6310a1b0e13e4e299939229e127783c99524ac37871c1fc60cf22bb2c0507e1e",
+          "expectedSize": 1003
         }
       ],
       "reproducibility": "deterministic-core",
@@ -186,6 +270,12 @@
         },
         {
           "repository": "P2poolBTC",
+          "path": "compatibility/governance-day-fork-candidate-lock.json",
+          "sha256": "b48ce5c22d7a174cb7bd0d4b2cf5d9dcc9aac87bb08944bb05bd542135da4b7a",
+          "format": "digest-only"
+        },
+        {
+          "repository": "P2poolBTC",
           "path": "compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go",
           "sha256": "5d6a26c1ea95d002a6321b9055307c139c160c9242f04226d990750e39e129d3",
           "format": "digest-only"
@@ -193,7 +283,7 @@
         {
           "repository": "P2poolBTC",
           "path": "scripts/pohw-governance-runtime-gate.py",
-          "sha256": "1c5d4416bbc3b07c929ba6f015e54059ade0fe5a83a62026a0dcb5ba2ef7de9a",
+          "sha256": "3d0ded5ab36c9746f0f9ab220f4459f19d31d33a83ccc04215ea3ce1532eb014",
           "format": "digest-only"
         },
         {
@@ -244,7 +334,7 @@
         "go -C ../idena-go mod download",
         "corepack pnpm --dir contracts/idena-code-governance build",
         "corepack pnpm --dir contracts/idena-code-governance test",
-        "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm --component-repo wasmer=../wasmer --component-repo idena-sdk-js-lite=../idena-sdk-js-lite --require-locked-sources"
+        "python3 scripts/pohw-governance-runtime-gate.py --idena-go ../idena-go --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json --component-repo idena-wasm-binding=../idena-wasm-binding --component-repo idena-wasm=../idena-wasm"
       ],
       "dependencyFetchCommandCount": 2,
       "artifacts": [

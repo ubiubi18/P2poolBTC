@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -37,17 +38,31 @@ REQUIRED_STEPS = (
     "configure",
     "build",
     "pow_sanity",
+    "block_file_magic",
     "bootstrap_marker",
     "template_difficulty",
     "replay_marker",
+    "replay_domain",
+    "replay_checkpoint",
+    "replay_version",
+    "script_cache_domain",
+    "block_file_reader",
+    "replay_functional",
     "ctest",
     "install",
 )
 TEST_STEPS = (
     "pow_sanity",
+    "block_file_magic",
     "bootstrap_marker",
     "template_difficulty",
     "replay_marker",
+    "replay_domain",
+    "replay_checkpoint",
+    "replay_version",
+    "script_cache_domain",
+    "block_file_reader",
+    "replay_functional",
     "ctest",
 )
 CANONICAL_FLAGS = (
@@ -59,12 +74,25 @@ CANONICAL_FLAGS = (
 )
 TEST_FILTERS = {
     "pow_sanity": "pow_tests/ChainParams_POHW_sanity",
+    "block_file_magic": "pow_tests/POHW_inherited_block_file_magic_is_disk_only",
     "bootstrap_marker": "pow_tests/POHW_bootstrap_and_handoff_marker",
     "template_difficulty": "pow_tests/POHW_update_time_refreshes_template_difficulty",
     "replay_marker": (
         "transaction_tests/"
         "pohw_inherited_spend_requires_fork_only_replay_marker"
     ),
+    "replay_domain": (
+        "transaction_tests/pohw_replay_sighash_domain_resists_marker_stripping"
+    ),
+    "replay_checkpoint": (
+        "transaction_tests/"
+        "pohw_active_chain_replay_checkpoint_is_fail_closed"
+    ),
+    "replay_version": (
+        "transaction_tests/pohw_replay_protected_version_is_network_scoped"
+    ),
+    "script_cache_domain": "txvalidationcache_tests",
+    "block_file_reader": "streams_tests/streams_buffered_file_find_any_byte",
 }
 HEX_TREE_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -593,6 +621,67 @@ def validate_commands(
         except ValueError as exc:
             raise EvidenceError("test temporary directory escapes the build directory") from exc
         tmpdirs.add(str(tmpdir))
+    functional_step = by_label["replay_functional"]
+    python = Path(functional_step["argv"][0]).resolve(strict=True)
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise EvidenceError("functional-test Python interpreter is not executable")
+    functional_runner = snapshot_dir / "test" / "functional" / "test_runner.py"
+    resolved_functional_runner = functional_runner.resolve(strict=True)
+    expected_source_runner = (
+        snapshot_dir / "test" / "functional" / "test_runner.py"
+    ).resolve(strict=True)
+    if resolved_functional_runner != expected_source_runner:
+        raise EvidenceError(
+            "functional-test runner is not bound to the immutable source snapshot"
+        )
+    functional_tmpdir = Path(functional_step["env"].get("TMPDIR", "")).resolve(
+        strict=False
+    )
+    functional_config = build_dir / "test" / "config.ini"
+    if functional_config.is_symlink() or not functional_config.is_file():
+        raise EvidenceError("functional-test configuration is not a regular file")
+    config = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        with functional_config.open("r", encoding="utf-8") as handle:
+            config.read_file(handle)
+        configured_source = Path(config["environment"]["SRCDIR"]).resolve()
+        configured_build = Path(config["environment"]["BUILDDIR"]).resolve()
+        executable_suffix = config["environment"]["EXEEXT"]
+        bitcoind_enabled = config["components"].getboolean("ENABLE_BITCOIND")
+    except (OSError, KeyError, ValueError, configparser.Error) as exc:
+        raise EvidenceError(f"functional-test configuration is invalid: {exc}") from exc
+    if configured_source != snapshot_dir or configured_build != build_dir:
+        raise EvidenceError(
+            "functional-test configuration is not bound to the verified source and build directories"
+        )
+    if executable_suffix != "":
+        raise EvidenceError(
+            "functional-test configuration redirects the attested executable suffix"
+        )
+    if not bitcoind_enabled:
+        raise EvidenceError("functional-test configuration disables bitcoind")
+    functional_tests_dir = snapshot_dir / "test" / "functional"
+    replay_test = functional_tests_dir / "feature_pohw_replay.py"
+    if replay_test.is_symlink() or not replay_test.is_file():
+        raise EvidenceError("replay functional test is not a regular snapshot file")
+    expected_functional = [
+        str(python),
+        str(functional_runner),
+        "feature_pohw_replay.py",
+        "--jobs=1",
+        f"--tmpdirprefix={functional_tmpdir}",
+        f"--configfile={functional_config}",
+        f"--testsdir={functional_tests_dir}",
+    ]
+    if functional_step["argv"] != expected_functional:
+        raise EvidenceError("replay functional-test command is not canonical")
+    if set(functional_step["env"]) != {"TMPDIR"}:
+        raise EvidenceError("replay functional-test environment is not canonical")
+    try:
+        functional_tmpdir.relative_to(build_dir)
+    except ValueError as exc:
+        raise EvidenceError("functional-test temporary directory escapes the build directory") from exc
+    tmpdirs.add(str(functional_tmpdir))
     ctest_step = by_label["ctest"]
     ctest = str(Path(ctest_step["argv"][0]).resolve(strict=True))
     if ctest_step["argv"] != [ctest, "--test-dir", str(build_dir), "--output-on-failure"]:
@@ -742,7 +831,9 @@ def expected_evidence(
         "ninja": executable_identity(make_program, "--version"),
         "cxx": executable_identity(cxx_compiler, "--version"),
         "git": executable_identity(git_path, "--version"),
-        "python": executable_identity(sys.executable, "--version"),
+        "python": executable_identity(
+            commands_by_label["replay_functional"]["argv"][0], "--version"
+        ),
     }
     return {
         "schema_version": SCHEMA,

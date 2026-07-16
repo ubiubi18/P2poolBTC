@@ -124,8 +124,13 @@ older entries remain immutable and addressable.
 
 Deployment has a second, off-chain fail-closed readiness check. It verifies the
 typed scope CAR, all independent build CARs, all public availability CARs, and
-content-addressed external audit CARs. A normal candidate needs two matching
-builders, two complete availability operators, and one passing external audit.
+content-addressed external audit CARs. Each role identity counts only when a
+detached Idena signature binds that identity to
+the exact attestation kind, CID/content, and candidate; the literal
+authentication intent in the payload is not sufficient. Verification is
+deterministic and offline from the CARs and detached proof files. A normal
+candidate needs two matching builders, two complete availability operators,
+and one passing external audit.
 A critical, migration, or consensus candidate needs three matching builders on
 at least two platform families, three availability operators, and two passing
 external audits. Local duplicate evidence cannot satisfy those thresholds.

@@ -1,9 +1,11 @@
 # Join P2poolBTC Experiment 1
 
-Experiment 1 is a no-value P2poolBTC technical preview. It runs a separately
-identified Bitcoin Core fork with ordinary Bitcoin transactions, wallets,
-PSBTs, and scripts. It is not Bitcoin mainnet and its coins have no promised
-value.
+Experiment 1 revision 3 is a no-value P2poolBTC technical preview. It runs a
+separately identified Bitcoin Core fork with ordinary Bitcoin transactions,
+wallets, PSBTs, and scripts. It checkpoints the immutable revision-2 prefix and
+adds marker plus signature-domain replay protection. It is not Bitcoin mainnet
+and its coins have no promised value. Mining is paused and public joining is
+blocked until the revision-3 build and all interlock evidence pass.
 
 ## Choose Your Journey
 
@@ -46,7 +48,7 @@ The live journey has five stages:
 | --- | --- |
 | 1. Verify release | Exact release commit, source CID, CAR digest, build evidence, launch policy, and manifest all verify independently |
 | 2. Build Core | The pinned Bitcoin Core v31.1 fork is built from source in an isolated `chain=pohw` profile |
-| 3. Verify Core | Activation and manifest match, RPC is loopback-only, a fork peer is connected, and initial block download is complete |
+| 3. Verify Core | Activation and manifest match, RPC is loopback-only, initial block download is complete, and the pinned height-958175 checkpoint hash matches |
 | 4. Register identity | An eligible public Idena address signs only the exact registration challenge and gossip accepts the envelope |
 | 5. Start P2Pool | Gossip starts before the adapter, local Stratum accepts work, and Core plus sharechain progress is observed locally |
 
@@ -72,14 +74,11 @@ The repository records the current interlock in
 `compatibility/experiment-1-launch-policy.json`. The verifier first binds the
 exact fork manifest and registry candidate, then rejects a ready status unless
 every recorded release gate passes. The checked-in candidate is
-`blocked-release-readiness`; continue only after reviewed replacement evidence
-makes this strict command print `ready-for-public-join`:
-
-```sh
-STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
-  compatibility/experiment-1-launch-policy.json | sed -n 's/^launch policy verified: //p')
-test "$STATUS" = ready-for-public-join
-```
+`blocked-release-readiness`. A future ready policy is not sufficient by itself:
+sections 5.2 and 5.4 run the strict verifier with the report CAR, transitive
+evidence CAR, evidence-bound governance binary, and finalized Idena anchor.
+Continue to a live start only when that complete invocation prints
+`ready-for-public-join`.
 
 The remaining sections are the procedure to use after that check passes. They
 are also suitable for isolated source review and local rehearsal, but a local
@@ -103,7 +102,8 @@ intend to create a separate experiment.
 
 > [!WARNING]
 > Experiment 1 coins and inherited fork balances have no promised value. The
-> fork permits inherited-mainnet spends subject to its mixed-input replay rule,
+> fork permits inherited-mainnet spends subject to its marker and
+> fork-domain-signature replay rules,
 > but that rule cannot protect a reused or exposed mainnet private key. Use
 > fresh fork-only wallet keys for ordinary testing, never broadcast a fork
 > transaction to Bitcoin mainnet, and independently inspect any inherited
@@ -153,8 +153,8 @@ git status --short
 
 python3 scripts/pohw-experiment-1-manifest.py verify \
   compatibility/experiment-1-full-consensus.json
-cargo build --locked --release -p p2pool-node
-cargo test --locked -p p2pool-node -p pohw-core
+cargo build --locked --release -p p2pool-node -p governance-cli
+cargo test --locked -p p2pool-node -p pohw-core -p governance-core -p governance-cli
 ```
 
 `git status --short` must print nothing. Compare the full activation ID and
@@ -240,31 +240,31 @@ addnode=<verified-core-peer-host:40412>
 EOF
 sudo chown bitcoin-pohw:bitcoin-pohw /srv/bitcoin/pohw/bitcoin.conf
 sudo chmod 0600 /srv/bitcoin/pohw/bitcoin.conf
-sudo install -m 0644 deploy/systemd/bitcoind-pohw-experiment-1.service \
-  /etc/systemd/system/bitcoind-pohw-experiment-1.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now bitcoind-pohw-experiment-1.service
 ```
 
 An empty node validates inherited history from genesis before reaching the
 fork. Pruning reduces retained disk usage, not validation work. Never use
-somebody else's RPC as a substitute for independent validation.
+somebody else's RPC as a substitute for independent validation. Do not install
+or start the Core unit yet. Section 5 installs that unit from the same
+evidence-bound runtime set and starts it only after the ready policy, both
+readiness CARs, and the finalized Idena anchor are present.
 
-## 3. Verify Core Before Registering
+## 3. Verify The Core Build Before Registering
 
-This command prints no block hash, wallet information, peer address, or RPC
-credential:
+The deterministic builder has already run the complete Core test suite. Confirm
+the installed binaries and immutable manifest now; the live-chain check occurs
+after the launch interlock is staged in section 5.3:
 
 ```sh
-sudo -u bitcoin-pohw -g bitcoin-pohw-rpc \
-  /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli \
-  -datadir=/srv/bitcoin/pohw -chain=pohw \
-  -rpccookiefile=/run/bitcoin-pohw-rpc/.cookie getblockchaininfo |
-python3 -c 'import json,sys; d=json.load(sys.stdin); print("chain="+d["chain"]); print("height="+str(d["blocks"])); print("headers="+str(d["headers"])); print("ibd="+str(d["initialblockdownload"])); print("replay="+str(d.get("pohw_experiment",{}).get("replay_protection")))'
+test -x /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoind
+test -x /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli
+python3 scripts/pohw-experiment-1-manifest.py verify \
+  compatibility/experiment-1-full-consensus.json
+/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoind -version | head -n 1
 ```
 
-Continue only when `chain=pohw`, `ibd=False`, the height is at or above the
-first fork height in the manifest, and replay protection is present.
+The version line is informational; the manifest and independently selected
+build evidence are the authority.
 
 ## 4. Register Your Idena Identity
 
@@ -434,7 +434,8 @@ test "$(sha256sum "$EVIDENCE_DIR/build-evidence.json" | awk '{print $1}')" = \
   "$EXPECTED_EVIDENCE_SHA256"
 
 UNKNOWN_UNITS=()
-for unit in pohw-gossip-mesh.service pohw-mining-adapter.service; do
+for unit in bitcoind-pohw-experiment-1.service \
+  pohw-gossip-mesh.service pohw-mining-adapter.service; do
   if sudo systemctl is-enabled --quiet "$unit"; then
     echo "Refusing installation while $unit is enabled." >&2
     exit 1
@@ -490,7 +491,8 @@ INSTALL_RESULT=$(sudo scripts/pohw-install-experiment-1-adapter.sh \
   --build-evidence "$EVIDENCE_DIR/build-evidence.json" \
   --expected-evidence-sha256 "$EXPECTED_EVIDENCE_SHA256" \
   --expected-source-cid "$EXPECTED_SOURCE_CID" \
-  --binary "$REPO/target/release/p2pool-node")
+  --binary "$REPO/target/release/p2pool-node" \
+  --governance-binary "$REPO/target/release/pohw-governance")
 printf '%s\n' "$INSTALL_RESULT"
 grep -Fq 'services remain stopped' <<<"$INSTALL_RESULT"
 
@@ -498,16 +500,27 @@ RUNTIME_DIR=/usr/local/libexec/p2pool-experiment-1
 INSTALLED_NODE="$RUNTIME_DIR/p2pool-node"
 for artifact in \
   "$INSTALLED_NODE" \
+  "$RUNTIME_DIR/pohw-governance" \
+  "$RUNTIME_DIR/pohw-experiment-1-launch-policy.py" \
+  "$RUNTIME_DIR/compatibility/experiment-1-full-consensus.json" \
+  "$RUNTIME_DIR/compatibility/experiment-1-launch-policy.json" \
+  "$RUNTIME_DIR/compatibility/experiment-1-miner-registry-candidate.json" \
   "$RUNTIME_DIR/pohw-run-gossip-mesh.sh" \
   "$RUNTIME_DIR/pohw-run-mining-adapter.sh" \
   "$RUNTIME_DIR/pohw-health-status.py" \
+  /etc/systemd/system/bitcoind-pohw-experiment-1.service \
   /etc/systemd/system/pohw-gossip-mesh.service \
   /etc/systemd/system/pohw-mining-adapter.service \
   /etc/systemd/system/pohw-gossip-mesh.service.d/server.conf \
-  /etc/systemd/system/pohw-mining-adapter.service.d/server.conf; do
+  /etc/systemd/system/pohw-mining-adapter.service.d/server.conf \
+  /etc/systemd/system/pohw-gossip-mesh.service.d/experiment-1.conf \
+  /etc/systemd/system/pohw-mining-adapter.service.d/experiment-1.conf; do
   sudo test -f "$artifact"
   sudo test ! -L "$artifact"
 done
+test "$(sudo systemctl show -p FragmentPath --value \
+  bitcoind-pohw-experiment-1.service)" = \
+  /etc/systemd/system/bitcoind-pohw-experiment-1.service
 test "$(sudo systemctl show -p FragmentPath --value \
   pohw-gossip-mesh.service)" = \
   /etc/systemd/system/pohw-gossip-mesh.service
@@ -529,6 +542,8 @@ for unit in pohw-gossip-mesh.service pohw-mining-adapter.service; do
     /opt/p2pool
   sudo systemctl show -p DropInPaths --value "$unit" | \
     grep -Fq "/etc/systemd/system/$unit.d/server.conf"
+  sudo systemctl show -p DropInPaths --value "$unit" | \
+    grep -Fq "/etc/systemd/system/$unit.d/experiment-1.conf"
   sudo systemctl show -p ReadWritePaths --value "$unit" | \
     grep -Fqw /srv/sharechain
   if sudo systemctl is-enabled --quiet "$unit"; then
@@ -539,13 +554,14 @@ done
 ```
 
 The installer deliberately rejects an unknown service state. On a fresh host,
-the inert placeholders make the two names provably inactive; they cannot be
+the inert placeholders make the three names provably inactive; they cannot be
 enabled or manually started and are never executed. The installer must replace
 them before the artifact and effective-unit checks run. Its final line and every
-check above must pass. It copies the binary, both wrappers, the health checker,
-both base units, and both server-profile drop-ins from the exact verified
-source/evidence set. It does not execute the candidate as root and it does not
-start either service.
+check above must pass. It copies both binaries, the launch verifier and its
+three bound compatibility inputs, both wrappers, the health checker, all three
+base units, and all server/Experiment-1 drop-ins from the exact verified
+source/evidence set. It does not execute either candidate binary as root and it
+does not start any service.
 
 ### 5.2 Stage Policy, Snapshot, Peers, And Secrets
 
@@ -565,6 +581,8 @@ EXPECTED_SNAPSHOT_SHA256='<independently-verified-snapshot-sha256>'
 COMMITMENT_SOURCE='/path/to/reviewed-personalized-pohw-commitment.json'
 EXPECTED_COMMITMENT_SHA256='<reviewed-personalized-commitment-sha256>'
 IDENA_API_KEY_SOURCE='/path/to/local/idena-api.key'
+READINESS_REPORT_SOURCE='/path/to/deployment-readiness-report.car'
+READINESS_EVIDENCE_SOURCE='/path/to/deployment-readiness-evidence.car'
 VERIFIED_GOSSIP_PEERS='<verified-gossip-peer-ip:40406>'
 MIN_SNAPSHOT_VOTERS=3
 
@@ -593,11 +611,20 @@ for endpoint in sys.argv[1].split(','):
 PY
 
 for artifact in "$POLICY_SOURCE" "$SNAPSHOT_SOURCE" \
-  "$COMMITMENT_SOURCE" "$IDENA_API_KEY_SOURCE"; do
+  "$COMMITMENT_SOURCE" "$IDENA_API_KEY_SOURCE" \
+  "$READINESS_REPORT_SOURCE" "$READINESS_EVIDENCE_SOURCE"; do
   test -s "$artifact"
   test -f "$artifact"
   test ! -L "$artifact"
 done
+python3 scripts/pohw-experiment-1-launch-policy.py \
+  compatibility/experiment-1-launch-policy.json \
+  --repo-root "$REPO" \
+  --readiness-car "$READINESS_REPORT_SOURCE" \
+  --readiness-evidence-car "$READINESS_EVIDENCE_SOURCE" \
+  --governance-cli "$REPO/target/release/pohw-governance" \
+  --idena-anchor-policy "$POLICY_SOURCE" \
+  --require-ready
 case "$(stat -c %a "$IDENA_API_KEY_SOURCE")" in
   400|440|600|640) ;;
   *) echo 'The source Idena API-key file has unsafe permissions.' >&2; exit 1 ;;
@@ -705,6 +732,8 @@ require_safe_directory_destination /etc/pohw
 require_safe_directory_destination /etc/pohw/secrets
 for destination in \
   /etc/pohw/experiment-1-full-consensus.json \
+  /etc/pohw/experiment-1-deployment-readiness.car \
+  /etc/pohw/experiment-1-deployment-readiness-evidence.car \
   /etc/pohw/idena-anchor-policy-v2.json \
   /etc/pohw/secrets/idena-api.key; do
   require_safe_regular_destination "$destination"
@@ -715,12 +744,20 @@ sudo install -o root -g root -m 0644 "$MANIFEST" \
   /etc/pohw/experiment-1-full-consensus.json
 sudo install -o root -g root -m 0644 "$POLICY_SOURCE" \
   /etc/pohw/idena-anchor-policy-v2.json
+sudo install -o root -g root -m 0644 "$READINESS_REPORT_SOURCE" \
+  /etc/pohw/experiment-1-deployment-readiness.car
+sudo install -o root -g root -m 0644 "$READINESS_EVIDENCE_SOURCE" \
+  /etc/pohw/experiment-1-deployment-readiness-evidence.car
 sudo install -o root -g pohw -m 0640 "$IDENA_API_KEY_SOURCE" \
   /etc/pohw/secrets/idena-api.key
 sudo cmp -s "$MANIFEST" /etc/pohw/experiment-1-full-consensus.json
 test "$(sudo sha256sum /etc/pohw/idena-anchor-policy-v2.json | awk '{print $1}')" = \
   "$EXPECTED_POLICY_SHA256"
 sudo cmp -s "$IDENA_API_KEY_SOURCE" /etc/pohw/secrets/idena-api.key
+sudo cmp -s "$READINESS_REPORT_SOURCE" \
+  /etc/pohw/experiment-1-deployment-readiness.car
+sudo cmp -s "$READINESS_EVIDENCE_SOURCE" \
+  /etc/pohw/experiment-1-deployment-readiness-evidence.car
 test "$(sudo stat -c %U:%G /etc/pohw/secrets/idena-api.key)" = root:pohw
 test "$(sudo stat -c %a /etc/pohw/secrets/idena-api.key)" = 640
 unset IDENA_API_KEY_SOURCE
@@ -747,9 +784,39 @@ P2Pool keys are secrets. The environment below contains only paths to those
 files, never their contents. Do not use `cat`, command substitution, or a shell
 variable to move a credential.
 
-### 5.3 Preflight While Both P2Pool Units Are Stopped
+### 5.3 Start And Verify Core While Both P2Pool Units Are Stopped
 
-First re-read the finalized miner record from the local loopback Idena node and
+Start the evidence-bound Core unit only after the launch evidence above is in
+place. It may need substantial time to validate inherited history. Continue
+only when `chain=pohw`, `ibd=False`, blocks equal headers at or above the pinned
+revision-3 checkpoint height `958175`, that checkpoint hash is exact, and the
+revision-3 replay rule is reported:
+
+```bash
+sudo systemctl start bitcoind-pohw-experiment-1.service
+sudo systemctl is-active --quiet bitcoind-pohw-experiment-1.service
+sudo -u bitcoin-pohw -g bitcoin-pohw-rpc \
+  /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli \
+  -datadir=/srv/bitcoin/pohw -chain=pohw \
+  -rpccookiefile=/run/bitcoin-pohw-rpc/.cookie getblockchaininfo |
+python3 -c 'import json,sys; d=json.load(sys.stdin); p=d.get("pohw_experiment",{}); print("chain="+d["chain"]); print("height="+str(d["blocks"])); print("headers="+str(d["headers"])); print("ibd="+str(d["initialblockdownload"])); print("replay="+str(p.get("replay_protection")))'
+
+CORE_CLI=/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli
+CORE_RPC=(sudo -u bitcoin-pohw -g bitcoin-pohw-rpc \
+  "$CORE_CLI" -datadir=/srv/bitcoin/pohw -chain=pohw \
+  -rpccookiefile=/run/bitcoin-pohw-rpc/.cookie)
+CHAIN_INFO="$("${CORE_RPC[@]}" getblockchaininfo)"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert type(d.get("blocks")) is int and type(d.get("headers")) is int; assert d["blocks"] == d["headers"] and d["blocks"] >= 958175; assert d.get("initialblockdownload") is False' "$CHAIN_INFO"
+test "$("${CORE_RPC[@]}" getblockhash 958175)" = \
+  09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6
+unset CHAIN_INFO
+```
+
+Do not start gossip, the adapter, Stratum, or any bootstrap miner if either
+checkpoint command fails. Mining below this checkpoint creates a divergent
+prefix that revision 3 will reject.
+
+Then re-read the finalized miner record from the local loopback Idena node and
 require it to match the anchor used for registration. Then import signed gossip
 history, prove a peer is reachable, derive snapshot values from verified local
 evidence, and make one non-mining dynamic job build through the local Core
@@ -893,9 +960,9 @@ before first start. The three explicitly checked readiness fields, at least one
 reachable verified peer, the signed-voter/identity evidence, local V2 registry
 read-back, `chain=pohw`, and the dynamic job build must all pass.
 
-Now write the root-owned service environment and install only the non-executable
-Experiment 1 gate drop-ins. The base units and executable wrappers remain the
-fixed evidence-installed files. The evidence-installed server drop-ins use the
+Now write the root-owned service environment and verify the already installed
+Experiment 1 gate drop-ins. The base units, verifier binaries, and executable
+wrappers remain the fixed evidence-installed files. The server drop-ins use the
 empty root-owned `/opt/p2pool` only as `WorkingDirectory` and confine writes to
 `/srv/sharechain`. `POHW_WORKDIR`, the health checker, and both `ExecStart`
 values point at the fixed installed runtime, so systemd does not execute a
@@ -950,26 +1017,12 @@ sudo install -o root -g root -m 0600 "$ENV_TMP" /etc/pohw/p2pool.env
 rm -f "$ENV_TMP"
 trap - EXIT
 
-for directory in \
-  /etc/systemd/system/pohw-gossip-mesh.service.d \
-  /etc/systemd/system/pohw-mining-adapter.service.d; do
-  require_safe_directory_destination "$directory"
-done
-sudo install -d -o root -g root -m 0755 \
-  /etc/systemd/system/pohw-gossip-mesh.service.d \
-  /etc/systemd/system/pohw-mining-adapter.service.d
 for destination in \
   /etc/systemd/system/pohw-gossip-mesh.service.d/experiment-1.conf \
   /etc/systemd/system/pohw-mining-adapter.service.d/experiment-1.conf; do
-  require_safe_regular_destination "$destination"
+  sudo test -f "$destination"
+  sudo test ! -L "$destination"
 done
-sudo install -o root -g root -m 0644 \
-  deploy/systemd/pohw-gossip-experiment-1.conf \
-  /etc/systemd/system/pohw-gossip-mesh.service.d/experiment-1.conf
-sudo install -o root -g root -m 0644 \
-  deploy/systemd/pohw-mining-experiment-1.conf \
-  /etc/systemd/system/pohw-mining-adapter.service.d/experiment-1.conf
-sudo systemctl daemon-reload
 sudo systemd-analyze verify \
   /etc/systemd/system/pohw-gossip-mesh.service \
   /etc/systemd/system/pohw-mining-adapter.service
@@ -1010,8 +1063,16 @@ one start marker. Enabling a unit does not start it. Start gossip first and
 require it to remain active before starting the adapter.
 
 ```bash
-STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
-  compatibility/experiment-1-launch-policy.json | sed -n 's/^launch policy verified: //p')
+STATUS=$(sudo -u pohw -g pohw /usr/bin/python3 -I \
+  /usr/local/libexec/p2pool-experiment-1/pohw-experiment-1-launch-policy.py \
+  /usr/local/libexec/p2pool-experiment-1/compatibility/experiment-1-launch-policy.json \
+  --repo-root /usr/local/libexec/p2pool-experiment-1 \
+  --readiness-car /etc/pohw/experiment-1-deployment-readiness.car \
+  --readiness-evidence-car \
+    /etc/pohw/experiment-1-deployment-readiness-evidence.car \
+  --governance-cli /usr/local/libexec/p2pool-experiment-1/pohw-governance \
+  --idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json \
+  --require-ready | sed -n 's/^launch policy verified: //p')
 test "$STATUS" = ready-for-public-join
 
 start_failed() {
@@ -1020,11 +1081,13 @@ start_failed() {
     exit 1
   }
   sudo systemctl disable --now \
-    pohw-mining-adapter.service pohw-gossip-mesh.service || {
-    echo 'Failed to disable and stop the Experiment 1 P2Pool units.' >&2
+    pohw-mining-adapter.service pohw-gossip-mesh.service \
+    bitcoind-pohw-experiment-1.service || {
+    echo 'Failed to disable and stop the Experiment 1 units.' >&2
     exit 1
   }
-  for unit in pohw-mining-adapter.service pohw-gossip-mesh.service; do
+  for unit in pohw-mining-adapter.service pohw-gossip-mesh.service \
+    bitcoind-pohw-experiment-1.service; do
     set +e
     sudo systemctl is-active --quiet "$unit"
     unit_status=$?
@@ -1041,6 +1104,7 @@ start_failed() {
 sudo install -o root -g root -m 0600 /dev/null \
   /etc/pohw/enable-experiment-1-mining || start_failed
 sudo systemctl enable \
+  bitcoind-pohw-experiment-1.service \
   pohw-gossip-mesh.service pohw-mining-adapter.service || start_failed
 
 sudo systemctl start pohw-gossip-mesh.service || start_failed

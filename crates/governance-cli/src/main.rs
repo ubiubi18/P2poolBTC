@@ -4,37 +4,41 @@ mod output;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use governance_core::{
-    agent_attestation_commitment_fields, build_attestation_commitment,
-    build_attestation_commitment_fields, checkout_source_car, cid_for, create_source_patch,
-    data_availability_commitment_fields, effective_vote_weight, evaluate_deployment_readiness,
-    flip_trust_bps, package_agent_review_attestation, package_build_attestation,
-    package_change_proposal_with_scope, package_dag_cbor, package_data_availability_attestation,
+    agent_attestation_commitment_fields, attestation_authentication_request,
+    build_attestation_commitment, build_attestation_commitment_fields, checkout_source_car,
+    cid_for, create_source_patch, data_availability_commitment_fields, effective_vote_weight,
+    evaluate_deployment_readiness_evidence, flip_trust_bps, package_agent_review_attestation,
+    package_build_attestation, package_change_proposal_with_scope, package_dag_cbor,
+    package_data_availability_attestation, package_deployment_readiness_evidence,
     package_development_policy, package_ecosystem_manifest, package_ecosystem_patch_manifest,
     package_external_audit_attestation, package_governance_parameters,
     package_identity_metrics_attestation, package_identity_metrics_snapshot,
     package_pinset_manifest_for_transition_with_additional, package_proposal_scope_evidence,
     package_release_manifest, package_source_tree_with_artifact_exclusions,
     package_toolchain_manifest_for_ecosystem, run_local_governance_day_protocol_demo, sha256_hex,
-    stake_score, validate_epoch_governance_parameters, validate_proposal_scope_evidence,
-    verify_agent_review_attestation_car, verify_build_attestation_car, verify_car_integrity,
+    signature_attestation_authentication, stake_score, validate_epoch_governance_parameters,
+    validate_proposal_scope_evidence, verify_agent_review_attestation_car,
+    verify_attestation_authentication, verify_build_attestation_car, verify_car_integrity,
     verify_change_proposal_car_with_scope, verify_dag_cbor_car,
-    verify_data_availability_attestation_car, verify_development_policy_car,
-    verify_ecosystem_manifest_car, verify_ecosystem_patch_manifest_car,
-    verify_ecosystem_transition, verify_external_audit_attestation_car,
-    verify_governance_parameters_car, verify_identity_metrics_attestation_car,
-    verify_identity_metrics_snapshot_car, verify_pinset_manifest_car,
-    verify_pinset_manifest_for_transition, verify_proposal_scope_evidence_car,
-    verify_release_manifest_car, verify_source_car, verify_source_patch,
-    verify_toolchain_manifest_car, verify_tree_matches_car_with_artifact_exclusions,
-    AcceptanceEvidence, AddressedAttestationV1, AgentReviewAttestationV1,
+    verify_data_availability_attestation_car, verify_deployment_readiness_evidence_car,
+    verify_development_policy_car, verify_ecosystem_manifest_car,
+    verify_ecosystem_patch_manifest_car, verify_ecosystem_transition,
+    verify_external_audit_attestation_car, verify_governance_parameters_car,
+    verify_identity_metrics_attestation_car, verify_identity_metrics_snapshot_car,
+    verify_pinset_manifest_car, verify_pinset_manifest_for_transition,
+    verify_proposal_scope_evidence_car, verify_release_manifest_car, verify_source_car,
+    verify_source_patch, verify_toolchain_manifest_car,
+    verify_tree_matches_car_with_artifact_exclusions, AcceptanceEvidence, AddressedAttestationV1,
+    AgentReviewAttestationV1, AttestationAuthenticationRequestV1, AttestationAuthenticationV1,
     AttestationCommitmentEntryV1, BuildAttestationV1, ChangeProposalContentV1,
-    DataAvailabilityAttestationV1, DevelopmentPolicyBundleV1, EcosystemManifestV1,
-    EcosystemPatchManifestV1, EpochGovernanceParameterSetV1, ExternalAuditAttestationV1,
-    ExternalAuditVerdictV1, GateResults, GovernanceParameterSetV1, IdentityMetricsAttestationV1,
-    IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1, ProposalScopeEvidenceV1,
-    ReleaseManifestV1, RepositoryScopeEvidenceV1, RiskClass, ScopeChangeV1, SourcePatchV1,
-    SourceTreeManifestV1, ToolchainManifestV1, AGENT_REVIEW_COMMITMENT_DOMAIN,
-    BUILD_ATTESTATION_COMMITMENT_DOMAIN, DATA_AVAILABILITY_COMMITMENT_DOMAIN,
+    DataAvailabilityAttestationV1, DeploymentReadinessEvidenceV1, DevelopmentPolicyBundleV1,
+    EcosystemManifestV1, EcosystemPatchManifestV1, EpochGovernanceParameterSetV1,
+    ExternalAuditAttestationV1, ExternalAuditVerdictV1, GateResults, GovernanceParameterSetV1,
+    IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1,
+    ProposalScopeEvidenceV1, ReleaseManifestV1, RepositoryScopeEvidenceV1, RiskClass,
+    ScopeChangeV1, SourcePatchV1, SourceTreeManifestV1, ToolchainManifestV1,
+    AGENT_REVIEW_COMMITMENT_DOMAIN, BUILD_ATTESTATION_COMMITMENT_DOMAIN,
+    DATA_AVAILABILITY_COMMITMENT_DOMAIN, EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -288,6 +292,25 @@ enum Command {
     DeploymentReadinessVerify {
         #[arg(long)]
         input: PathBuf,
+        /// Emit the verified canonical readiness report CAR and digest sidecars.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Recompute a readiness report from its canonical authenticated evidence bundle.
+    DeploymentReadinessEvidenceVerify {
+        #[arg(long)]
+        car: PathBuf,
+    },
+    /// Bind a detached Idena signature to an exact attestation CAR.
+    AttestationAuthenticate {
+        #[arg(long, value_enum)]
+        kind: CliAttestationKind,
+        #[arg(long)]
+        car: PathBuf,
+        #[arg(long)]
+        signature_file: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
     },
     /// Package an independently operated identity-metrics replay attestation.
     IdentityMetricsAttestation {
@@ -319,6 +342,9 @@ enum Command {
         kind: CliAttestationKind,
         #[arg(long)]
         car: PathBuf,
+        /// Detached authentication envelope; omission verifies content only.
+        #[arg(long)]
+        authentication: Option<PathBuf>,
     },
     /// Build a deterministic contract-compatible Merkle root and inclusion proofs.
     AttestationCommitment {
@@ -406,7 +432,7 @@ impl CliAttestationKind {
             Self::AgentReview => AGENT_REVIEW_COMMITMENT_DOMAIN,
             Self::Build => BUILD_ATTESTATION_COMMITMENT_DOMAIN,
             Self::DataAvailability => DATA_AVAILABILITY_COMMITMENT_DOMAIN,
-            Self::ExternalAudit => "external_audit_v1",
+            Self::ExternalAudit => EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
         }
     }
 
@@ -521,10 +547,17 @@ struct ScopeRepositoryInputV1 {
 struct DeploymentReadinessInputV1 {
     schema_version: u16,
     scope_car: PathBuf,
-    build_attestation_cars: Vec<PathBuf>,
-    data_availability_attestation_cars: Vec<PathBuf>,
-    external_audit_attestation_cars: Vec<PathBuf>,
+    build_attestations: Vec<AuthenticatedAttestationInputV1>,
+    data_availability_attestations: Vec<AuthenticatedAttestationInputV1>,
+    external_audit_attestations: Vec<AuthenticatedAttestationInputV1>,
     required_availability_through_block: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthenticatedAttestationInputV1 {
+    car: PathBuf,
+    authentication: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -630,12 +663,46 @@ struct AttestationView<T> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AttestationVerificationView<T> {
+    schema_version: u16,
+    attestation_kind: &'static str,
+    attestation_cid: String,
+    attestation_sha256: String,
+    car_sha256: String,
+    content_verified: bool,
+    authentication_verified: bool,
+    authenticated_identity: Option<String>,
+    payload: T,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct IdentityMetricsSnapshotView<T> {
     schema_version: u16,
     snapshot_cid: String,
     snapshot_sha256: String,
     car_sha256: String,
     snapshot: T,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeploymentReadinessReportView<T> {
+    schema_version: u16,
+    report_cid: String,
+    report_sha256: String,
+    car_sha256: String,
+    report: T,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeploymentReadinessEvidenceVerificationView<T> {
+    schema_version: u16,
+    evidence_bundle_cid: String,
+    report_cid: String,
+    report_sha256: String,
+    report: T,
 }
 
 #[derive(Debug, Serialize)]
@@ -824,7 +891,18 @@ async fn main() -> Result<()> {
         Command::ExternalAuditAttestation { input, output_dir } => {
             external_audit_attestation_command(&input, &output_dir)
         }
-        Command::DeploymentReadinessVerify { input } => deployment_readiness_verify_command(&input),
+        Command::DeploymentReadinessVerify { input, output_dir } => {
+            deployment_readiness_verify_command(&input, output_dir.as_deref())
+        }
+        Command::DeploymentReadinessEvidenceVerify { car } => {
+            deployment_readiness_evidence_verify_command(&car)
+        }
+        Command::AttestationAuthenticate {
+            kind,
+            car,
+            signature_file,
+            output_dir,
+        } => attestation_authenticate_command(kind, &car, &signature_file, &output_dir),
         Command::IdentityMetricsAttestation { input, output_dir } => {
             identity_metrics_attestation_command(&input, &output_dir)
         }
@@ -837,7 +915,11 @@ async fn main() -> Result<()> {
         Command::IdentityMetricsSnapshotVerify { car } => {
             identity_metrics_snapshot_verify_command(&car)
         }
-        Command::AttestationVerify { kind, car } => attestation_verify_command(kind, &car),
+        Command::AttestationVerify {
+            kind,
+            car,
+            authentication,
+        } => attestation_verify_command(kind, &car, authentication.as_deref()),
         Command::AttestationCommitment {
             kind,
             entries,
@@ -1702,6 +1784,8 @@ fn review_attestation_command(
         output_dir,
         &package,
         fields,
+        &package.value.candidate_ecosystem_cid,
+        &package.value.owner_idena_address,
     )
 }
 
@@ -1715,7 +1799,14 @@ fn build_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
         &package.value.architecture,
         &package.value.builder_identity,
     )?;
-    write_attestation_artifacts(CliAttestationKind::Build, output_dir, &package, fields)
+    write_attestation_artifacts(
+        CliAttestationKind::Build,
+        output_dir,
+        &package,
+        fields,
+        &package.value.candidate_ecosystem_cid,
+        &package.value.builder_identity,
+    )
 }
 
 fn data_availability_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
@@ -1734,6 +1825,8 @@ fn data_availability_attestation_command(input: &Path, output_dir: &Path) -> Res
         output_dir,
         &package,
         fields,
+        &package.value.candidate_ecosystem_cid,
+        &package.value.operator_identity,
     )
 }
 
@@ -1760,18 +1853,44 @@ fn external_audit_attestation_command(input: &Path, output_dir: &Path) -> Result
         output_dir,
         &package,
         fields,
+        &package.value.candidate_ecosystem_cid,
+        &package.value.auditor_identity,
     )
 }
 
-fn deployment_readiness_verify_command(input_path: &Path) -> Result<()> {
+fn attestation_authenticate_command(
+    kind: CliAttestationKind,
+    car: &Path,
+    signature_file: &Path,
+    output_dir: &Path,
+) -> Result<()> {
+    let bytes = read_regular_file(car, "attestation CAR")?;
+    let (request, authentication_intent) = attestation_authentication_context(kind, &bytes)?;
+    let bytes = read_regular_file(signature_file, "Idena signature")?;
+    let signature = String::from_utf8(bytes)
+        .context("Idena signature file is not UTF-8")?
+        .trim()
+        .to_string();
+    let authentication = signature_attestation_authentication(&request, signature)?;
+    verify_attestation_authentication(&request, &authentication_intent, &authentication)?;
+    let output = secure_output_directory(output_dir)?;
+    write_new(
+        &output.join(format!("{}.authentication.json", kind.filename())),
+        &deterministic_json(&authentication)?,
+    )?;
+    print_json(&authentication)
+}
+
+fn deployment_readiness_verify_command(input_path: &Path, output_dir: Option<&Path>) -> Result<()> {
+    const MAX_EVIDENCE_CAR_BYTES: usize = 16 * 1024 * 1024;
     let input: DeploymentReadinessInputV1 =
         read_json_file(input_path, "deployment readiness input")?;
     if input.schema_version != 1 {
         bail!("deployment readiness schemaVersion must be 1");
     }
-    if input.build_attestation_cars.len() > 256
-        || input.data_availability_attestation_cars.len() > 256
-        || input.external_audit_attestation_cars.len() > 64
+    if input.build_attestations.len() > 256
+        || input.data_availability_attestations.len() > 256
+        || input.external_audit_attestations.len() > 64
     {
         bail!("deployment readiness evidence list exceeds its deterministic limit");
     }
@@ -1786,49 +1905,71 @@ fn deployment_readiness_verify_command(input_path: &Path) -> Result<()> {
     let scope_bytes = read_regular_file(&resolve(&input.scope_car), "scope evidence CAR")?;
     let scope = verify_proposal_scope_evidence_car(&scope_bytes)?;
     let builds = input
-        .build_attestation_cars
+        .build_attestations
         .iter()
-        .map(|path| {
-            let bytes = read_regular_file(&resolve(path), "build attestation CAR")?;
+        .map(|evidence| {
+            let bytes = read_regular_file(&resolve(&evidence.car), "build attestation CAR")?;
             let package = verify_build_attestation_car(&bytes)?;
+            let authentication = read_json_file(
+                &resolve(&evidence.authentication),
+                "build attestation authentication",
+            )?;
             Ok(AddressedAttestationV1 {
                 cid: package.root_cid.to_string(),
                 value: package.value,
+                authentication: Some(authentication),
             })
         })
         .collect::<Result<Vec<_>>>()?;
     let availability = input
-        .data_availability_attestation_cars
+        .data_availability_attestations
         .iter()
-        .map(|path| {
-            let bytes = read_regular_file(&resolve(path), "availability attestation CAR")?;
+        .map(|evidence| {
+            let bytes = read_regular_file(&resolve(&evidence.car), "availability attestation CAR")?;
             let package = verify_data_availability_attestation_car(&bytes)?;
+            let authentication = read_json_file(
+                &resolve(&evidence.authentication),
+                "availability attestation authentication",
+            )?;
             Ok(AddressedAttestationV1 {
                 cid: package.root_cid.to_string(),
                 value: package.value,
+                authentication: Some(authentication),
             })
         })
         .collect::<Result<Vec<_>>>()?;
     let audits = input
-        .external_audit_attestation_cars
+        .external_audit_attestations
         .iter()
-        .map(|path| {
-            let bytes = read_regular_file(&resolve(path), "external audit attestation CAR")?;
+        .map(|evidence| {
+            let bytes =
+                read_regular_file(&resolve(&evidence.car), "external audit attestation CAR")?;
             let package = verify_external_audit_attestation_car(&bytes)?;
+            let authentication = read_json_file(
+                &resolve(&evidence.authentication),
+                "external audit attestation authentication",
+            )?;
             Ok(AddressedAttestationV1 {
                 cid: package.root_cid.to_string(),
                 value: package.value,
+                authentication: Some(authentication),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let report = evaluate_deployment_readiness(
-        &scope.root_cid.to_string(),
-        &scope.value,
-        &builds,
-        &availability,
-        &audits,
-        input.required_availability_through_block,
-    )?;
+    let evidence = DeploymentReadinessEvidenceV1 {
+        schema_version: 1,
+        scope_evidence_cid: scope.root_cid.to_string(),
+        scope: scope.value,
+        build_attestations: builds,
+        data_availability_attestations: availability,
+        external_audit_attestations: audits,
+        required_availability_through_block: input.required_availability_through_block,
+    };
+    let evidence_package = package_deployment_readiness_evidence(evidence)?;
+    if evidence_package.car_bytes.len() > MAX_EVIDENCE_CAR_BYTES {
+        bail!("deployment readiness evidence CAR exceeds 16 MiB");
+    }
+    let report = evaluate_deployment_readiness_evidence(&evidence_package.value)?;
     print_json(&report)?;
     if !report.ready {
         bail!(
@@ -1836,7 +1977,74 @@ fn deployment_readiness_verify_command(input_path: &Path) -> Result<()> {
             report.failure_codes.join(", ")
         );
     }
+    if let Some(output_dir) = output_dir {
+        let package = package_dag_cbor(report.clone())?;
+        let view = DeploymentReadinessReportView {
+            schema_version: 1,
+            report_cid: package.root_cid.to_string(),
+            report_sha256: package.root_sha256.clone(),
+            car_sha256: sha256_hex(&package.car_bytes),
+            report: &package.value,
+        };
+        let output = secure_output_directory(output_dir)?;
+        write_new(
+            &output.join("deployment-readiness-report.car"),
+            &package.car_bytes,
+        )?;
+        write_new(
+            &output.join("deployment-readiness-evidence.car"),
+            &evidence_package.car_bytes,
+        )?;
+        write_new(
+            &output.join("deployment-readiness-report.json"),
+            &deterministic_json(&view)?,
+        )?;
+        write_new(
+            &output.join("deployment-readiness-report.cid"),
+            format!("{}\n", view.report_cid).as_bytes(),
+        )?;
+        write_new(
+            &output.join("deployment-readiness-report.car.sha256"),
+            format!("{}  deployment-readiness-report.car\n", view.car_sha256).as_bytes(),
+        )?;
+        write_new(
+            &output.join("deployment-readiness-evidence.cid"),
+            format!("{}\n", evidence_package.root_cid).as_bytes(),
+        )?;
+        write_new(
+            &output.join("deployment-readiness-evidence.car.sha256"),
+            format!(
+                "{}  deployment-readiness-evidence.car\n",
+                sha256_hex(&evidence_package.car_bytes)
+            )
+            .as_bytes(),
+        )?;
+    }
     Ok(())
+}
+
+fn deployment_readiness_evidence_verify_command(car: &Path) -> Result<()> {
+    const MAX_EVIDENCE_CAR_BYTES: usize = 16 * 1024 * 1024;
+    let bytes = read_regular_file(car, "deployment readiness evidence CAR")?;
+    if bytes.len() > MAX_EVIDENCE_CAR_BYTES {
+        bail!("deployment readiness evidence CAR exceeds 16 MiB");
+    }
+    let evidence = verify_deployment_readiness_evidence_car(&bytes)?;
+    let report = evaluate_deployment_readiness_evidence(&evidence.value)?;
+    if !report.ready {
+        bail!(
+            "deployment readiness gate failed: {}",
+            report.failure_codes.join(", ")
+        );
+    }
+    let report_package = package_dag_cbor(report)?;
+    print_json(&DeploymentReadinessEvidenceVerificationView {
+        schema_version: 1,
+        evidence_bundle_cid: evidence.root_cid.to_string(),
+        report_cid: report_package.root_cid.to_string(),
+        report_sha256: report_package.root_sha256,
+        report: report_package.value,
+    })
 }
 
 fn identity_metrics_attestation_command(input: &Path, output_dir: &Path) -> Result<()> {
@@ -1902,54 +2110,133 @@ fn identity_metrics_snapshot_verify_command(car: &Path) -> Result<()> {
     })
 }
 
-fn attestation_verify_command(kind: CliAttestationKind, car: &Path) -> Result<()> {
+fn attestation_verify_command(
+    kind: CliAttestationKind,
+    car: &Path,
+    authentication_path: Option<&Path>,
+) -> Result<()> {
     let bytes = read_regular_file(car, "attestation CAR")?;
+    let authenticated_identity = if let Some(path) = authentication_path {
+        let authentication: AttestationAuthenticationV1 =
+            read_json_file(path, "attestation authentication")?;
+        let (request, authentication_intent) = attestation_authentication_context(kind, &bytes)?;
+        verify_attestation_authentication(&request, &authentication_intent, &authentication)?;
+        Some(request.identity)
+    } else {
+        None
+    };
+    let authentication_verified = authenticated_identity.is_some();
     match kind {
         CliAttestationKind::AgentReview => {
             let package = verify_agent_review_attestation_car(&bytes)?;
-            print_json(&AttestationView {
+            print_json(&AttestationVerificationView {
                 schema_version: 1,
                 attestation_kind: kind.domain(),
                 attestation_cid: package.root_cid.to_string(),
                 attestation_sha256: package.root_sha256,
                 car_sha256: sha256_hex(&bytes),
+                content_verified: true,
+                authentication_verified,
+                authenticated_identity,
                 payload: package.value,
             })
         }
         CliAttestationKind::Build => {
             let package = verify_build_attestation_car(&bytes)?;
-            print_json(&AttestationView {
+            print_json(&AttestationVerificationView {
                 schema_version: 1,
                 attestation_kind: kind.domain(),
                 attestation_cid: package.root_cid.to_string(),
                 attestation_sha256: package.root_sha256,
                 car_sha256: sha256_hex(&bytes),
+                content_verified: true,
+                authentication_verified,
+                authenticated_identity,
                 payload: package.value,
             })
         }
         CliAttestationKind::DataAvailability => {
             let package = verify_data_availability_attestation_car(&bytes)?;
-            print_json(&AttestationView {
+            print_json(&AttestationVerificationView {
                 schema_version: 1,
                 attestation_kind: kind.domain(),
                 attestation_cid: package.root_cid.to_string(),
                 attestation_sha256: package.root_sha256,
                 car_sha256: sha256_hex(&bytes),
+                content_verified: true,
+                authentication_verified,
+                authenticated_identity,
                 payload: package.value,
             })
         }
         CliAttestationKind::ExternalAudit => {
             let package = verify_external_audit_attestation_car(&bytes)?;
-            print_json(&AttestationView {
+            print_json(&AttestationVerificationView {
                 schema_version: 1,
                 attestation_kind: kind.domain(),
                 attestation_cid: package.root_cid.to_string(),
                 attestation_sha256: package.root_sha256,
                 car_sha256: sha256_hex(&bytes),
+                content_verified: true,
+                authentication_verified,
+                authenticated_identity,
                 payload: package.value,
             })
         }
     }
+}
+
+fn attestation_authentication_context(
+    kind: CliAttestationKind,
+    bytes: &[u8],
+) -> Result<(AttestationAuthenticationRequestV1, String)> {
+    let context = match kind {
+        CliAttestationKind::AgentReview => {
+            let package = verify_agent_review_attestation_car(bytes)?;
+            let request = attestation_authentication_request(
+                kind.domain(),
+                &package.root_cid.to_string(),
+                &package.root_sha256,
+                &package.value.candidate_ecosystem_cid,
+                &package.value.owner_idena_address,
+            )?;
+            (request, package.value.authentication)
+        }
+        CliAttestationKind::Build => {
+            let package = verify_build_attestation_car(bytes)?;
+            let request = attestation_authentication_request(
+                kind.domain(),
+                &package.root_cid.to_string(),
+                &package.root_sha256,
+                &package.value.candidate_ecosystem_cid,
+                &package.value.builder_identity,
+            )?;
+            (request, package.value.authentication)
+        }
+        CliAttestationKind::DataAvailability => {
+            let package = verify_data_availability_attestation_car(bytes)?;
+            let request = attestation_authentication_request(
+                kind.domain(),
+                &package.root_cid.to_string(),
+                &package.root_sha256,
+                &package.value.candidate_ecosystem_cid,
+                &package.value.operator_identity,
+            )?;
+            (request, package.value.authentication)
+        }
+        CliAttestationKind::ExternalAudit => {
+            let package = verify_external_audit_attestation_car(bytes)?;
+            let request = attestation_authentication_request(
+                kind.domain(),
+                &package.root_cid.to_string(),
+                &package.root_sha256,
+                &package.value.candidate_ecosystem_cid,
+                &package.value.auditor_identity,
+            )?;
+            (request, package.value.authentication)
+        }
+    };
+    Ok(context)
 }
 
 fn attestation_commitment_command(
@@ -1977,8 +2264,17 @@ fn write_attestation_artifacts<T: Serialize>(
     output_dir: &Path,
     package: &governance_core::AttestationPackage<T>,
     canonical_fields: String,
+    candidate_ecosystem_cid: &str,
+    identity: &str,
 ) -> Result<()> {
     let cid = package.root_cid.to_string();
+    let authentication_request = attestation_authentication_request(
+        kind.domain(),
+        &cid,
+        &package.root_sha256,
+        candidate_ecosystem_cid,
+        identity,
+    )?;
     let view = AttestationView {
         schema_version: 1,
         attestation_kind: kind.domain(),
@@ -2009,6 +2305,10 @@ fn write_attestation_artifacts<T: Serialize>(
     write_new(
         &output.join("commitment-entry.json"),
         &deterministic_json(&entry)?,
+    )?;
+    write_new(
+        &output.join(format!("{prefix}.authentication-request.json")),
+        &deterministic_json(&authentication_request)?,
     )?;
     print_json(&view)
 }
@@ -2390,6 +2690,43 @@ mod scenario_tests {
     use super::*;
 
     #[test]
+    fn deployment_readiness_accepts_a_canonical_report_output_directory() {
+        let cli = Cli::try_parse_from([
+            "pohw-governance",
+            "deployment-readiness-verify",
+            "--input",
+            "/tmp/readiness.json",
+            "--output-dir",
+            "/tmp/readiness-report",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::DeploymentReadinessVerify { input, output_dir } => {
+                assert_eq!(input, PathBuf::from("/tmp/readiness.json"));
+                assert_eq!(output_dir, Some(PathBuf::from("/tmp/readiness-report")));
+            }
+            _ => panic!("deployment-readiness-verify parsed as the wrong command"),
+        }
+    }
+
+    #[test]
+    fn deployment_readiness_evidence_verify_accepts_a_canonical_car() {
+        let cli = Cli::try_parse_from([
+            "pohw-governance",
+            "deployment-readiness-evidence-verify",
+            "--car",
+            "/tmp/readiness-evidence.car",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::DeploymentReadinessEvidenceVerify { car } => {
+                assert_eq!(car, PathBuf::from("/tmp/readiness-evidence.car"));
+            }
+            _ => panic!("deployment-readiness-evidence-verify parsed as the wrong command"),
+        }
+    }
+
+    #[test]
     fn canonical_transition_artifact_commands_require_explicit_inputs() {
         let pinset = Cli::try_parse_from([
             "pohw-governance",
@@ -2495,5 +2832,63 @@ mod scenario_tests {
         assert!(error
             .to_string()
             .contains("--scope-car is required with --proposal-car"));
+    }
+
+    #[test]
+    fn attestation_authentication_commands_take_detached_proof_files() {
+        let authenticate = Cli::try_parse_from([
+            "pohw-governance",
+            "attestation-authenticate",
+            "--kind",
+            "build",
+            "--car",
+            "/tmp/build.car",
+            "--signature-file",
+            "/tmp/build.signature",
+            "--output-dir",
+            "/tmp/build-auth",
+        ])
+        .unwrap();
+        assert!(matches!(
+            authenticate.command,
+            Command::AttestationAuthenticate {
+                kind: CliAttestationKind::Build,
+                ..
+            }
+        ));
+
+        let verify = Cli::try_parse_from([
+            "pohw-governance",
+            "attestation-verify",
+            "--kind",
+            "external-audit",
+            "--car",
+            "/tmp/audit.car",
+            "--authentication",
+            "/tmp/audit.authentication.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Command::AttestationVerify {
+                kind: CliAttestationKind::ExternalAudit,
+                authentication: Some(_),
+                ..
+            }
+        ));
+
+        assert!(Cli::try_parse_from([
+            "pohw-governance",
+            "attestation-authenticate",
+            "--kind",
+            "build",
+            "--car",
+            "/tmp/build.car",
+            "--receipt",
+            "/tmp/build.receipt.json",
+            "--output-dir",
+            "/tmp/build-auth",
+        ])
+        .is_err());
     }
 }

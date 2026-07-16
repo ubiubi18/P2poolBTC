@@ -407,6 +407,89 @@ def candidate_patch_paths(payload: bytes) -> set[str]:
     return paths
 
 
+def git_changed_paths(repository: Path, *, cached: bool) -> set[str]:
+    command = ["git", "diff"]
+    if cached:
+        command.append("--cached")
+    command.extend(["--name-only", "-z"])
+    if cached:
+        command.append("HEAD")
+    command.append("--")
+    return {
+        item.decode("utf-8")
+        for item in run_bytes(command, repository).split(b"\0")
+        if item
+    }
+
+
+def staged_candidate_patch_bytes(repository: Path, paths: set[str]) -> bytes:
+    return run_bytes(
+        [
+            "git",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--abbrev=7",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--unified=3",
+            "--diff-algorithm=myers",
+            "--indent-heuristic",
+            "HEAD",
+            "--",
+            *sorted(paths),
+        ],
+        repository,
+    )
+
+
+def verify_staged_candidate_patch(
+    repository: Path,
+    patch_path: Path,
+    patch_payload: bytes,
+    paths: set[str],
+    name: str,
+    *,
+    allowed_unstaged_paths: set[str],
+    state_label: str,
+) -> None:
+    try:
+        subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(patch_path)],
+            cwd=repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GateError(f"{name} does not contain the exact applied fork candidate patch") from exc
+
+    require(
+        staged_candidate_patch_bytes(repository, paths) == patch_payload,
+        f"{name} applied patch differs from the candidate lock",
+    )
+    require(
+        git_changed_paths(repository, cached=True) == paths,
+        f"{name} contains unexpected staged candidate {state_label} changes",
+    )
+    require(
+        git_changed_paths(repository, cached=False) == allowed_unstaged_paths,
+        f"{name} contains unexpected candidate {state_label} changes",
+    )
+    require(
+        not run_bytes(["git", "ls-files", "--others", "--exclude-standard", "-z"], repository),
+        f"{name} contains untracked candidate {state_label} files",
+    )
+
+
 def host_binding_archive() -> str:
     key = (platform.system().lower(), platform.machine().lower())
     archives = {
@@ -579,32 +662,14 @@ def verify_candidate_source_packages(
                 label=f"{name} fork candidate patch",
             )
             paths = candidate_patch_paths(patch_payload)
-            try:
-                subprocess.run(
-                    ["git", "apply", "--reverse", "--check", str(patch_path)],
-                    cwd=repository,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-            except (OSError, subprocess.CalledProcessError) as exc:
-                raise GateError(f"{name} does not contain the exact applied fork candidate patch") from exc
-            require(
-                run_bytes(["git", "diff", "--binary", "--", *sorted(paths)], repository)
-                == patch_payload,
-                f"{name} applied patch differs from the candidate lock",
-            )
-            changed = {
-                item.decode("utf-8")
-                for item in run_bytes(
-                    ["git", "diff", "--name-only", "-z", "HEAD", "--"], repository
-                ).split(b"\0")
-                if item
-            }
-            require(changed == set(paths), f"{name} contains unexpected candidate source changes")
-            require(
-                not run_bytes(["git", "ls-files", "--others", "--exclude-standard", "-z"], repository),
-                f"{name} contains untracked candidate source files",
+            verify_staged_candidate_patch(
+                repository,
+                patch_path,
+                patch_payload,
+                paths,
+                name,
+                allowed_unstaged_paths=set(),
+                state_label="source",
             )
 
             exclusions_path = resolve_locked_relative_file(
@@ -749,31 +814,20 @@ def verify_candidate_component_sources(
             label=f"{name} fork candidate patch",
         )
         paths = candidate_patch_paths(patch_payload)
-        try:
-            subprocess.run(
-                ["git", "apply", "--reverse", "--check", str(patch_path)],
-                cwd=repository,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise GateError(f"{name} does not contain the exact applied fork candidate patch") from exc
-        actual_patch = run_bytes(["git", "diff", "--binary", "--", *sorted(paths)], repository)
-        require(actual_patch == patch_payload, f"{name} applied patch differs from the candidate lock")
-        allowed = set(paths)
+        allowed_unstaged: set[str] = set()
         if name == "idena-go":
-            allowed.add("go.mod")
+            allowed_unstaged.add("go.mod")
         elif name == "idena-wasm-binding":
-            allowed.update({"lib/SHA256SUMS", archive_path})
-        changed = {
-            item.decode("utf-8")
-            for item in run_bytes(["git", "diff", "--name-only", "-z", "HEAD", "--"], repository).split(b"\0")
-            if item
-        }
-        require(changed == allowed, f"{name} contains unexpected candidate runtime changes")
-        untracked = run_bytes(["git", "ls-files", "--others", "--exclude-standard", "-z"], repository)
-        require(not untracked, f"{name} contains untracked candidate runtime files")
+            allowed_unstaged.update({"lib/SHA256SUMS", archive_path})
+        verify_staged_candidate_patch(
+            repository,
+            patch_path,
+            patch_payload,
+            paths,
+            name,
+            allowed_unstaged_paths=allowed_unstaged,
+            state_label="runtime",
+        )
 
     binding = repositories["idena-wasm-binding"]
     verify_candidate_binding_checksum(binding, archive_path)

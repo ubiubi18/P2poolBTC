@@ -39,6 +39,6 @@
     "ownerIdenaAddress":{"$ref":"common.schema.json#/$defs/Address"},
     "reviewerBondAtoms":{"$ref":"common.schema.json#/$defs/AtomicAmount"},
     "creationBlockOrTimestamp":{"type":"integer","minimum":0},
-    "authentication":{"const":"on-chain-submitter"}
+    "authentication":{"enum":["on-chain-submitter","detached-idena-signature-v1"],"description":"Authentication intent. Detached signature use additionally requires an AttestationAuthenticationV1 proof."}
   }
 }

@@ -23,6 +23,21 @@ const MAX_SUBMIT_BLOCK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GBT_TRANSACTION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBMIT_BLOCK_REJECT_REASON_BYTES: usize = 1024;
 pub(crate) const POHW_REPLAY_MARKER_SCRIPT_HEX: &str = "5150";
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE: &str =
+    "inherited-input-requires-fork-marker-and-signature-domain-v3";
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_DOMAIN: &str =
+    "pohw-experiment-1-full-consensus/replay-sighash-v3";
+pub(crate) const POHW_EXPERIMENT_1_FORK_HEIGHT: u64 = 958_016;
+pub(crate) const POHW_EXPERIMENT_1_FORK_HASH: &str =
+    "00000000000000000001d0f198da4adf33b597782a36c766685b2f217110cfc8";
+pub(crate) const POHW_EXPERIMENT_1_FIRST_FORK_HASH: &str =
+    "64d2122b44c111f2f593869ce404117d34c6c830f4390eb70245c11dcc503d01";
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_MARKER_ACTIVATION_HEIGHT: u64 = 958_018;
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT: u64 = 958_176;
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH: &str =
+    "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6";
+pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_VERSION_BIT: u32 = 1 << 30;
+pub(crate) const POHW_EXPERIMENT_1_BOOTSTRAP_HANDOFF_HASHRATE_HPS: u64 = 1_000_000_000_000_000;
 
 #[derive(Debug, Clone)]
 pub struct BitcoinRpcClient {
@@ -60,6 +75,10 @@ pub struct PohwExperimentInfoResponse {
     pub inherited_utxo_spending: bool,
     pub replay_protection: String,
     pub replay_marker_activation_height: u64,
+    pub replay_sighash_activation_height: u64,
+    pub replay_sighash_parent_hash: String,
+    pub replay_sighash_version_bit: u32,
+    pub replay_sighash_domain: String,
     pub bootstrap_handoff_hashrate_hps: u64,
     pub handoff_active: bool,
 }
@@ -270,9 +289,13 @@ impl BitcoinRpcClient {
         self.call("getblockchaininfo", json!([])).await
     }
 
+    pub async fn get_block_hash(&self, height: u64) -> Result<String> {
+        let hash: String = self.call("getblockhash", json!([height])).await?;
+        normalize_hash_hex("block hash", &hash)
+    }
+
     pub async fn mainnet_block_ref_by_height(&self, height: u64) -> Result<MainnetBlockRef> {
-        let block_hash: String = self.call("getblockhash", json!([height])).await?;
-        let block_hash = normalize_hash_hex("block hash", &block_hash)?;
+        let block_hash = self.get_block_hash(height).await?;
         let header: GetBlockHeaderResponse = self
             .call("getblockheader", json!([&block_hash, true]))
             .await?;
@@ -417,7 +440,7 @@ impl BitcoinRpcClient {
         }
     }
 
-    pub async fn mining_job_template(&self) -> Result<BitcoinMiningJobTemplate> {
+    pub(super) async fn mining_job_template_unchecked(&self) -> Result<BitcoinMiningJobTemplate> {
         let block_template: GetBlockTemplateResponse = self
             .call("getblocktemplate", json!([{ "rules": ["segwit"] }]))
             .await?;

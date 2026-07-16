@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/DeploymentReadinessReportV1.schema.json",
+  "title": "DeploymentReadinessReportV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidenceBundleCid",
+    "candidateEcosystemCid",
+    "scopeEvidenceCid",
+    "riskClass",
+    "ready",
+    "builderThreshold",
+    "matchingBuilderCount",
+    "builderPlatformThreshold",
+    "matchingBuilderPlatformCount",
+    "selectedCoreArtifactDigest",
+    "availabilityThreshold",
+    "completeAvailabilityCount",
+    "externalAuditThreshold",
+    "passingExternalAuditCount",
+    "requiredContentCidCount",
+    "failureCodes"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "evidenceBundleCid": {"$ref": "#/$defs/DagCborCid"},
+    "candidateEcosystemCid": {"$ref": "#/$defs/DagCborCid"},
+    "scopeEvidenceCid": {"$ref": "#/$defs/DagCborCid"},
+    "riskClass": {"enum": ["normal", "critical", "consensus", "migration"]},
+    "ready": {"type": "boolean"},
+    "builderThreshold": {"$ref": "#/$defs/Count"},
+    "matchingBuilderCount": {"$ref": "#/$defs/Count"},
+    "builderPlatformThreshold": {"$ref": "#/$defs/Count"},
+    "matchingBuilderPlatformCount": {"$ref": "#/$defs/Count"},
+    "selectedCoreArtifactDigest": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "availabilityThreshold": {"$ref": "#/$defs/Count"},
+    "completeAvailabilityCount": {"$ref": "#/$defs/Count"},
+    "externalAuditThreshold": {"$ref": "#/$defs/Count"},
+    "passingExternalAuditCount": {"$ref": "#/$defs/Count"},
+    "requiredContentCidCount": {"$ref": "#/$defs/Count"},
+    "failureCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128}
+    }
+  },
+  "$defs": {
+    "DagCborCid": {
+      "type": "string",
+      "pattern": "^bafyrei[a-z2-7]{52}$"
+    },
+    "Count": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+  }
+}

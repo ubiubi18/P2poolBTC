@@ -40,6 +40,12 @@ class CommunityJoinTests(unittest.TestCase):
         self.assertIn("Join Live Only After The Interlock Opens", guide)
         self.assertIn("uses no Idena identity signature", guide)
         self.assertIn("must not create a registration", guide)
+        self.assertIn("revision-3 checkpoint height `958175`", guide)
+        self.assertIn("getblockhash 958175", guide)
+        self.assertIn(
+            "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
+            guide,
+        )
 
     def test_shell_script_is_valid_and_documents_source_only_trust(self):
         subprocess.run(["bash", "-n", str(SHELL_SCRIPT)], check=True)
@@ -315,15 +321,21 @@ class Experiment1CommunityGuideTests(unittest.TestCase):
         cls.step_five_prose = " ".join(cls.step_five.split())
 
     def test_public_join_interlock_remains_strict_and_blocked(self) -> None:
-        strict_verifier = textwrap.dedent(
+        blocked_verifier = textwrap.dedent(
             """\
             STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \\
-              compatibility/experiment-1-launch-policy.json | sed -n 's/^launch policy verified: //p')
-            test "$STATUS" = ready-for-public-join
+              compatibility/experiment-1-launch-policy.json | \\
+              sed -n 's/^launch policy verified: //p')
+            test "$STATUS" = blocked-release-readiness
             """
         )
         self.assertIn("blocked-release-readiness", self.guide)
-        self.assertGreaterEqual(self.guide.count(strict_verifier), 2)
+        self.assertIn(blocked_verifier, self.guide)
+        self.assertGreaterEqual(self.guide.count("--readiness-car"), 2)
+        self.assertGreaterEqual(self.guide.count("--readiness-evidence-car"), 2)
+        self.assertGreaterEqual(self.guide.count("--governance-cli"), 2)
+        self.assertGreaterEqual(self.guide.count("--idena-anchor-policy"), 2)
+        self.assertGreaterEqual(self.guide.count("--require-ready"), 2)
         self.assertIn(
             "Do not invite people to connect miners to the live experiment yet.",
             self.guide_prose,
@@ -475,7 +487,13 @@ class Experiment1CommunityGuideTests(unittest.TestCase):
             re.findall(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", self.step_five)
         )
         self.assertEqual(ipv4_literals, {"127.0.0.1"})
-        self.assertIsNone(re.search(r"\b[0-9a-fA-F]{40,}\b", self.step_five))
+        public_checkpoint = (
+            "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6"
+        )
+        self.assertEqual(self.step_five.count(public_checkpoint), 1)
+        self.assertIsNone(
+            re.search(r"\b[0-9a-fA-F]{40,}\b", self.step_five.replace(public_checkpoint, ""))
+        )
         for placeholder in (
             "<published-build-evidence-sha256>",
             "<published-canonical-source-cid>",

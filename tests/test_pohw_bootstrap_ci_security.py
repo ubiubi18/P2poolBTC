@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import re
@@ -11,6 +12,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BootstrapSecurityTests(unittest.TestCase):
+    def test_all_bitcoin_rpc_mining_templates_pass_the_checkpoint_gate(self):
+        source_root = ROOT / "crates" / "p2pool-node" / "src"
+        sources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in source_root.glob("*.rs")
+        }
+        combined = "\n".join(sources.values())
+        self.assertNotIn(".mining_job_template().await", combined)
+        self.assertEqual(combined.count(".mining_job_template_unchecked().await?"), 1)
+        self.assertIn(
+            "pub(super) async fn mining_job_template_unchecked",
+            sources["bitcoin_rpc.rs"],
+        )
+
+        main = sources["main.rs"]
+        start = main.index("async fn mining_job_template_if_ready(")
+        end = main.index("\n}\n", start)
+        helper = main[start:end]
+        chain_info = helper.index("client.get_blockchain_info().await?")
+        checkpoint = helper.index("ensure_bitcoin_mining_ready_with_rpc")
+        template = helper.index("client.mining_job_template_unchecked().await?")
+        self.assertLess(chain_info, checkpoint)
+        self.assertLess(checkpoint, template)
+
     def test_bootstrap_uses_root_owned_staging_and_independent_files(self):
         source = (
             ROOT / "scripts" / "pohw-bootstrap-bitcoin-core-fork.sh"
@@ -163,7 +188,10 @@ class BootstrapSecurityTests(unittest.TestCase):
         self.assertIn("POHW_SYSTEMCTL_BIN cannot override", source)
         self.assertIn('DESTINATION="$DEFAULT_DESTINATION"', source)
         self.assertIn("EXPECTED_SHA256=$(python3 -I -", source)
-        self.assertIn('  "$SOURCE" "$BUILD_EVIDENCE"', source)
+        self.assertIn(
+            '  "$SOURCE" "$GOVERNANCE_SOURCE" "$BUILD_EVIDENCE"', source
+        )
+        self.assertIn("--governance-binary", source)
         self.assertIn("--expected-evidence-sha256", source)
         self.assertIn("--expected-source-cid", source)
         self.assertIn("independently selected source CID", source)
@@ -191,6 +219,28 @@ class CiProvenanceTests(unittest.TestCase):
                     f"{target['id']}:{path}",
                 )
                 checked += 1
+            for artifact in target["artifacts"]:
+                if (
+                    artifact["repository"] != "P2poolBTC"
+                    or artifact["kind"] != "file"
+                    or artifact["expectedSha256"] is None
+                ):
+                    continue
+                path = Path(artifact["pathHint"])
+                self.assertFalse(path.is_absolute())
+                self.assertNotIn("..", path.parts)
+                resolved = ROOT / path
+                self.assertFalse(resolved.is_symlink(), f"{target['id']}:{path}")
+                self.assertTrue(resolved.is_file(), f"{target['id']}:{path}")
+                raw = resolved.read_bytes()
+                digest = hashlib.sha256(raw).digest()
+                raw_cid = "b" + base64.b32encode(
+                    bytes((1, 0x55, 0x12, 32)) + digest
+                ).decode("ascii").lower().rstrip("=")
+                self.assertEqual(len(raw), artifact["expectedSize"], path)
+                self.assertEqual(digest.hex(), artifact["expectedSha256"], path)
+                self.assertEqual(raw_cid, artifact["expectedCid"], path)
+                checked += 1
         self.assertGreater(checked, 0)
 
     def test_ci_has_experiment_provenance_and_production_runtime_gates(self):
@@ -207,6 +257,8 @@ class CiProvenanceTests(unittest.TestCase):
         self.assertIn("governance-fork-lock.json", runtime)
         self.assertIn("governance-day-fork-candidate-lock.json", runtime)
         self.assertIn("Apply exact inactive Governance Day runtime candidate", runtime)
+        self.assertIn('apply --index --check "$GITHUB_WORKSPACE/$patch"', runtime)
+        self.assertIn('apply --index "$GITHUB_WORKSPACE/$patch"', runtime)
         self.assertIn("Verify deterministic fork-candidate source CIDs", runtime)
         self.assertIn("--verify-candidate-sources-only", runtime)
         self.assertIn("--governance-cli", runtime)

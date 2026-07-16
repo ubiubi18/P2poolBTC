@@ -1,4 +1,7 @@
-use crate::bitcoin_rpc::{BitcoinRpcClient, BlockchainInfoResponse, PohwExperimentInfoResponse};
+use crate::bitcoin_rpc::{
+    BitcoinRpcClient, BlockchainInfoResponse, PohwExperimentInfoResponse,
+    POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE,
+};
 use crate::fork_address_index::{
     ForkAddressIndex, ForkAddressIndexLimits, ForkAddressIndexStats, ResolvedPreviousOutput,
 };
@@ -21,13 +24,11 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-const EXPERIMENT_1_ACTIVATION_PATCH_SHA256: &str =
-    "12a5eee86a1214cb3a87078334172befa2433ea466abf3937405073c0fd987f4";
 const EXPERIMENT_1_CURRENT_PATCH_SHA256: &str =
-    "b90ae7b95d240b4c037dd0fa82f37e145bdaf6028816ce3679bb814aa308d7ab";
+    "d5b2534a894d3193b72867741a191203a005cd18f050d372efbc209a0d6ee9bb";
 const MAX_BLOCK_HEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRANSACTION_INPUTS: usize = 10_000;
 const CORE_EXPLORER_PROTOCOL_VERSION: u16 = 1;
@@ -43,7 +44,13 @@ pub(crate) struct PohwCoreExplorerClient {
     rpc: BitcoinRpcClient,
     profile: PohwCoreProfile,
     address_index_limits: Option<ForkAddressIndexLimits>,
-    address_index: Option<Arc<Mutex<Option<ForkAddressIndex>>>>,
+    address_index: Option<Arc<ForkAddressIndexState>>,
+}
+
+#[derive(Debug)]
+struct ForkAddressIndexState {
+    snapshot: Mutex<Option<Arc<ForkAddressIndex>>>,
+    refresh: Semaphore,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +92,17 @@ struct ReplayProtectionProfile {
     rule: String,
     required: bool,
     marker_activation_height: u64,
+    signature_domain: ReplaySignatureDomainProfile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReplaySignatureDomainProfile {
+    activation_height: u64,
+    activation_parent_height: u64,
+    activation_parent_hash: String,
+    transaction_version_bit: u8,
+    transaction_version_mask: u32,
+    domain: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +144,38 @@ struct ValidatedChain {
     info: BlockchainInfoResponse,
     experiment: PohwExperimentInfoResponse,
     tip_hash: String,
+}
+
+impl ForkAddressIndexState {
+    async fn snapshot(&self) -> Option<Arc<ForkAddressIndex>> {
+        self.snapshot.lock().await.clone()
+    }
+
+    async fn publish(&self, candidate: ForkAddressIndex) -> Arc<ForkAddressIndex> {
+        let candidate = Arc::new(candidate);
+        let retired = {
+            let mut snapshot = self.snapshot.lock().await;
+            snapshot.replace(Arc::clone(&candidate))
+        };
+        drop(retired);
+        candidate
+    }
+}
+
+impl Default for ForkAddressIndexState {
+    fn default() -> Self {
+        Self {
+            snapshot: Mutex::new(None),
+            refresh: Semaphore::new(1),
+        }
+    }
+}
+
+fn address_index_matches_tip(index: &ForkAddressIndex, chain: &ValidatedChain) -> bool {
+    index.tip_height() == Some(chain.info.blocks)
+        && index
+            .tip_hash()
+            .is_some_and(|hash| hash.to_string() == chain.tip_hash)
 }
 
 impl ExplorerForkClient {
@@ -258,7 +308,8 @@ impl PohwCoreExplorerClient {
     ) -> Result<Self> {
         let profile = read_profile(path)?;
         validate_profile(&profile)?;
-        let address_index = address_index_limits.map(|_| Arc::new(Mutex::new(None)));
+        let address_index =
+            address_index_limits.map(|_| Arc::new(ForkAddressIndexState::default()));
         Ok(Self {
             rpc,
             profile,
@@ -306,6 +357,26 @@ impl PohwCoreExplorerClient {
         if first != self.profile.fork_point.first_fork_hash {
             bail!("fork explorer first-block checkpoint does not match the manifest");
         }
+        let replay_parent_height = self
+            .profile
+            .consensus
+            .replay_protection
+            .signature_domain
+            .activation_parent_height;
+        if info.blocks < replay_parent_height {
+            bail!("fork explorer RPC has not reached the replay-sighash checkpoint");
+        }
+        let replay_parent = self.block_hash(replay_parent_height).await?;
+        if replay_parent
+            != self
+                .profile
+                .consensus
+                .replay_protection
+                .signature_domain
+                .activation_parent_hash
+        {
+            bail!("fork explorer replay-sighash checkpoint does not match the manifest");
+        }
         let tip_hash = self.block_hash(info.blocks).await?;
         Ok(ValidatedChain {
             info,
@@ -325,6 +396,14 @@ impl PohwCoreExplorerClient {
                 != self.profile.consensus.inherited_utxo_spending_enabled
             || runtime.replay_protection != replay.rule
             || runtime.replay_marker_activation_height != replay.marker_activation_height
+            || runtime.replay_sighash_activation_height != replay.signature_domain.activation_height
+            || normalize_hash(
+                &runtime.replay_sighash_parent_hash,
+                "runtime replay-sighash parent hash",
+            )? != replay.signature_domain.activation_parent_hash
+            || runtime.replay_sighash_version_bit
+                != replay.signature_domain.transaction_version_mask
+            || runtime.replay_sighash_domain != replay.signature_domain.domain
             || runtime.bootstrap_handoff_hashrate_hps
                 != self
                     .profile
@@ -399,41 +478,43 @@ impl PohwCoreExplorerClient {
     where
         F: FnOnce(&ForkAddressIndex) -> Result<T>,
     {
-        let storage = self.address_index.as_ref().context(
-            "Experiment 1 fork address history requires the optional bounded host index",
-        )?;
-        let mut state = storage.lock().await;
-        self.refresh_address_index(chain, &mut state).await?;
-        let result = query(
-            state
-                .as_ref()
-                .context("fork address index did not produce a snapshot")?,
-        )?;
-        drop(state);
+        let snapshot = self.refresh_address_index(chain).await?;
+        let result = query(&snapshot)?;
         self.require_same_tip(chain).await?;
         Ok(result)
     }
 
-    async fn refresh_address_index(
-        &self,
-        chain: &ValidatedChain,
-        state: &mut Option<ForkAddressIndex>,
-    ) -> Result<()> {
-        if state.as_ref().is_some_and(|index| {
-            index.tip_height() == Some(chain.info.blocks)
-                && index
-                    .tip_hash()
-                    .is_some_and(|hash| hash.to_string() == chain.tip_hash)
-        }) {
-            return Ok(());
+    async fn refresh_address_index(&self, chain: &ValidatedChain) -> Result<Arc<ForkAddressIndex>> {
+        let storage = self.address_index.as_ref().context(
+            "Experiment 1 fork address history requires the optional bounded host index",
+        )?;
+        if let Some(snapshot) = storage.snapshot().await {
+            if address_index_matches_tip(&snapshot, chain) {
+                return Ok(snapshot);
+            }
         }
+
+        // Only refreshers queue here. Published snapshots remain available and
+        // the snapshot mutex is never held during RPC or index construction.
+        let _refresh = storage
+            .refresh
+            .acquire()
+            .await
+            .context("fork address-index refresh gate is closed")?;
+        let existing = storage.snapshot().await;
+        if let Some(snapshot) = existing.as_ref() {
+            if address_index_matches_tip(snapshot, chain) {
+                return Ok(Arc::clone(snapshot));
+            }
+        }
+
         let limits = self
             .address_index_limits
             .context("fork address-index limits are not configured")?;
         let inherited_tip_hash = BlockHash::from_str(&self.profile.fork_point.inherited_tip_hash)
             .context("manifest inherited tip hash is invalid")?;
 
-        let can_extend = if let Some(existing) = state.as_ref() {
+        let can_extend = if let Some(existing) = existing.as_ref() {
             match (existing.tip_height(), existing.tip_hash()) {
                 (Some(height), Some(hash)) if height < chain.info.blocks => {
                     self.block_hash(height).await? == hash.to_string()
@@ -444,9 +525,10 @@ impl PohwCoreExplorerClient {
             false
         };
         let mut candidate = if can_extend {
-            state
+            existing
                 .as_ref()
                 .expect("extendable address index exists")
+                .as_ref()
                 .clone()
         } else {
             ForkAddressIndex::new(
@@ -473,8 +555,7 @@ impl PohwCoreExplorerClient {
                 .with_context(|| format!("failed to index fork addresses at height {height}"))?;
         }
         self.require_same_tip(chain).await?;
-        *state = Some(candidate);
-        Ok(())
+        Ok(storage.publish(candidate).await)
     }
 
     async fn resolve_block_previous_outputs(
@@ -900,7 +981,7 @@ fn read_profile(path: &Path) -> Result<PohwCoreProfile> {
         bail!("Experiment 1 manifest must be a regular non-symlink file");
     }
     if metadata.len() > MAX_MANIFEST_BYTES {
-        bail!("Experiment 1 manifest exceeds 1 MiB");
+        bail!("Experiment 1 manifest exceeds 64 KiB");
     }
     let payload = fs::read(path)
         .with_context(|| format!("failed to read Experiment 1 manifest {}", path.display()))?;
@@ -913,7 +994,7 @@ fn read_profile(path: &Path) -> Result<PohwCoreProfile> {
 fn validate_profile(profile: &PohwCoreProfile) -> Result<()> {
     if profile.schema_version != "pohw-bitcoin-core-fork-manifest/v1"
         || profile.experiment_id != "pohw-experiment-1-full-consensus"
-        || profile.profile_revision != 2
+        || profile.profile_revision != 3
         || profile.status != "experimental-no-value"
         || profile.network.chain_argument != "pohw"
         || profile.consensus.engine != "bitcoin-core-v31.1-full"
@@ -922,14 +1003,30 @@ fn validate_profile(profile: &PohwCoreProfile) -> Result<()> {
             .all_upstream_transaction_and_script_rules_enabled
         || !profile.consensus.inherited_utxo_spending_enabled
         || !profile.consensus.replay_protection.required
+        || profile.consensus.replay_protection.rule != POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE
     {
         bail!("manifest is not the supported no-value Experiment 1 profile");
     }
     normalize_hash(&profile.activation_id, "activation id")?;
     normalize_hash(&profile.fork_point.inherited_tip_hash, "inherited tip hash")?;
     normalize_hash(&profile.fork_point.first_fork_hash, "first fork hash")?;
+    normalize_hash(
+        &profile
+            .consensus
+            .replay_protection
+            .signature_domain
+            .activation_parent_hash,
+        "replay-sighash activation parent hash",
+    )?;
+    let signature_domain = &profile.consensus.replay_protection.signature_domain;
     if profile.fork_point.first_fork_height
         != profile.fork_point.inherited_tip_height.saturating_add(1)
+        || signature_domain.activation_parent_height.saturating_add(1)
+            != signature_domain.activation_height
+        || signature_domain.transaction_version_bit > 30
+        || signature_domain.transaction_version_mask
+            != 1_u32 << signature_domain.transaction_version_bit
+        || signature_domain.domain != "pohw-experiment-1-full-consensus/replay-sighash-v3"
         || profile.consensus.proof_of_work.target_spacing_seconds == 0
         || profile
             .consensus
@@ -963,8 +1060,8 @@ fn validate_activation_id(manifest: &Value) -> Result<()> {
         .expect("manifest root was validated");
     payload_object.remove("activation_id");
     let build = payload_object
-        .get_mut("build")
-        .and_then(Value::as_object_mut)
+        .get("build")
+        .and_then(Value::as_object)
         .context("Experiment 1 manifest has no build object")?;
     let current_patch = build
         .get("patch_sha256")
@@ -973,10 +1070,6 @@ fn validate_activation_id(manifest: &Value) -> Result<()> {
     if current_patch != EXPERIMENT_1_CURRENT_PATCH_SHA256 {
         bail!("Experiment 1 manifest does not bind the reviewed current patch");
     }
-    build.insert(
-        "patch_sha256".to_string(),
-        Value::String(EXPERIMENT_1_ACTIVATION_PATCH_SHA256.to_string()),
-    );
     let mut canonical = Vec::new();
     write_canonical_json(&payload, &mut canonical)?;
     let mut tagged = Vec::with_capacity(TAG.len() + canonical.len());
@@ -1302,7 +1395,15 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn empty_address_index(tag: u8) -> ForkAddressIndex {
+        ForkAddressIndex::new(
+            1,
+            BlockHash::from_byte_array([tag; 32]),
+            ForkAddressIndexLimits::new(1, 1, 1, 1).expect("valid limits"),
+        )
+    }
 
     fn temp_path(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -1321,6 +1422,32 @@ mod tests {
             .err()
             .expect("duplicate key must fail");
         assert!(error.to_string().contains("duplicate JSON key: b"));
+    }
+
+    #[tokio::test]
+    async fn address_index_state_atomically_replaces_immutable_snapshots() {
+        let state = ForkAddressIndexState::default();
+        let first = state.publish(empty_address_index(1)).await;
+        let held_by_reader = state.snapshot().await.expect("published snapshot");
+        assert!(Arc::ptr_eq(&first, &held_by_reader));
+
+        let second = state.publish(empty_address_index(2)).await;
+        let current = state.snapshot().await.expect("replacement snapshot");
+        assert!(Arc::ptr_eq(&second, &current));
+        assert!(!Arc::ptr_eq(&held_by_reader, &current));
+    }
+
+    #[tokio::test]
+    async fn published_snapshot_remains_available_while_refresh_is_serialized() {
+        let state = ForkAddressIndexState::default();
+        let published = state.publish(empty_address_index(3)).await;
+        let _refresh = state.refresh.acquire().await.expect("open refresh gate");
+
+        let observed = tokio::time::timeout(Duration::from_millis(100), state.snapshot())
+            .await
+            .expect("snapshot reads must not wait for the refresh gate")
+            .expect("published snapshot");
+        assert!(Arc::ptr_eq(&published, &observed));
     }
 
     #[test]

@@ -351,8 +351,8 @@ jobs:
           Path(sys.argv[1]).write_text("".join(sorted(rows)), encoding="utf-8")
           PY
           while IFS=$'\t' read -r name patch; do
-            git -C "$RUNNER_TEMP/governance-components/$name" apply --check "$GITHUB_WORKSPACE/$patch"
-            git -C "$RUNNER_TEMP/governance-components/$name" apply "$GITHUB_WORKSPACE/$patch"
+            git -C "$RUNNER_TEMP/governance-components/$name" apply --index --check "$GITHUB_WORKSPACE/$patch"
+            git -C "$RUNNER_TEMP/governance-components/$name" apply --index "$GITHUB_WORKSPACE/$patch"
           done < "$RUNNER_TEMP/governance-candidate-patches.tsv"
       - name: Verify deterministic fork-candidate source CIDs
         shell: bash

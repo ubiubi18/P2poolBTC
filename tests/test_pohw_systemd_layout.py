@@ -4,9 +4,58 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD = ROOT / "deploy" / "systemd"
+EXPERIMENT_1_POLICY_PRESTART = (
+    "ExecStartPre=/usr/bin/python3 -I "
+    "/usr/local/libexec/p2pool-experiment-1/pohw-experiment-1-launch-policy.py "
+    "/usr/local/libexec/p2pool-experiment-1/compatibility/"
+    "experiment-1-launch-policy.json "
+    "--repo-root /usr/local/libexec/p2pool-experiment-1 "
+    "--readiness-car /etc/pohw/experiment-1-deployment-readiness.car "
+    "--readiness-evidence-car "
+    "/etc/pohw/experiment-1-deployment-readiness-evidence.car "
+    "--governance-cli /usr/local/libexec/p2pool-experiment-1/pohw-governance "
+    "--idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json "
+    "--require-ready"
+)
+EXPERIMENT_1_LIVE_IDENA_COMMAND = (
+    "/usr/local/libexec/p2pool-experiment-1/p2pool-node "
+    "verify-idena-registry-deployment "
+    "--idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json "
+    "--idena-rpc-url http://127.0.0.1:9009 "
+    "--idena-api-key-file /etc/pohw/secrets/idena-api.key"
+)
 
 
 class SystemdLayoutTests(unittest.TestCase):
+    def test_experiment_1_launches_require_verified_ready_policy(self) -> None:
+        units = (
+            ("bitcoind-pohw-experiment-1.service", "ExecStartPre=!"),
+            ("pohw-gossip-experiment-1.conf", "ExecStartPre="),
+            ("pohw-mining-experiment-1.conf", "ExecStartPre="),
+        )
+        for name, prefix in units:
+            unit = (SYSTEMD / name).read_text(encoding="utf-8")
+            self.assertEqual(unit.count(EXPERIMENT_1_POLICY_PRESTART), 1, name)
+            self.assertEqual(
+                unit.count(prefix + EXPERIMENT_1_LIVE_IDENA_COMMAND), 1, name
+            )
+            self.assertNotIn("/opt/p2pool/scripts/", unit, name)
+
+        core = (SYSTEMD / "bitcoind-pohw-experiment-1.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            core.index(EXPERIMENT_1_POLICY_PRESTART),
+            core.index(EXPERIMENT_1_LIVE_IDENA_COMMAND),
+        )
+        self.assertIn("SupplementaryGroups=bitcoin-pohw bitcoin-chain-read", core)
+        self.assertNotIn("SupplementaryGroups=bitcoin-pohw bitcoin-chain-read pohw", core)
+        self.assertIn("ExecStartPre=!/usr/local/libexec/p2pool-experiment-1/p2pool-node", core)
+        self.assertLess(
+            core.index(EXPERIMENT_1_LIVE_IDENA_COMMAND),
+            core.index("ExecStart=/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoind"),
+        )
+
     def test_bootstrap_miner_is_bounded_host_only_and_non_persistent(self) -> None:
         service = (SYSTEMD / "pohw-bootstrap-miner.service").read_text(
             encoding="utf-8"

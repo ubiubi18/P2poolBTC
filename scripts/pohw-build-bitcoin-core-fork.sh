@@ -120,6 +120,7 @@ print(pathlib.Path(sys.argv[1]).resolve(strict=True))
 PY
 }
 
+PYTHON3=$(resolve_tool python3)
 CMAKE=$(resolve_tool cmake)
 CTEST=$(resolve_tool ctest)
 MAKE=$(resolve_tool make)
@@ -129,7 +130,7 @@ resolve_tool c++ >/dev/null
 run_step() {
   local label=$1
   shift
-  python3 "$SCRIPT_DIR/pohw-bitcoin-core-build-evidence.py" run-step \
+  "$PYTHON3" "$SCRIPT_DIR/pohw-bitcoin-core-build-evidence.py" run-step \
     --snapshot-dir "$SNAPSHOT_DIR" \
     --build-dir "$BUILD_DIR" \
     --run-record "$RUN_RECORD" \
@@ -225,6 +226,8 @@ PY
 
 run_step pow_sanity --env "TMPDIR=$TEST_TMPDIR" -- \
   "$TEST_BITCOIN" --run_test=pow_tests/ChainParams_POHW_sanity
+run_step block_file_magic --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" --run_test=pow_tests/POHW_inherited_block_file_magic_is_disk_only
 run_step bootstrap_marker --env "TMPDIR=$TEST_TMPDIR" -- \
   "$TEST_BITCOIN" --run_test=pow_tests/POHW_bootstrap_and_handoff_marker
 run_step template_difficulty --env "TMPDIR=$TEST_TMPDIR" -- \
@@ -232,6 +235,38 @@ run_step template_difficulty --env "TMPDIR=$TEST_TMPDIR" -- \
 run_step replay_marker --env "TMPDIR=$TEST_TMPDIR" -- \
   "$TEST_BITCOIN" \
   --run_test=transaction_tests/pohw_inherited_spend_requires_fork_only_replay_marker
+run_step replay_domain --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" \
+  --run_test=transaction_tests/pohw_replay_sighash_domain_resists_marker_stripping
+run_step replay_checkpoint --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" \
+  --run_test=transaction_tests/pohw_active_chain_replay_checkpoint_is_fail_closed
+run_step replay_version --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" \
+  --run_test=transaction_tests/pohw_replay_protected_version_is_network_scoped
+run_step script_cache_domain --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" --run_test=txvalidationcache_tests
+run_step block_file_reader --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$TEST_BITCOIN" --run_test=streams_tests/streams_buffered_file_find_any_byte
+FUNCTIONAL_RUNNER="$SNAPSHOT_DIR/test/functional/test_runner.py"
+FUNCTIONAL_TESTS_DIR="$SNAPSHOT_DIR/test/functional"
+FUNCTIONAL_CONFIG="$BUILD_DIR/test/config.ini"
+[[ -f "$FUNCTIONAL_RUNNER" ]] || {
+  echo "verified source snapshot does not contain the functional test runner" >&2
+  exit 1
+}
+[[ -f "$FUNCTIONAL_TESTS_DIR/feature_pohw_replay.py" ]] || {
+  echo "verified source snapshot does not contain the replay functional test" >&2
+  exit 1
+}
+[[ -f "$FUNCTIONAL_CONFIG" && ! -L "$FUNCTIONAL_CONFIG" ]] || {
+  echo "build did not produce a regular functional test configuration" >&2
+  exit 1
+}
+run_step replay_functional --env "TMPDIR=$TEST_TMPDIR" -- \
+  "$PYTHON3" "$FUNCTIONAL_RUNNER" feature_pohw_replay.py \
+  --jobs=1 --tmpdirprefix="$TEST_TMPDIR" \
+  --configfile="$FUNCTIONAL_CONFIG" --testsdir="$FUNCTIONAL_TESTS_DIR"
 run_step ctest --env "TMPDIR=$TEST_TMPDIR" -- \
   "$CTEST" --test-dir "$BUILD_DIR" --output-on-failure
 

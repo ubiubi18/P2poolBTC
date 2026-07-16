@@ -11,6 +11,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "compatibility" / "experiment-1-full-consensus.json"
+ARCHIVED_MANIFEST_PATH = (
+    ROOT / "compatibility" / "experiment-1-full-consensus-revision-2.json"
+)
+ARCHIVED_PATCH_PATH = (
+    ROOT
+    / "vendor"
+    / "bitcoin-core"
+    / "patches"
+    / "bitcoin-core-v31.1-pohw-experiment-1-revision-2.patch"
+)
 LAUNCH_POLICY_PATH = ROOT / "compatibility" / "experiment-1-launch-policy.json"
 IDENA_POLICY_SCHEMA_PATH = ROOT / "schemas" / "pohw" / "IdenaAnchorPolicyV2.schema.json"
 VALIDATOR_PATH = ROOT / "scripts" / "pohw-experiment-1-manifest.py"
@@ -47,6 +57,57 @@ class Experiment1ManifestTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("manifest verified", result.stdout)
+
+    def test_archived_revision_two_manifest_and_patch_verify(self):
+        archived = json.loads(ARCHIVED_MANIFEST_PATH.read_text(encoding="utf-8"))
+        current_patch = ROOT / archived["build"]["patch_path"]
+
+        self.assertEqual(archived["profile_revision"], 2)
+        self.assertEqual(
+            archived["activation_id"], self.validator.PREVIOUS_ACTIVATION_ID
+        )
+        self.assertEqual(
+            self.validator.activation_id(archived),
+            self.validator.PREVIOUS_ACTIVATION_ID,
+        )
+        self.assertEqual(
+            archived["build"]["patch_path"],
+            self.validator.REVISION_2_HISTORICAL_PATCH_PATH,
+        )
+        self.assertEqual(
+            hashlib.sha256(ARCHIVED_PATCH_PATH.read_bytes()).hexdigest(),
+            archived["build"]["patch_sha256"],
+        )
+        self.assertNotEqual(
+            hashlib.sha256(current_patch.read_bytes()).hexdigest(),
+            archived["build"]["patch_sha256"],
+        )
+
+        result = subprocess.run(
+            [
+                "python3",
+                str(VALIDATOR_PATH),
+                "verify",
+                str(ARCHIVED_MANIFEST_PATH),
+                "--repo-root",
+                str(ROOT),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("manifest verified", result.stdout)
+
+    def test_archived_revision_two_rejects_reference_substitution(self):
+        archived = json.loads(ARCHIVED_MANIFEST_PATH.read_text(encoding="utf-8"))
+        archived["build"]["patch_path"] = self.validator.REVISION_2_ARCHIVE_PATCH_PATH
+
+        with self.assertRaisesRegex(
+            self.validator.ManifestError, "historical patch reference"
+        ):
+            self.validator.validate(archived, ROOT, verify_patch=False)
 
     def test_launch_policy_blocks_every_unfinished_public_join_gate(self):
         policy = json.loads(LAUNCH_POLICY_PATH.read_text(encoding="utf-8"))
@@ -147,24 +208,20 @@ class Experiment1ManifestTests(unittest.TestCase):
         )
 
         tampered = copy.deepcopy(self.manifest)
-        tampered["build"]["patch_sha256"] = self.validator.ACTIVATION_PATCH_SHA256
+        tampered["build"]["patch_sha256"] = "00" * 32
         with self.assertRaisesRegex(self.validator.ManifestError, "exact released patch"):
             self.validator.validate(tampered, ROOT, verify_patch=False)
 
-    def test_test_only_patch_revision_preserves_activation_id(self):
-        activation_era = copy.deepcopy(self.manifest)
-        activation_era["build"]["patch_sha256"] = self.validator.ACTIVATION_PATCH_SHA256
+    def test_patch_revision_changes_activation_id(self):
+        tampered = copy.deepcopy(self.manifest)
+        tampered["build"]["patch_sha256"] = "00" * 32
 
-        self.assertNotEqual(
-            self.manifest["build"]["patch_sha256"],
-            self.validator.ACTIVATION_PATCH_SHA256,
-        )
         self.assertEqual(
             self.validator.activation_id(self.manifest),
             self.validator.EXPECTED_ACTIVATION_ID,
         )
-        self.assertEqual(
-            self.validator.activation_id(activation_era),
+        self.assertNotEqual(
+            self.validator.activation_id(tampered),
             self.manifest["activation_id"],
         )
 
@@ -181,14 +238,14 @@ class Experiment1ManifestTests(unittest.TestCase):
             self.validator.validate(tampered, ROOT, verify_patch=False)
 
     def test_experiment_zero_is_not_reinterpreted(self):
-        self.assertFalse(self.manifest["predecessor"]["history_reinterpreted"])
+        self.assertFalse(self.manifest["lineage"][0]["history_reinterpreted"])
         self.assertNotEqual(
             self.manifest["activation_id"],
-            self.manifest["predecessor"]["activation_id"],
+            self.manifest["lineage"][0]["activation_id"],
         )
 
-    def test_revision_pins_the_existing_first_fork_block(self):
-        self.assertEqual(self.manifest["profile_revision"], 2)
+    def test_revision_pins_existing_history_and_replay_activation_parent(self):
+        self.assertEqual(self.manifest["profile_revision"], 3)
         self.assertNotEqual(
             self.manifest["activation_id"],
             self.manifest["supersedes_activation_id"],
@@ -196,6 +253,11 @@ class Experiment1ManifestTests(unittest.TestCase):
         fork = self.manifest["fork_point"]
         self.assertEqual(fork["first_fork_height"], fork["inherited_tip_height"] + 1)
         self.assertRegex(fork["first_fork_hash"], r"^[0-9a-f]{64}$")
+        replay = self.manifest["consensus"]["replay_protection"]
+        domain = replay["signature_domain"]
+        self.assertEqual(domain["activation_height"], domain["activation_parent_height"] + 1)
+        self.assertEqual(domain["transaction_version_mask"], 1 << 30)
+        self.assertEqual(replay["pre_activation_history"]["observed_non_coinbase_transaction_count"], 0)
 
         tampered = copy.deepcopy(self.manifest)
         tampered["fork_point"]["first_fork_hash"] = "00" * 32
@@ -207,6 +269,12 @@ class Experiment1ManifestTests(unittest.TestCase):
         patch = patch_path.read_text(encoding="utf-8")
         for marker in (
             "CheckPoHWForkReplayProtection",
+            "REPLAY_DOMAIN_PARENT_HEIGHT{958175}",
+            "REPLAY_SIGHASH_VERSION_BIT{1U << 30}",
+            "pohw-experiment-1-full-consensus/replay-sighash-v3",
+            "bad-pohw-replay-domain",
+            "ReplayProtectedVersion",
+            "pohw_replay_sighash_domain_resists_marker_stripping",
             "IsBlockFileMessageStart",
             "FindAnyByte",
             "bad-pohw-replay-unprotected",
@@ -216,6 +284,9 @@ class Experiment1ManifestTests(unittest.TestCase):
             "coin->IsCoinBase() && coin->out.nValue == 0",
             "replay_rule_changes_for_next_block",
             "m_mempool->removeForReorg(m_chain, replay_invalid)",
+            "ReplaySighashChangesForNextBlock",
+            "PurgeMempoolForPoHWReplaySighashTransition",
+            "mempool.removeForReorg(chain, [](CTxMemPool::txiter) { return true; })",
             "A reorg can cross the PoHW replay-marker activation boundary",
             "bad-pohw-handoff-version",
             "ComputePoHWBlockVersion",
@@ -335,6 +406,13 @@ class Experiment1ManifestTests(unittest.TestCase):
             "pow_tests/POHW_update_time_refreshes_template_difficulty",
             source,
         )
+        self.assertIn("pow_tests/POHW_inherited_block_file_magic_is_disk_only", source)
+        self.assertIn("pohw_replay_sighash_domain_resists_marker_stripping", source)
+        self.assertIn("pohw_replay_protected_version_is_network_scoped", source)
+        self.assertIn("--run_test=txvalidationcache_tests", source)
+        self.assertIn("streams_buffered_file_find_any_byte", source)
+        self.assertIn("feature_pohw_replay.py", source)
+        self.assertIn('--tmpdirprefix="$TEST_TMPDIR"', source)
         self.assertIn("run_step depends_fetch", source)
         self.assertIn("download-one", source)
         self.assertIn("run_step depends_build", source)
@@ -390,11 +468,16 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertIn("exclusive `connect=`", runbook)
         bootstrap = runbook.index("pohw-bootstrap-bitcoin-core-fork.sh")
         checkpoint = runbook.index("--first-fork-block", bootstrap)
-        start = runbook.index(
-            "systemctl enable --now bitcoind-pohw-experiment-1.service",
+        blocked_start = runbook.index(
+            "Do not install, enable, or start the Experiment 1 Core service",
             checkpoint,
         )
-        self.assertLess(checkpoint, start)
+        evidence_gate = runbook.index(
+            "Start Core only after the ready deployment report CAR",
+            blocked_start,
+        )
+        self.assertLess(checkpoint, blocked_start)
+        self.assertLess(blocked_start, evidence_gate)
 
 
 if __name__ == "__main__":

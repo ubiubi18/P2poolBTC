@@ -121,7 +121,10 @@ corepack pnpm --dir contracts/idena-code-governance build
 corepack pnpm --dir contracts/idena-code-governance test
 
 python3 scripts/pohw-governance-runtime-gate.py \
-  --idena-go /absolute/path/to/idena-go
+  --idena-go /absolute/path/to/idena-go \
+  --fork-candidate-lock compatibility/governance-day-fork-candidate-lock.json \
+  --component-repo idena-wasm-binding=/absolute/path/to/idena-wasm-binding \
+  --component-repo idena-wasm=/absolute/path/to/idena-wasm
 
 cargo run -p governance-cli -- artifact-inspect \
   --file contracts/idena-code-governance/build/idena-code-governance.wasm
@@ -131,12 +134,13 @@ Those commands are development checks. A governance build attestation is valid
 only when its exact plan target is run in an independent clean room with the
 locked toolchain and its generated evidence is publicly retrievable by CID.
 The governance-contract target also runs the same exact artifact through
-idena-go's production `WasmVM`. The integration test is a deterministic
-P2poolBTC source artifact bound in `governance-fork-lock.json`; the gate checks
-its raw CID and digest, then overlays it into the otherwise clean pinned Go
-package without writing to that checkout. Its release command adds
-`--require-locked-sources` and every component path, and fails unless all source
-worktrees are clean at the fork-lock revisions. The compiler disables
+idena-go's production `WasmVM`. The contract, runtime test, and source patches
+are bound by `governance-day-fork-candidate-lock.json`; the gate checks their
+CIDs and digests, then overlays them onto the pinned component revisions. This
+candidate command is deliberately non-attested and cannot authorize release.
+A future release lock must replace unset candidate commits with exact commits,
+become `canonical-locked-source` through governance, and pass the separate
+`--require-locked-sources` gate with clean worktrees. The compiler disables
 `bulk-memory` because that instruction set is unsupported by the pinned
 runtime. Measured deterministic gas ceilings are regression guards, not a
 maximum-state proof.
@@ -162,6 +166,10 @@ Normal proposals need two independent builders in one matching deterministic
 artifact-set group. Critical proposals need three builders in one group and
 at least two architecture or operating-system families. Conflicting groups do
 not contribute to the selected group; they remain committed and auditable.
+The deployment-readiness count also requires each builder's address-bound
+detached Idena signature over the exact attestation CID,
+content digest, candidate, and builder identity. A self-declared builder
+address or `on-chain-submitter` string does not count.
 
 Rust binaries, Go binaries, renderer output, and contract WASM should be made
 deterministic first. Desktop installers may still contain platform timestamps,

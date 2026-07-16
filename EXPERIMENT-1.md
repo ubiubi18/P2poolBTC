@@ -1,7 +1,8 @@
 # Experiment 1: Full-Consensus Bitcoin Fork
 
-Experiment 1 is the no-value successor to the immutable, coinbase-only
-Experiment 0 prototype. It runs a pinned patch over Bitcoin Core v31.1 and
+Experiment 1 revision 3 is the current no-value successor to the immutable,
+coinbase-only Experiment 0 prototype and Experiment 1 revision 2. It runs a
+pinned patch over Bitcoin Core v31.1 and
 inherits Bitcoin mainnet history through block `958016`. It does not alter
 Bitcoin mainnet, Idena consensus, or Experiment 0 history.
 
@@ -71,8 +72,8 @@ not upgraded or reinterpreted.
 
 ## Replay Isolation
 
-The exact consensus rule activates at height `958018`, not at the first fork
-height. At or above activation, every non-coinbase transaction that consumes
+The marker consensus rule activates at height `958018`, not at the first fork
+height. At or above marker activation, every non-coinbase transaction that consumes
 an output created at or below height `958016` must also consume an activated,
 zero-value coinbase output whose spent script is exactly the fork-only marker
 script `5150`. An ordinary post-fork output does **not** satisfy this rule. The
@@ -85,7 +86,31 @@ Height `958017` predates marker enforcement. Operators must not admit or mine
 an inherited-input transaction at that height. The first supported live
 inherited spend requires a marker emitted by an activated fork coinbase and
 then 100 confirmations under Bitcoin Core's unchanged coinbase-maturity rule.
-This is a replay separator, not a ban on inherited spending.
+This marker alone was insufficient for `SIGHASH_ANYONECANPAY`: a third party
+could remove the marker input while retaining a valid mainnet signature.
+Revision 3 therefore checkpoints the transaction-free revision-2 prefix at
+height `958175` and activates a second rule at height `958176`. An inherited
+spend must set transaction version bit 30. That bit domain-separates legacy,
+SegWit v0, Taproot key-path, and Tapscript signature hashes using the literal
+domain recorded in the manifest. Bitcoin Core wallet funding and raw
+transaction creation set the bit automatically on `chain=pohw`; consensus
+still requires the exact marker input for inherited spends.
+
+No adapter or bootstrap miner may start below height `958175`. Before mining,
+the local Core RPC must report equal block and header heights at or above that
+checkpoint and `getblockhash 958175` must return
+`09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6`.
+This prevents a new participant from mining a cheap divergent prefix that the
+revision-3 checkpoint would later reject. Core also purges its complete mempool
+when the replay-signature domain changes, including when a reorganization
+crosses that boundary, so signatures cached under one domain cannot enter a
+template governed by the other domain.
+
+The activation ID now commits to the exact patch digest. Changing source bytes
+changes the activation ID. Revision 3 also uses a new P2P message magic, while
+its block reader accepts mainnet and revision-2 block-file magics so the
+checkpointed history can be reused without joining obsolete peers. This is a
+replay separator, not a ban on inherited spending.
 
 Do not broadcast an Experiment 1 transaction to Bitcoin mainnet. Do not assume
 that an address showing an inherited balance is safe to test with.
@@ -98,6 +123,8 @@ that an address showing an inherited balance is safe to test with.
 | Exact source commit | `9be056a8a72b624dae9623b2f7bded92c2a21c91` |
 | Last inherited height | `958016` |
 | First fork height | `958017` |
+| Replay-domain activation | `958176` after the pinned height-`958175` parent |
+| Current profile revision | `3` |
 | Chain argument | `pohw` |
 | Datadir subdirectory | `pohw-experiment-1` |
 | P2P port | `40412` |
@@ -108,6 +135,11 @@ that an address showing an inherited balance is safe to test with.
 
 The full inherited block hash and network magic live in the manifest and
 compiled patch. Operational status output may redact them; validation does not.
+
+The exact revision-2 manifest and patch are retained as
+`compatibility/experiment-1-full-consensus-revision-2.json` and
+`vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1-revision-2.patch`.
+They are audit artifacts, not current peer or mining configuration.
 
 ## Build From Source
 
@@ -282,9 +314,15 @@ sudo scripts/pohw-bootstrap-bitcoin-core-fork.sh \
   --source-service bitcoind-mainnet.service \
   --first-fork-block /absolute/protected/path/experiment-1-first-fork.raw \
   --restart-main
-
-sudo systemctl enable --now bitcoind-pohw-experiment-1.service
 ```
+
+Do not install, enable, or start the Experiment 1 Core service from the checkout
+at this point. The evidence-bound adapter installer installs the Core unit
+together with the launch verifier, governance verifier, manifests, and P2Pool
+units. Start Core only after the ready deployment report CAR, its transitive
+evidence CAR, and the finalized Idena anchor have been staged as described in
+[`COMMUNITY-EXPERIMENT-1.md`](COMMUNITY-EXPERIMENT-1.md). The checked-in blocked
+policy intentionally makes an early start fail.
 
 For recovery from one reviewed live peer, replace `--first-fork-block ...`
 with `--trusted-fork-peer '<numeric-peer-ip>:40412'`. The generated local
@@ -368,7 +406,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
 Do not deploy from one local result. Activation requires at least two
 independent matching builds, explicit review of the immutable deploy arguments,
 a finalized Idena deployment receipt, and a replacement launch-policy sidecar
-whose status is `ready`. The current
+whose status is `ready`. That replacement must bind both the canonical
+deployment-readiness report CAR and its transitive evidence CAR by CID and
+SHA-256. On every start, the evidence-bound installed `pohw-governance` binary
+recomputes the report from the exact authenticated scope, builder,
+data-availability, and external-audit attestations; copied aggregate counts are
+not accepted. The current
 [`compatibility/experiment-1-launch-policy.json`](compatibility/experiment-1-launch-policy.json)
 remains fail-closed.
 

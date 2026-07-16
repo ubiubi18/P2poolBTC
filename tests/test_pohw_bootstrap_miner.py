@@ -23,17 +23,35 @@ class BootstrapMinerTests(unittest.TestCase):
         self.cli_marker = self.root / "bitcoin-cli-args.txt"
         self.info = {
             "chain": "pohw",
+            "blocks": 958175,
+            "headers": 958175,
             "initialblockdownload": False,
             "pohw_experiment": {
                 "handoff_active": False,
-                "replay_protection": "inherited-input-requires-fork-only-marker-v2",
+                "fork_height": 958016,
+                "fork_hash": "00000000000000000001d0f198da4adf33b597782a36c766685b2f217110cfc8",
+                "first_fork_hash": "64d2122b44c111f2f593869ce404117d34c6c830f4390eb70245c11dcc503d01",
+                "inherited_utxo_spending": True,
+                "replay_protection": "inherited-input-requires-fork-marker-and-signature-domain-v3",
+                "replay_marker_activation_height": 958018,
+                "replay_sighash_activation_height": 958176,
+                "replay_sighash_parent_hash": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
+                "replay_sighash_version_bit": 1073741824,
+                "replay_sighash_domain": "pohw-experiment-1-full-consensus/replay-sighash-v3",
+                "bootstrap_handoff_hashrate_hps": 1000000000000000,
             },
         }
         self.cli = self._write_executable(
             "bitcoin-cli",
             "#!/bin/sh\n"
             "printf '%s\\n' \"$@\" > \"$POHW_TEST_CLI_MARKER\"\n"
-            "printf '%s\\n' \"$POHW_TEST_BLOCKCHAIN_INFO\"\n",
+            "last=\n"
+            "for arg do last=$arg; done\n"
+            "case \"$last\" in\n"
+            "  getblockchaininfo) printf '%s\\n' \"$POHW_TEST_BLOCKCHAIN_INFO\" ;;\n"
+            "  958175) printf '%s\\n' \"$POHW_TEST_CHECKPOINT_HASH\" ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
         )
         self.smoke = self._write_executable(
             "smoke.py",
@@ -65,6 +83,7 @@ class BootstrapMinerTests(unittest.TestCase):
             "POHW_BOOTSTRAP_MINER_MAX_HASHES": "1000",
             "POHW_BOOTSTRAP_MINER_TIMEOUT_SECONDS": "2",
             "POHW_TEST_BLOCKCHAIN_INFO": json.dumps(self.info),
+            "POHW_TEST_CHECKPOINT_HASH": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
             "POHW_TEST_CLI_MARKER": str(self.cli_marker),
             "POHW_TEST_MARKER": str(self.marker),
         }
@@ -85,6 +104,7 @@ class BootstrapMinerTests(unittest.TestCase):
         cli_args = self.cli_marker.read_text(encoding="utf-8").splitlines()
         self.assertIn("-noconf", cli_args)
         self.assertIn("-rpcconnect=127.0.0.1", cli_args)
+        self.assertIn("958175", cli_args)
         self.assertFalse(any(arg.startswith("-datadir=") for arg in cli_args))
         self.assertIn("--allow-no-solution", args)
         self.assertEqual(args[args.index("--max-hashes") + 1], "1000")
@@ -96,6 +116,38 @@ class BootstrapMinerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("bounded miner is disabled", result.stdout)
+        self.assertFalse(self.marker.exists())
+
+    def test_skips_before_pinned_revision_three_checkpoint(self) -> None:
+        self.info["blocks"] = 958174
+        self.info["headers"] = 958174
+        result = self._run(POHW_TEST_BLOCKCHAIN_INFO=json.dumps(self.info))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pinned revision-3 checkpoint", result.stdout)
+        self.assertFalse(self.marker.exists())
+
+    def test_rejects_wrong_pinned_revision_three_checkpoint_hash(self) -> None:
+        result = self._run(POHW_TEST_CHECKPOINT_HASH="00" * 32)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("wrong revision-3 checkpoint hash", result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_rejects_revision_two_or_incomplete_revision_three_metadata(self) -> None:
+        profile = self.info["pohw_experiment"]
+        profile["replay_protection"] = "inherited-input-requires-fork-only-marker-v2"
+        revision_two = self._run(POHW_TEST_BLOCKCHAIN_INFO=json.dumps(self.info))
+        self.assertNotEqual(revision_two.returncode, 0)
+        self.assertIn("replay_protection", revision_two.stderr)
+
+        profile["replay_protection"] = (
+            "inherited-input-requires-fork-marker-and-signature-domain-v3"
+        )
+        del profile["replay_sighash_parent_hash"]
+        incomplete = self._run(POHW_TEST_BLOCKCHAIN_INFO=json.dumps(self.info))
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertIn("replay_sighash_parent_hash", incomplete.stderr)
         self.assertFalse(self.marker.exists())
 
     def test_rejects_wrong_chain_and_remote_stratum(self) -> None:

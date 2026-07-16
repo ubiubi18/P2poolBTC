@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 import pwd
@@ -21,12 +22,25 @@ CANONICAL_FLAGS = [
 ]
 TEST_FILTERS = {
     "pow_sanity": "pow_tests/ChainParams_POHW_sanity",
+    "block_file_magic": "pow_tests/POHW_inherited_block_file_magic_is_disk_only",
     "bootstrap_marker": "pow_tests/POHW_bootstrap_and_handoff_marker",
     "template_difficulty": "pow_tests/POHW_update_time_refreshes_template_difficulty",
     "replay_marker": (
         "transaction_tests/"
         "pohw_inherited_spend_requires_fork_only_replay_marker"
     ),
+    "replay_domain": (
+        "transaction_tests/pohw_replay_sighash_domain_resists_marker_stripping"
+    ),
+    "replay_checkpoint": (
+        "transaction_tests/"
+        "pohw_active_chain_replay_checkpoint_is_fail_closed"
+    ),
+    "replay_version": (
+        "transaction_tests/pohw_replay_protected_version_is_network_scoped"
+    ),
+    "script_cache_domain": "txvalidationcache_tests",
+    "block_file_reader": "streams_tests/streams_buffered_file_find_any_byte",
 }
 
 
@@ -40,11 +54,31 @@ class BitcoinCoreBuildEvidenceTests(unittest.TestCase):
         self.snapshot.mkdir()
         (self.snapshot / "src").mkdir()
         (self.snapshot / "depends").mkdir()
+        snapshot_functional_dir = self.snapshot / "test" / "functional"
+        snapshot_functional_dir.mkdir(parents=True)
+        snapshot_functional_runner = snapshot_functional_dir / "test_runner.py"
+        snapshot_functional_runner.write_text(
+            "raise SystemExit(0)\n", encoding="ascii"
+        )
+        (snapshot_functional_dir / "feature_pohw_replay.py").write_text(
+            "raise SystemExit(0)\n", encoding="ascii"
+        )
         (self.snapshot / "README").write_text("fixture\n", encoding="ascii")
         source_tool = self.snapshot / "src" / "tool.sh"
         source_tool.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
         source_tool.chmod(0o755)
         (self.build / "bin").mkdir(parents=True)
+        functional_dir = self.build / "test" / "functional"
+        functional_dir.mkdir(parents=True)
+        (self.build / "test" / "config.ini").write_text(
+            "[environment]\n"
+            f"SRCDIR={self.snapshot.resolve()}\n"
+            f"BUILDDIR={self.build.resolve()}\n"
+            "EXEEXT=\n"
+            "[components]\n"
+            "ENABLE_BITCOIND=true\n",
+            encoding="ascii",
+        )
         (self.build / "pohw-depends").mkdir()
         self.depends_source = self.build / "pohw-depends" / "source"
         self.depends_prefix = self.depends_source / "x86_64-fixture-linux-gnu"
@@ -318,6 +352,21 @@ class BitcoinCoreBuildEvidenceTests(unittest.TestCase):
             )
         steps.append(
             {
+                "label": "replay_functional",
+                "argv": [
+                    str(Path(sys.executable).resolve()),
+                    str(self.snapshot.resolve() / "test" / "functional" / "test_runner.py"),
+                    "feature_pohw_replay.py",
+                    "--jobs=1",
+                    f"--tmpdirprefix={tmpdir}",
+                    f"--configfile={self.build.resolve() / 'test' / 'config.ini'}",
+                    f"--testsdir={self.snapshot.resolve() / 'test' / 'functional'}",
+                ],
+                "env": {"TMPDIR": tmpdir},
+            }
+        )
+        steps.append(
+            {
                 "label": "ctest",
                 "argv": [
                     ctest,
@@ -430,6 +479,62 @@ class BitcoinCoreBuildEvidenceTests(unittest.TestCase):
         result = self.run_script("write")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("BUILD_GUI must be OFF", result.stderr)
+
+    def test_functional_runner_must_resolve_to_the_verified_snapshot(self):
+        substitute = self.build / "test" / "functional" / "test_runner.py"
+        substitute.write_text("raise SystemExit(0)\n", encoding="ascii")
+        record = json.loads(self.run_record.read_text(encoding="ascii"))
+        functional = next(
+            step for step in record["steps"] if step["label"] == "replay_functional"
+        )
+        functional["argv"][1] = str(substitute)
+        self.run_record.write_text(json.dumps(record) + "\n", encoding="ascii")
+
+        result = self.run_script("write")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("canonical", result.stderr)
+
+    def test_functional_test_and_framework_directory_must_be_the_snapshot(self):
+        record = json.loads(self.run_record.read_text(encoding="ascii"))
+        functional = next(
+            step for step in record["steps"] if step["label"] == "replay_functional"
+        )
+        functional["argv"][-1] = (
+            f"--testsdir={self.build.resolve() / 'test' / 'functional'}"
+        )
+        self.run_record.write_text(json.dumps(record) + "\n", encoding="ascii")
+
+        result = self.run_script("write")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("canonical", result.stderr)
+
+    def test_functional_configuration_must_bind_snapshot_and_build(self):
+        config = self.build / "test" / "config.ini"
+        config.write_text(
+            config.read_text(encoding="ascii").replace(
+                f"SRCDIR={self.snapshot.resolve()}",
+                f"SRCDIR={self.build.resolve()}",
+            ),
+            encoding="ascii",
+        )
+
+        result = self.run_script("write")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verified source and build directories", result.stderr)
+
+    def test_functional_configuration_cannot_redirect_executable_suffix(self):
+        config = self.build / "test" / "config.ini"
+        config.write_text(
+            config.read_text(encoding="ascii").replace(
+                "EXEEXT=\n",
+                "EXEEXT=.alternate\n",
+            ),
+            encoding="ascii",
+        )
+
+        result = self.run_script("write")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("attested executable suffix", result.stderr)
 
     def test_substituted_depends_command_is_rejected(self):
         record = json.loads(self.run_record.read_text(encoding="ascii"))
