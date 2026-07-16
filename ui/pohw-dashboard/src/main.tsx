@@ -136,6 +136,15 @@ interface GovernanceDashboardResponse {
     conflict: boolean;
     certified: boolean;
   } | null;
+  communityActivation: {
+    active: boolean;
+    participantCount: number;
+    participantThreshold: number;
+    participantDefinition: "eligible-current-metrics-and-minimum-active-stake";
+    permissionlessActivation: true;
+    automaticDeployment: false;
+    activationBlock: number | null;
+  };
   repositories: Array<{
     name: string;
     sourceTreeCid: string;
@@ -1374,6 +1383,15 @@ function GovernanceWorkspace({
             <AlertTriangle size={18} />
             <span>Operator-local snapshot: content bindings and gate arithmetic are checked locally, but contract state is not queried yet</span>
           </div>
+          {!data.communityActivation.active ? (
+            <div className="governance-empty warning">
+              <ShieldCheck size={18} />
+              <span>
+                Community DAO dormant: {data.communityActivation.participantCount}/
+                {data.communityActivation.participantThreshold} qualifying participants. Source review and stake setup are available; proposals and voting are locked.
+              </span>
+            </div>
+          ) : null}
           <section className="governance-canonical">
             <div>
               <span>Canonical ecosystem CID</span>
@@ -1402,6 +1420,18 @@ function GovernanceWorkspace({
                   : data.identityMetrics?.certified
                     ? "Replay commitment certified"
                     : "Certification pending"}
+              </small>
+            </div>
+            <div>
+              <span>Community activation</span>
+              <code>
+                {data.communityActivation.participantCount}/
+                {data.communityActivation.participantThreshold} participants
+              </code>
+              <small>
+                {data.communityActivation.active
+                  ? `Active at block ${data.communityActivation.activationBlock ?? "unknown"}`
+                  : "Dormant / permissionless at threshold"}
               </small>
             </div>
           </section>

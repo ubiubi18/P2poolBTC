@@ -1,4 +1,5 @@
 import { u128Safe as u128 } from "as-bignum/assembly";
+import { bootstrapMigrationAttestationsPass } from "./attestation_gates";
 import {
   GOV_CANCELLATION_FEE_ATOMS,
   GOV_COMMIT_END_OFFSET,
@@ -87,6 +88,10 @@ import {
 import { isCanonicalHash, isCanonicalManifestCid } from "./validation";
 
 const PROFILE_KEY = "epoch-governance:enabled";
+const COMMUNITY_ACTIVATION_KEY = "epoch-governance:community-activation-block";
+const COMMUNITY_PARTICIPANT_COUNT_KEY = "epoch-governance:community-participant-count";
+const COMMUNITY_PARTICIPANT_PREFIX = "epoch-governance:community-participant:";
+export const MIN_COMMUNITY_GOVERNANCE_PARTICIPANTS: u32 = 100;
 const CANONICAL_CID_KEY = "governance:canonical-cid";
 const METRICS_ROOT_KEY = "governance:metrics-root";
 const METRICS_EPOCH_KEY = "governance:metrics-epoch";
@@ -117,9 +122,75 @@ export function isEpochGovernanceEnabled(): bool {
   return hasKey(PROFILE_KEY);
 }
 
+export function isCommunityGovernanceActive(): bool {
+  return hasKey(COMMUNITY_ACTIVATION_KEY);
+}
+
 export function initializeEpochGovernanceProfile(): void {
   assert(!hasKey(PROFILE_KEY), "epoch governance profile is already initialized");
   setString(PROFILE_KEY, "1");
+  setString(COMMUNITY_PARTICIPANT_COUNT_KEY, "0");
+}
+
+export function syncCommunityGovernanceParticipant(address: string, qualified: bool): void {
+  if (isCommunityGovernanceActive()) return;
+  assert(address.length == 40 && hexToBytes(address).length == 20, "internal participant address is invalid");
+  const key = COMMUNITY_PARTICIPANT_PREFIX + address;
+  const registered = hasKey(key);
+  if (qualified && !registered) {
+    incrementU32(COMMUNITY_PARTICIPANT_COUNT_KEY);
+    setString(key, currentBlock().toString());
+    emitVersionedEvent(
+      "CommunityParticipantRegisteredV1",
+      [address, storedU32(COMMUNITY_PARTICIPANT_COUNT_KEY).toString()],
+    );
+  } else if (!qualified && registered) {
+    const count = storedU32(COMMUNITY_PARTICIPANT_COUNT_KEY);
+    assert(count > 0, "community participant counter underflow");
+    setString(COMMUNITY_PARTICIPANT_COUNT_KEY, (count - 1).toString());
+    removeKey(key);
+    emitVersionedEvent(
+      "CommunityParticipantRemovedV1",
+      [address, (count - 1).toString()],
+    );
+  }
+}
+
+export function activateCommunityGovernance(): usize {
+  ensureInitialized();
+  requireNoPayment();
+  assert(isEpochGovernanceEnabled(), "epoch governance profile is not enabled");
+  assert(!isCommunityGovernanceActive(), "community governance is already active");
+  const count = storedU32(COMMUNITY_PARTICIPANT_COUNT_KEY);
+  assert(
+    count >= MIN_COMMUNITY_GOVERNANCE_PARTICIPANTS,
+    "community governance participant threshold has not been reached",
+  );
+  setString(COMMUNITY_ACTIVATION_KEY, currentBlock().toString());
+  emitVersionedEvent(
+    "CommunityGovernanceActivatedV1",
+    [count.toString(), MIN_COMMUNITY_GOVERNANCE_PARTICIPANTS.toString(), currentBlock().toString()],
+  );
+  return communityGovernanceStatus();
+}
+
+export function communityGovernanceStatus(): usize {
+  ensureInitialized();
+  requireNoPayment();
+  const active = isCommunityGovernanceActive();
+  const activationBlock = getString(COMMUNITY_ACTIVATION_KEY);
+  return returnString(
+    "{\"schemaVersion\":1,\"active\":" + (active ? "true" : "false")
+      + ",\"participantCount\":" + storedU32(COMMUNITY_PARTICIPANT_COUNT_KEY).toString()
+      + ",\"participantThreshold\":" + MIN_COMMUNITY_GOVERNANCE_PARTICIPANTS.toString()
+      + ",\"participantDefinition\":\"eligible-current-metrics-and-minimum-active-stake\""
+      + ",\"permissionlessActivation\":true,\"automaticDeployment\":false,\"activationBlock\":"
+      + (activationBlock.length > 0 ? activationBlock : "null") + "}",
+  );
+}
+
+export function requireCommunityGovernanceActive(): void {
+  assert(isCommunityGovernanceActive(), "community governance is dormant until the participant threshold is reached");
 }
 
 export function anchorGovernanceEpoch(): usize {
@@ -159,6 +230,7 @@ export function registerEpochProposal(
   rollbackInstructionsCid: string,
 ): void {
   if (!isEpochGovernanceEnabled()) return;
+  requireCommunityGovernanceActive();
   const epoch = currentEpoch();
   const anchor = epochAnchor(epoch);
   assert(currentBlock() >= anchor && currentBlock() < cutoffBlock(epoch), "proposal cutoff has elapsed");
@@ -673,7 +745,10 @@ function addEpochVote(proposal: Proposal, choice: string, weight: u128, state: s
 }
 
 export function epochAttestationGatesPass(proposal: Proposal): bool {
-  if (proposal.isCritical() && !verifiedAttestationDiversitySupported()) return false;
+  const verifiedDiversity = verifiedAttestationDiversitySupported();
+  const bootstrapMigration = !verifiedDiversity
+    && bootstrapMigrationAttestationsPass(proposal);
+  if (proposal.isCritical() && !verifiedDiversity && !bootstrapMigration) return false;
   const minimumAgents: u32 = proposal.isCritical()
     ? GOV_CRITICAL_MIN_AI_ATTESTATIONS
     : GOV_NORMAL_MIN_AI_ATTESTATIONS;
@@ -705,6 +780,10 @@ export function epochAttestationGatesPass(proposal: Proposal): bool {
     ? proposal.executeAfter
     : dynamicExecutionStart;
   const requiredAvailabilityUntil = checkedBlockAdd(availabilityStart, EXECUTION_WINDOW_BLOCKS);
+  if (bootstrapMigration) {
+    return minimumExpiryValue.length > 0
+      && parseU64(minimumExpiryValue) >= requiredAvailabilityUntil;
+  }
   return proposal.agentSubmittedCount == proposal.agentLeafCount
     && proposal.buildSubmittedCount == proposal.buildLeafCount
     && proposal.availabilitySubmittedCount == proposal.availabilityLeafCount
@@ -975,7 +1054,11 @@ function canonicalAddress(value: string): string {
 }
 
 function ensureInitialized(): void { assert(hasKey(CANONICAL_CID_KEY), "contract is not initialized"); }
-function ensureEpochMode(): void { ensureInitialized(); assert(isEpochGovernanceEnabled(), "epoch governance profile is not enabled"); }
+function ensureEpochMode(): void {
+  ensureInitialized();
+  assert(isEpochGovernanceEnabled(), "epoch governance profile is not enabled");
+  requireCommunityGovernanceActive();
+}
 function storedU32(key: string): u32 { const value = getString(key); return value.length == 0 ? 0 : parseU32(value); }
 function storedU16(key: string): u16 { const value = getString(key); return value.length == 0 ? 0 : parseU16(value); }
 function incrementU32(key: string): void { const value = storedU32(key); assert(value < u32.MAX_VALUE, "counter overflow"); setString(key, (value + 1).toString()); }

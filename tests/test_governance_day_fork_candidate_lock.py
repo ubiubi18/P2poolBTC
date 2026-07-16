@@ -41,6 +41,10 @@ class GovernanceDayForkCandidateLockTests(unittest.TestCase):
             historical["forkProfile"]["networkId"],
         )
         self.assertFalse(all(self.lock["requiredFinalizationGates"].values()))
+        gates = self.lock["requiredFinalizationGates"]
+        self.assertEqual(gates["communityGovernanceParticipantThreshold"], 100)
+        self.assertTrue(gates["communityGovernanceActivationPermissionless"])
+        self.assertFalse(gates["communityGovernanceAutomaticDeployment"])
 
     def test_legacy_locks_are_bound_by_exact_digest(self):
         profile = self.lock["forkProfile"]

@@ -46,7 +46,7 @@ def good_host():
     }
 
 
-def verified_release(*, ready=False):
+def verified_release(*, ready=False, registry_chain_verified=None):
     artifacts = {}
     if ready:
         for index, name in enumerate(ONBOARDING.REQUIRED_RUNTIME_ARTIFACTS, start=1):
@@ -60,6 +60,8 @@ def verified_release(*, ready=False):
                 "sha256": digest,
                 "size": index,
             }
+    if registry_chain_verified is None:
+        registry_chain_verified = ready
     return {
         "policy_status": "ready-for-public-join" if ready else "blocked-release-readiness",
         "activation_id": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
@@ -70,9 +72,11 @@ def verified_release(*, ready=False):
         "candidate_ecosystem_cid": ECOSYSTEM_CID if ready else None,
         "candidate_ecosystem_verified": ready,
         "canonical_source_cid": ECOSYSTEM_CID if ready else None,
+        "source_car_sha256": "3" * 64 if ready else None,
         "canonical_source_verified": ready,
         "source_commit_matches": True if ready else None,
         "governance_cli_verified": ready,
+        "registry_chain_verified": registry_chain_verified,
         "attested_artifacts": artifacts,
         "focused_tests_passed": None,
         "canonical_source_published": ready,
@@ -98,6 +102,8 @@ def args_for(role, output_dir, *, probe_live=False):
         source_car=None,
         governance_cli=None,
         idena_anchor_policy=None,
+        idena_rpc_url="http://127.0.0.1:9009",
+        idena_api_key_file=None,
         probe_live=probe_live,
         p2pool_node=None,
         p2pool_datadir=None,
@@ -207,6 +213,11 @@ class CommunityOnboardingTests(unittest.TestCase):
         community = COMMUNITY_GUIDE.read_text(encoding="utf-8")
         self.assertIn("another miner's historical share does not count", community)
         self.assertIn("pohw-governance.sha256", community)
+        self.assertIn("--idena-api-key-file", community)
+        self.assertLess(
+            community.index("verify-idena-registry-deployment"),
+            community.index("registerMiner("),
+        )
 
     def test_profile_is_strict_and_bound_to_manifest_and_policy(self):
         profile = ONBOARDING._read_json(PROFILE, "profile")
@@ -309,7 +320,177 @@ class CommunityOnboardingTests(unittest.TestCase):
                 source_car=None,
                 governance_cli=None,
                 idena_anchor_policy=None,
+                p2pool_node=None,
+                idena_rpc_url="http://127.0.0.1:9009",
+                idena_api_key_file=None,
                 run_tests=False,
+            )
+
+    def test_canonical_source_verification_rejects_a_changed_source_car(self):
+        source_car = pathlib.Path("source.car")
+        ecosystem_car = pathlib.Path("ecosystem.car")
+        source_digest = "4" * 64
+        ecosystem_digest = "5" * 64
+        artifacts = {
+            name: {"cid": ECOSYSTEM_CID, "sha256": "6" * 64, "size": 1}
+            for name in ONBOARDING.REQUIRED_RUNTIME_ARTIFACTS
+        }
+        bindings = {
+            "ecosystem_cid": ECOSYSTEM_CID,
+            "ecosystem_sha256": ecosystem_digest,
+            "source_cid": ECOSYSTEM_CID,
+            "source_sha256": source_digest,
+            "source_commit": "1" * 40,
+            "artifacts": artifacts,
+        }
+        repository = {
+            "name": ONBOARDING.SOURCE_REPOSITORY,
+            "sourceTreeCid": ECOSYSTEM_CID,
+            "sourceTreeSha256": source_digest,
+            "gitCommitMetadata": "1" * 40,
+            "artifacts": [
+                {"name": name, **artifact} for name, artifact in artifacts.items()
+            ],
+        }
+        command_results = (
+            {
+                "schemaVersion": 1,
+                "ecosystemCid": ECOSYSTEM_CID,
+                "ecosystemSha256": ecosystem_digest,
+                "carSha256": "7" * 64,
+                "manifest": {"repositories": [repository]},
+            },
+            {
+                "verified": True,
+                "sourceTreeCid": ECOSYSTEM_CID,
+                "sourceTreeSha256": source_digest,
+                "repository": ONBOARDING.SOURCE_REPOSITORY,
+                "files": 1,
+                "localTreeMatch": True,
+            },
+        )
+        source_hashes = iter((("8" * 64, 10), ("9" * 64, 10)))
+
+        def hash_file(path, _label, _maximum):
+            return next(source_hashes) if path == source_car else ("7" * 64, 20)
+
+        policy = {
+            "public_join_readiness": {
+                "deployment_readiness_candidate_ecosystem_cid": ECOSYSTEM_CID
+            }
+        }
+        with mock.patch.object(
+            ONBOARDING, "_extract_ecosystem_bindings", return_value=bindings
+        ), mock.patch.object(
+            ONBOARDING, "_attested_command_json", side_effect=command_results
+        ), mock.patch.object(
+            ONBOARDING, "_hash_regular_file", side_effect=hash_file
+        ), self.assertRaisesRegex(ONBOARDING.OnboardingError, "changed during"):
+            ONBOARDING._verify_canonical_source(
+                ROOT,
+                policy,
+                expected_ecosystem_cid=ECOSYSTEM_CID,
+                candidate_ecosystem_car=ecosystem_car,
+                source_car=source_car,
+                governance_cli=pathlib.Path("pohw-governance"),
+            )
+
+    def test_onboarding_refuses_to_execute_repository_tests(self):
+        profile = ONBOARDING._read_json(PROFILE, "profile")
+        validated = ONBOARDING.validate_profile(profile, ROOT)
+        with self.assertRaisesRegex(ONBOARDING.OnboardingError, "never executes"):
+            ONBOARDING.verify_release(
+                ROOT,
+                validated,
+                expected_ecosystem_cid=None,
+                readiness_car=None,
+                readiness_evidence_car=None,
+                candidate_ecosystem_car=None,
+                source_car=None,
+                governance_cli=None,
+                idena_anchor_policy=None,
+                p2pool_node=None,
+                idena_rpc_url="http://127.0.0.1:9009",
+                idena_api_key_file=None,
+                run_tests=True,
+            )
+
+    def test_ready_release_requires_exact_chain_backed_registry_verification(self):
+        validated = ONBOARDING.validate_profile(
+            ONBOARDING._read_json(PROFILE, "profile"), ROOT
+        )
+        validated = dict(validated)
+        policy = json.loads(json.dumps(validated["policy"]))
+        validated["policy"] = policy
+        policy["status"] = ONBOARDING.READY_POLICY_STATUS
+        readiness = policy["public_join_readiness"]
+        for field in ONBOARDING.READINESS_BOOLEAN_FIELDS:
+            readiness[field] = True
+        readiness["verified_independent_registry_build_operators"] = readiness[
+            "required_independent_registry_build_operators"
+        ]
+        policy["registry_source_candidate"]["deployment_authorized"] = True
+        p2pool_node = pathlib.Path("/attested/p2pool-node")
+        anchor = pathlib.Path("/verified/idena-anchor-policy.json")
+        api_key = pathlib.Path("/private/idena-api.key")
+        source_binding = {
+            "ecosystem_cid": ECOSYSTEM_CID,
+            "source_cid": ECOSYSTEM_CID,
+            "source_car_sha256": "3" * 64,
+            "source_commit_matches": True,
+            "governance_cli_verified": True,
+            "artifacts": {
+                "pohw-governance": {"sha256": "1" * 64, "size": 1, "cid": ECOSYSTEM_CID},
+                "p2pool-node": {"sha256": "2" * 64, "size": 1, "cid": ECOSYSTEM_CID}
+            },
+        }
+        exact = b"Idena registry deployment verified against synchronized local RPC\n"
+        for stdout, expected_ready in ((exact, True), (exact + b"extra\n", False)):
+            with self.subTest(stdout=stdout), mock.patch.object(
+                ONBOARDING, "_static_policy_bindings_verified", return_value=True
+            ), mock.patch.object(
+                ONBOARDING, "_git_source_state", return_value=("1" * 40, True)
+            ), mock.patch.object(
+                ONBOARDING, "_verify_canonical_source", return_value=source_binding
+            ), mock.patch.object(
+                ONBOARDING, "_command_succeeded", return_value=True
+            ), mock.patch.object(
+                ONBOARDING,
+                "_run_attested_command",
+                return_value=subprocess.CompletedProcess([], 0, stdout, b""),
+            ) as run_attested:
+                release = ONBOARDING.verify_release(
+                    ROOT,
+                    validated,
+                    expected_ecosystem_cid=ECOSYSTEM_CID,
+                    readiness_car=pathlib.Path("readiness.car"),
+                    readiness_evidence_car=pathlib.Path("readiness-evidence.car"),
+                    candidate_ecosystem_car=pathlib.Path("ecosystem.car"),
+                    source_car=pathlib.Path("source.car"),
+                    governance_cli=pathlib.Path("pohw-governance"),
+                    idena_anchor_policy=anchor,
+                    p2pool_node=p2pool_node,
+                    idena_rpc_url="http://127.0.0.1:9009",
+                    idena_api_key_file=api_key,
+                    run_tests=False,
+                )
+            self.assertEqual(release["registry_chain_verified"], expected_ready)
+            self.assertEqual(release["public_join_ready"], expected_ready)
+            run_attested.assert_called_once_with(
+                p2pool_node,
+                "p2pool-node",
+                source_binding["artifacts"]["p2pool-node"],
+                (
+                    "verify-idena-registry-deployment",
+                    "--idena-anchor-policy",
+                    str(anchor),
+                    "--idena-rpc-url",
+                    "http://127.0.0.1:9009",
+                    "--idena-api-key-file",
+                    str(api_key),
+                ),
+                ROOT,
+                timeout=60,
             )
 
     def test_execute_rejects_substituted_profile(self):
@@ -376,7 +557,7 @@ class CommunityOnboardingTests(unittest.TestCase):
         self.assertEqual(receipt["journey_status"], "review-ready")
         self.assertEqual(
             [stage["status"] for stage in receipt["stages"]],
-            ["passed", "passed", "not-required", "not-required", "passed"],
+            ["passed", "not-required", "not-required", "not-required", "passed"],
         )
         self.assertEqual(set(paths), {"receipt", "report", "issue"})
 
@@ -410,6 +591,24 @@ class CommunityOnboardingTests(unittest.TestCase):
                     live_prober=live_prober,
                 )
             live_prober.assert_not_called()
+
+    def test_ready_policy_without_authenticated_registry_chain_proof_stays_blocked(self):
+        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        release = verified_release(ready=True, registry_chain_verified=False)
+        release["public_join_ready"] = False
+        release["missing_release_gates"] = ["registry-chain-verification"]
+        receipt = ONBOARDING.build_receipt(
+            role_name="pruned-miner",
+            role=profile["roles"]["pruned-miner"],
+            release=release,
+            host=good_host(),
+            live=None,
+            live_policy=profile["live_success"],
+        )
+        ONBOARDING.validate_receipt(receipt)
+        self.assertEqual(receipt["journey_status"], "blocked-public-join")
+        self.assertEqual(receipt["stages"][1]["status"], "blocked")
+        self.assertIn("registry-chain-verification", receipt["next_action_codes"])
 
     def test_explicit_live_probe_is_refused_on_ineligible_host(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -455,6 +654,21 @@ class CommunityOnboardingTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
         self.assertEqual(receipt["journey_status"], "live-join-verified")
         self.assertTrue(all(value is False for value in receipt["privacy"].values()))
+
+    def test_verified_receipt_requires_source_car_digest(self):
+        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        release = verified_release(ready=True)
+        release["source_car_sha256"] = None
+        receipt = ONBOARDING.build_receipt(
+            role_name="observer",
+            role=profile["roles"]["observer"],
+            release=release,
+            host=good_host(),
+            live=None,
+            live_policy=profile["live_success"],
+        )
+        with self.assertRaisesRegex(ONBOARDING.OnboardingError, "proof is incomplete"):
+            ONBOARDING.validate_receipt(receipt)
 
     def test_global_history_cannot_substitute_for_this_miners_fresh_share(self):
         profile = json.loads(PROFILE.read_text(encoding="utf-8"))
@@ -701,6 +915,7 @@ class CommunityOnboardingTests(unittest.TestCase):
             ):
                 verify_with(entries)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "sealed executable snapshots require Linux")
     def test_attested_execution_uses_a_snapshot_when_source_path_is_replaced(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = pathlib.Path(temporary) / "reviewed-tool"
@@ -722,6 +937,25 @@ class CommunityOnboardingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, b"reviewed\n")
 
+    def test_attested_execution_fails_closed_without_linux_sealing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = pathlib.Path(temporary) / "reviewed-tool"
+            payload = b"#!/bin/sh\nexit 0\n"
+            source.write_bytes(payload)
+            source.chmod(0o700)
+            expected = {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+            with mock.patch.object(ONBOARDING.platform, "system", return_value="Darwin"):
+                with self.assertRaisesRegex(
+                    ONBOARDING.OnboardingError, "supported only on Linux"
+                ):
+                    with ONBOARDING._stage_attested_executable(
+                        source, "reviewed tool", expected
+                    ):
+                        self.fail("non-Linux staging must not yield an executable")
+
     def test_html_escapes_report_content(self):
         profile = json.loads(PROFILE.read_text(encoding="utf-8"))
         receipt = ONBOARDING.build_receipt(
@@ -739,6 +973,41 @@ class CommunityOnboardingTests(unittest.TestCase):
         self.assertIn("default-src 'none'", rendered)
         self.assertNotIn("http://", rendered)
         self.assertNotIn("https://", rendered)
+
+    def test_issue_report_binds_canonical_source_and_car_without_local_paths(self):
+        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        receipt = ONBOARDING.build_receipt(
+            role_name="observer",
+            role=profile["roles"]["observer"],
+            release=verified_release(ready=True),
+            host=good_host(),
+            live=None,
+            live_policy=profile["live_success"],
+        )
+        rendered = ONBOARDING.render_issue_report(receipt)
+        self.assertIn(f"Canonical source CID: `{ECOSYSTEM_CID}`", rendered)
+        self.assertIn(f"Source CAR SHA-256: `{'3' * 64}`", rendered)
+        self.assertIn("Git commit metadata: `", rendered)
+        self.assertNotIn(str(ROOT), rendered)
+        self.assertNotIn("Exact source commit", rendered)
+
+    def test_html_report_exposes_authoritative_source_binding(self):
+        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        receipt = ONBOARDING.build_receipt(
+            role_name="observer",
+            role=profile["roles"]["observer"],
+            release=verified_release(ready=True),
+            host=good_host(),
+            live=None,
+            live_policy=profile["live_success"],
+        )
+        rendered = ONBOARDING.render_html(receipt)
+        self.assertIn("Verified release binding", rendered)
+        self.assertIn(ECOSYSTEM_CID, rendered)
+        self.assertIn("3" * 64, rendered)
+        self.assertIn("The source CID and CAR digest are authoritative", rendered)
+        self.assertIn("Registry chain verification", rendered)
+        self.assertNotIn(str(ROOT), rendered)
 
     def test_output_refuses_symlink_target(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -831,7 +1100,8 @@ class CommunityOnboardingTests(unittest.TestCase):
 
     def test_default_python_path_has_no_network_fetcher(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('"--offline"', source)
+        self.assertNotIn('("cargo", "test"', source)
+        self.assertIn("onboarding never executes repository tests", source)
         for forbidden in (
             "import requests",
             "import socket",

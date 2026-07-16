@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseId": "pohw-governance-day-local-candidate-2026-07-15-v2",
+  "releaseId": "pohw-governance-day-local-candidate-2026-07-16-v4",
   "status": "experimental-local-only",
   "authorizedForDeployment": false,
   "authorizedForRelease": false,
@@ -18,6 +18,10 @@
     "normalRiskEnabled": true,
     "normalRiskClassifier": "pohw-objective-risk-classifier-v2",
     "scopeCountersDerivedFromVerifiedSourceTransitions": true,
+    "communityGovernanceParticipantThreshold": 100,
+    "communityGovernanceParticipantDefinition": "eligible-current-metrics-and-minimum-active-stake",
+    "communityGovernanceActivationPermissionless": true,
+    "communityGovernanceAutomaticDeployment": false,
     "epochAnchorAuthenticated": true,
     "epochAnchorHostImport": "env.epoch_block",
     "epochAnchorRequiresSeparateForkProfile": "compatibility/governance-day-fork-candidate-lock.json"
@@ -29,13 +33,13 @@
     "sha256": "7541f5d1dfc2652c8db1e99a13b172056330cd4bf1d47c5adecc333933e42622"
   },
   "contractArtifact": {
-    "contractVersion": "0.2.0",
+    "contractVersion": "0.3.0",
     "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
-    "cid": "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i",
-    "sha256": "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2",
-    "size": 303259,
+    "cid": "bafkreieagb6aslelkzer5rfjtsa7edksjwqefkiaqgkfnibyy44txvurmm",
+    "sha256": "80307c092c8b56491ec4a99c81f20d524da042a900819456a038c7393bd69163",
+    "size": 307453,
     "abiImports": 13,
-    "abiExports": 65,
+    "abiExports": 67,
     "buildStatus": "local-non-attested"
   },
   "idenaAiIntegration": {

@@ -62,6 +62,15 @@
     "conflict": false,
     "certified": true
   },
+  "communityActivation": {
+    "active": true,
+    "participantCount": 100,
+    "participantThreshold": 100,
+    "participantDefinition": "eligible-current-metrics-and-minimum-active-stake",
+    "permissionlessActivation": true,
+    "automaticDeployment": false,
+    "activationBlock": 10990
+  },
   "repositories": [
     {
       "name": "IdenaAI",

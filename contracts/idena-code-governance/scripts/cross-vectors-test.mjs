@@ -73,6 +73,29 @@ for (const item of vectors.ageInvarianceCases) {
   assert.equal(first.split("|")[2], item.expectedWeight);
 }
 
+const migrationGate = (overrides = {}) => call("bootstrapMigrationGateVector", [
+  overrides.risk ?? "migration",
+  overrides.agentCount ?? "5",
+  overrides.agentOwners ?? "5",
+  overrides.unresolved ?? "0",
+  overrides.builderOwners ?? "3",
+  overrides.builderConflicts ?? "0",
+  overrides.availabilityOwners ?? "3",
+  overrides.completeLeaves ?? "1",
+  overrides.waiverCid ?? "",
+]);
+assert.equal(migrationGate(), "1", "migration bootstrap must remain executable through owner breadth");
+assert.equal(migrationGate({ risk: "critical" }), "0", "critical code execution must remain blocked");
+assert.equal(migrationGate({ risk: "consensus" }), "0", "consensus execution must remain blocked");
+assert.equal(migrationGate({ agentCount: "4" }), "0", "migration requires five reviews");
+assert.equal(migrationGate({ agentOwners: "4" }), "0", "migration requires five distinct review owners");
+assert.equal(migrationGate({ unresolved: "1" }), "0", "migration cannot waive a critical finding");
+assert.equal(migrationGate({ builderOwners: "2" }), "0", "migration requires three builder owners");
+assert.equal(migrationGate({ builderConflicts: "1" }), "0", "migration rejects build conflicts");
+assert.equal(migrationGate({ availabilityOwners: "2" }), "0", "migration requires three availability owners");
+assert.equal(migrationGate({ completeLeaves: "0" }), "0", "migration requires every committed leaf");
+assert.equal(migrationGate({ waiverCid: "bafywaiver" }), "0", "migration bootstrap forbids waivers");
+
 console.log(`AssemblyScript vectors passed: ${vectors.flipTrustCases.length} trust, ${vectors.weightCases.length} weight, ${vectors.ageInvarianceCases.length} age-invariance`);
 
 function call(method, args) {

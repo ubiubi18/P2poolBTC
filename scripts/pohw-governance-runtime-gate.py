@@ -556,12 +556,27 @@ def validate_candidate_safety_profile(candidate: dict[str, Any]) -> None:
     )
     require(host_abi.get("extensionPlacement") == "after-legacy-go-api-prefix", "fork candidate ABI extension is not append-only")
     require(host_abi.get("contractImportCount") == 13, "governance contract import count changed")
-    require(host_abi.get("contractExportCount") == 65, "governance contract export count changed")
+    require(host_abi.get("contractExportCount") == 67, "governance contract export count changed")
 
     artifact = candidate.get("contractArtifact")
     require(isinstance(artifact, dict), "fork candidate contract artifact is missing")
     require(artifact.get("abiImports") == 13, "governance artifact import count changed")
-    require(artifact.get("abiExports") == 65, "governance artifact export count changed")
+    require(artifact.get("abiExports") == 67, "governance artifact export count changed")
+
+    finalization = candidate.get("requiredFinalizationGates")
+    require(isinstance(finalization, dict), "fork candidate finalization gates are missing")
+    require(
+        finalization.get("communityGovernanceParticipantThreshold") == 100,
+        "community governance participant threshold changed",
+    )
+    require(
+        finalization.get("communityGovernanceActivationPermissionless") is True,
+        "community governance activation is not permissionless",
+    )
+    require(
+        finalization.get("communityGovernanceAutomaticDeployment") is False,
+        "community governance threshold enables automatic deployment",
+    )
 
 
 def validate_candidate_source_descriptor(component: dict[str, Any]) -> None:

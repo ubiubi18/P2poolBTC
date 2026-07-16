@@ -9,6 +9,35 @@ Use Go 1.26.5, Rust 1.97.0, Node 24.18.0, npm 11.16.0, and pnpm 11.11.0 for
 attested builds. Local versions that differ are suitable only for development
 and must be reported as non-attested.
 
+## Community launch interlock
+
+The candidate contract starts dormant. Before public use, clients must query
+`communityGovernanceStatus` and display all returned fields. A participant is
+counted only after its current eligible identity-metrics proof is registered
+and its next-epoch governance stake reaches the minimum active amount.
+
+Expected pre-launch status:
+
+```json
+{
+  "schemaVersion": 1,
+  "active": false,
+  "participantCount": 0,
+  "participantThreshold": 100,
+  "participantDefinition": "eligible-current-metrics-and-minimum-active-stake",
+  "permissionlessActivation": true,
+  "automaticDeployment": false,
+  "activationBlock": null
+}
+```
+
+Do not open reviews, create proposals, collect ballots, or claim canonical DAO
+authority while `active` is false. The contract rejects those actions. After
+the count reaches 100, any account may submit `activateCommunityGovernance`
+with no payment. Independently verify the resulting activation event and block
+before enabling proposal UI. This transaction does not deploy the contract,
+publish a release, install artifacts, or bypass deployment-readiness gates.
+
 ## Package the human/AI development policy
 
 Package the MIT policy and verify its canonical CAR before accepting review
@@ -412,10 +441,16 @@ and derives content, caller, bond, result, and artifact-digest claims from
 those verified bytes. Model-family, runtime-family, architecture, provider,
 and pin-operator labels are still assertions by that authenticated caller; a
 canonical CID does not make those labels independently true. For this reason,
-`attestationDiversityCapability()` is fixed to `blocked-unverified-v1` in this
-contract version and critical proposals fail closed. No contract method can
-enable the reserved capability; doing so requires an audited DAO migration to
-a contract that verifies authenticated receipts objectively.
+`attestationDiversityCapability()` reports `blocked-unverified-v1` in this
+contract version and critical/consensus proposals fail closed. No contract
+method can enable the reserved capability. A migration proposal may replace the
+canonical ecosystem reference with an audited successor only through
+`owner-authenticated-bootstrap-v1`: five distinct eligible review owners, three
+builder owners, three availability owners, complete committed leaves, matching
+artifacts, no critical finding or waiver, no build conflict, and all critical
+vote/challenge/timelock gates. Query clients must check
+`migrationExecutionEnabled` and `migrationMode`; neither field grants a caller
+special authority.
 
 Deployment readiness additionally requires a detached authentication envelope
 for every build, availability, and external-audit CAR. Relative paths resolve

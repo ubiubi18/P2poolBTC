@@ -357,12 +357,17 @@ class Experiment1CommunityGuideTests(unittest.TestCase):
         ):
             self.assertIn(role, quickstart)
             self.assertIn(role, verification_form)
-        self.assertIn("--role observer --run-tests", quickstart)
+        self.assertIn("--role observer", quickstart)
+        self.assertIn("onboarding receipts\nmust not turn hostile source", quickstart)
+        self.assertNotIn("--role observer --run-tests", quickstart)
         self.assertIn("--role pruned-miner", quickstart)
         self.assertIn("blocked-public-join", quickstart)
         self.assertIn("does not authorize identity registration", verification_form)
         self.assertIn("I did not register an identity", verification_form)
         self.assertIn("private vulnerability", quickstart)
+        self.assertIn("id: source_cid", verification_form)
+        self.assertIn("id: source_car_sha256", verification_form)
+        self.assertIn("never replaces the source CID", verification_form)
 
     def test_evidence_install_and_preflight_precede_every_p2pool_start(self) -> None:
         step = self.step_five

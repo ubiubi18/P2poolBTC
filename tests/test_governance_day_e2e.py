@@ -103,6 +103,13 @@ class GovernanceDayE2ETests(unittest.TestCase):
             "pohw-objective-risk-classifier-v2",
         )
         self.assertTrue(profile["scopeCountersDerivedFromVerifiedSourceTransitions"])
+        self.assertEqual(profile["communityGovernanceParticipantThreshold"], 100)
+        self.assertEqual(
+            profile["communityGovernanceParticipantDefinition"],
+            "eligible-current-metrics-and-minimum-active-stake",
+        )
+        self.assertTrue(profile["communityGovernanceActivationPermissionless"])
+        self.assertFalse(profile["communityGovernanceAutomaticDeployment"])
         self.assertTrue(profile["epochAnchorAuthenticated"])
         self.assertEqual(
             profile["epochAnchorRequiresSeparateForkProfile"],

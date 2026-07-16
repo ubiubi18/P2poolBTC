@@ -60,9 +60,11 @@
         "candidate_ecosystem_cid",
         "candidate_ecosystem_verified",
         "canonical_source_cid",
+        "source_car_sha256",
         "canonical_source_verified",
         "source_commit_matches",
         "governance_cli_verified",
+        "registry_chain_verified",
         "attested_artifacts",
         "focused_tests_passed",
         "canonical_source_published",
@@ -117,6 +119,13 @@
           ],
           "pattern": "^bafyrei[a-z2-7]{52}$"
         },
+        "source_car_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "canonical_source_verified": {
           "type": "boolean"
         },
@@ -127,6 +136,9 @@
           ]
         },
         "governance_cli_verified": {
+          "type": "boolean"
+        },
+        "registry_chain_verified": {
           "type": "boolean"
         },
         "attested_artifacts": {

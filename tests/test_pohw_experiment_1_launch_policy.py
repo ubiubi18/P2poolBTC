@@ -1,12 +1,15 @@
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
+import platform
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,16 +195,23 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
     def validate_ready(
         self, policy, car_path, evidence_path, verifier_path, anchor_path
     ):
-        MODULE.validate(
-            policy,
-            POLICY,
-            ROOT,
-            readiness_car_path=car_path,
-            readiness_evidence_car_path=evidence_path,
-            governance_cli_path=verifier_path,
-            governance_cli_sha256=hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
-            idena_anchor_policy_path=anchor_path,
-        )
+        @contextlib.contextmanager
+        def staged(path, *_args):
+            yield MODULE.StagedExecutable(str(path))
+
+        with mock.patch.object(
+            MODULE, "stage_attested_executable", side_effect=staged
+        ):
+            MODULE.validate(
+                policy,
+                POLICY,
+                ROOT,
+                readiness_car_path=car_path,
+                readiness_evidence_car_path=evidence_path,
+                governance_cli_path=verifier_path,
+                governance_cli_sha256=hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+                idena_anchor_policy_path=anchor_path,
+            )
 
     def test_checked_in_policy_is_valid_and_blocked(self):
         result = subprocess.run(
@@ -280,8 +290,12 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(MODULE.READY_STATUS, result.stdout)
+            if platform.system() == "Linux":
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(MODULE.READY_STATUS, result.stdout)
+            else:
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("supported only on Linux", result.stderr)
 
     def test_finalized_boolean_is_not_deployment_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -464,6 +478,7 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                     idena_anchor_policy_path=anchor_path,
                 )
 
+    @unittest.skipUnless(platform.system() == "Linux", "sealed executable snapshots require Linux")
     def test_readiness_verifier_binary_is_digest_bound(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
@@ -498,6 +513,7 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                 idena_anchor_policy_path=anchor_path,
             )
 
+    @unittest.skipUnless(platform.system() == "Linux", "sealed executable snapshots require Linux")
     def test_readiness_verifier_executes_the_attested_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             verifier = Path(temp_dir) / "pohw-governance"
@@ -516,6 +532,23 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, b"reviewed\n")
+
+    def test_readiness_verifier_fails_closed_without_linux_sealing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            verifier = Path(temp_dir) / "pohw-governance"
+            payload = b"#!/bin/sh\nexit 0\n"
+            verifier.write_bytes(payload)
+            verifier.chmod(0o700)
+            with mock.patch.object(MODULE.platform, "system", return_value="Darwin"):
+                with self.assertRaisesRegex(
+                    MODULE.LaunchPolicyError, "supported only on Linux"
+                ):
+                    with MODULE.stage_attested_executable(
+                        verifier,
+                        "pohw-governance verifier",
+                        hashlib.sha256(payload).hexdigest(),
+                    ):
+                        self.fail("non-Linux staging must not yield an executable")
 
     def test_readiness_verifier_output_is_bounded_before_capture(self):
         for stream in ("stdout", "stderr"):

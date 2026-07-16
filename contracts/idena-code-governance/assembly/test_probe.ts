@@ -7,10 +7,13 @@ import {
   integerSqrt,
   parseAmount,
   parseU16,
+  parseU32,
   parseU64,
   statusBps,
 } from "./math";
 import { sha256 } from "./sha256";
+import { bootstrapMigrationAttestationsPass } from "./attestation_gates";
+import { Proposal } from "./state";
 import { identityLeafHash, identityLeafPayload, merkleLevelCount } from "./validation";
 
 export { allocate };
@@ -97,4 +100,38 @@ export function hashIdentityLeaf(
     parseU64(argumentString(heightPtr)),
     argumentString(sourceHashPtr),
   )));
+}
+
+export function bootstrapMigrationGateVector(
+  riskPtr: usize,
+  agentCountPtr: usize,
+  agentOwnerCountPtr: usize,
+  unresolvedCriticalCountPtr: usize,
+  builderOwnerCountPtr: usize,
+  builderConflictCountPtr: usize,
+  availabilityOwnerCountPtr: usize,
+  completeLeavesPtr: usize,
+  waiverCidPtr: usize,
+): usize {
+  const completeLeaves = argumentString(completeLeavesPtr) == "1";
+  const proposal = new Proposal(
+    "proposal", "proposal-cid", "parent-cid", "candidate-cid", "patch-cid",
+    "review-round", "owner", argumentString(riskPtr), 0,
+    "agent-root", "build-root", "availability-root",
+    5, completeLeaves ? 5 : 4,
+    3, completeLeaves ? 3 : 2,
+    3, completeLeaves ? 3 : 2,
+    "metadata-root", "metrics-root", 1, 1, "candidate-metrics-root", 1,
+    1, 2, 3, 4, 5, 6,
+    "0", "0", "0", "0", 0, 0,
+    parseU32(argumentString(agentCountPtr)), 0, 0,
+    parseU32(argumentString(agentOwnerCountPtr)),
+    parseU32(argumentString(unresolvedCriticalCountPtr)),
+    parseU32(argumentString(builderOwnerCountPtr)), 0,
+    parseU32(argumentString(builderConflictCountPtr)),
+    parseU32(argumentString(availabilityOwnerCountPtr)),
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    argumentString(waiverCidPtr), "release-cid", "", "", "", "0", "0", false,
+  );
+  return returnString(bootstrapMigrationAttestationsPass(proposal) ? "1" : "0");
 }

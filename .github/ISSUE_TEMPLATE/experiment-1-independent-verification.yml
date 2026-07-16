@@ -19,10 +19,26 @@ body:
     validations:
       required: true
   - type: input
+    id: source_cid
+    attributes:
+      label: Canonical source-tree CID
+      description: Paste the CIDv1 base32 source-tree CID from the published ecosystem manifest. Enter Not published for a pre-release source review; a Git commit cannot substitute for this field.
+      placeholder: bafy...
+    validations:
+      required: true
+  - type: input
+    id: source_car_sha256
+    attributes:
+      label: Source CAR SHA-256
+      description: Paste the independently recomputed lowercase SHA-256 of the deterministic source CAR. Enter Not published only for a pre-release source review.
+      placeholder: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    validations:
+      required: true
+  - type: input
     id: commit
     attributes:
-      label: Exact reviewed Git commit
-      description: Paste only the 40-character public commit ID from `git rev-parse HEAD`.
+      label: Exact reviewed Git commit metadata
+      description: Paste only the 40-character public commit ID from `git rev-parse HEAD`. This is mirror metadata and never replaces the source CID.
       placeholder: 0123456789abcdef0123456789abcdef01234567
     validations:
       required: true

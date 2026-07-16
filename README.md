@@ -140,7 +140,7 @@ Choose the path that matches what you are trying to do:
 
 This path requires no identity signature, API key, wallet, peer endpoint, or
 root installation. The guarded command verifies the manifest and policy,
-checks the host, optionally runs the focused locked tests, and writes a private
+checks the host without executing repository build/test commands, and writes a private
 local HTML report plus redacted issue template:
 
 ```sh
@@ -154,11 +154,12 @@ test -z "$(git status --short)"
 The expected journey result for a clean observer checkout is `review-ready`,
 while the verified release policy remains `blocked-release-readiness`. Do not
 start systemd units or copy credentials during this lane. Record the exact
-commit from `git rev-parse HEAD` when reporting a review result because the
-candidate branch is not a release identifier. See
+canonical source CID and CAR digest when published; record `git rev-parse HEAD`
+only as mirror metadata because neither the candidate branch nor its commit is
+the canonical trust root. See
 [COMMUNITY-QUICKSTART.md](COMMUNITY-QUICKSTART.md) for every result state and
-safe issue-reporting rules, including the explicit locked dependency-fetch and
-offline test step for deeper reviewers.
+safe issue-reporting rules, including the disposable clean-room dependency-fetch
+and offline test steps for deeper reviewers.
 
 ### Five-Step Live Journey After The Interlock Opens
 
@@ -232,6 +233,12 @@ published as a release, or authorized as a canonical ecosystem manifest.
 
 The current candidate implements:
 
+- an immutable community-launch interlock: proposal reviews, proposal creation,
+  epoch ballots, finalization, and execution remain dormant until 100 distinct
+  eligible Idena identities each have a current metrics proof and at least the
+  minimum active governance stake. Qualifying setup is reversible before
+  activation; once the threshold is reached, any caller may activate the DAO.
+  This does not deploy the contract, install software, or grant an admin role,
 - one on-chain proposal slot per eligible Idena identity and governance epoch;
   cancellation, rejection, expiration, and no quorum do not restore the slot,
 - one deterministic frozen proposal set and one bounded commit/reveal epoch
@@ -242,9 +249,11 @@ The current candidate implements:
 - independent stake, identity-breadth, AI-review, reproducible-build, and public
   data-availability gates,
 - a fail-closed critical-proposal interlock: model and platform labels remain
-  operator assertions, so this contract version cannot execute critical
-  proposals until a separately audited DAO migration adds objective receipt
-  verification,
+  operator assertions, so critical and consensus proposals cannot execute;
+  migration proposals retain a DAO-only bootstrap path requiring five distinct
+  authenticated review owners, three builder owners, three availability owners,
+  no unresolved critical findings or build conflicts, and every ordinary
+  voting, challenge, timelock, and execution gate,
 - grace-delayed, permissionless execution with objective challenges,
   append-only canonical history, decentralized revert proposals, and a local
   last-known-good recovery flow that never installs software automatically,
@@ -265,10 +274,14 @@ The current candidate implements:
 
 The locked local parameter-set CID is
 `bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei`. The locally
-built WASM candidate is 303,259 bytes with CID
-`bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i` and SHA-256
-`66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2`.
+built WASM candidate is 307,453 bytes with CID
+`bafkreieagb6aslelkzer5rfjtsa7edksjwqefkiaqgkfnibyy44txvurmm` and SHA-256
+`80307c092c8b56491ec4a99c81f20d524da042a900819456a038c7393bd69163`.
 These values identify test artifacts; they are not deployment authorization.
+The dashboard and contract status query must display the community state as
+`Dormant N/100` until the permissionless activation transaction succeeds.
+Reaching 100 does not automatically deploy the candidate or make it safe: all
+deployment readiness, independent build, availability, and audit gates remain.
 The contract derives normal/critical risk and scope counters from exact,
 bounded base-to-candidate source transitions; proposer labels cannot downgrade
 the derived class. The separate disabled Governance Day fork candidate adds an

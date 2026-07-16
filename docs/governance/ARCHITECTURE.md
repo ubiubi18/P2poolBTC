@@ -13,6 +13,14 @@ installer, or AI merge authority. Deployment may set the immutable initial CID
 and testnet parameters once. Afterwards, any caller may execute an accepted
 proposal after all gates, challenge period, and timelock pass.
 
+The contract is deliberately dormant after deployment. Before governance can
+open a review or proposal, 100 distinct eligible identities must each register
+a current metrics proof and activate at least the minimum governance stake.
+The count follows eligibility and stake before activation. Any caller can make
+the one-way activation once the threshold is met; the deployer has no special
+path. This launch interlock is independent from proposal quorum and does not
+authorize deployment or installation.
+
 ## Components
 
 1. `governance-core` implements canonical schemas, deterministic integer
@@ -75,9 +83,16 @@ proposal after all gates, challenge period, and timelock pass.
 Every required gate must pass. No component is collapsed into an opaque score.
 Because the current Idena WASM ABI cannot establish that claimed model and
 builder platforms are operationally independent, the deployed contract state
-is initialized with `blocked-unverified-v1` and critical proposals fail the
-attestation gate. No current entry point enables that capability; a successor
-requires a separate DAO migration and objective receipt verifier.
+is initialized with `blocked-unverified-v1`; critical and consensus proposals
+fail the attestation gate. No entry point enables that capability in place. To
+avoid permanently trapping the canonical reference, only a `migration`
+proposal may use `owner-authenticated-bootstrap-v1`: five distinct eligible
+review owners, three builder owners, three availability owners, complete
+committed leaves, matching artifacts, zero unresolved critical findings, and
+zero builder conflicts. It still requires critical PoS/PoHW thresholds,
+challenge, timelock, and permissionless execution. The migration changes the
+canonical ecosystem CID to a separately audited successor; it grants no
+deployer, maintainer, or emergency privilege.
 
 ## Public IPFS Boundary
 

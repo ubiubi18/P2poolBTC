@@ -2,6 +2,13 @@
 
 This implementation is safe only for local, no-value testing.
 
+- Community governance is dormant until 100 distinct eligible identities hold
+  current metrics proofs and minimum active stake. This prevents a tiny test
+  cohort from exercising canonical authority, but it does not prove that the
+  identities are independently controlled. Idena identity farming, coordinated
+  capital, bribery, and stake splitting remain residual risks. Reaching the
+  threshold is not deployment authorization and does not replace independent
+  builders, public availability, replay/migration evidence, or external audit.
 - The legacy-compatible WASM host still cannot authenticate the Governance Day
   schedule. A separate disabled fork candidate now supplies a read-only
   `epoch_block` import backed by `State.EpochBlock()`. Its component patches now
@@ -87,11 +94,16 @@ This implementation is safe only for local, no-value testing.
   still required before the labels establish operational independence. This
   contract version therefore writes the immutable
   `blocked-unverified-v1` attestation-diversity capability at deployment and
-  refuses to accept critical proposals. There is no contract method that can
-  enable the reserved `verified-receipts-v1` capability. Enabling critical
-  execution requires a separately reviewed DAO contract migration that
-  verifies authenticated provider/build receipts; changing labels or storage
-  through a proposal cannot bypass the interlock.
+  refuses to accept critical or consensus proposals. There is no contract
+  method that can enable the reserved `verified-receipts-v1` capability.
+  A migration-only bootstrap route prevents permanent lock-in: five distinct
+  eligible review owners, three builder owners, three availability owners,
+  complete leaves, matching artifacts, and zero unresolved critical findings,
+  waivers, or build conflicts are required in addition to every critical DAO
+  gate. It can only replace the canonical CID with a separately reviewed
+  successor; changing labels or storage cannot bypass the interlock. This
+  owner-breadth fallback does not prove operational independence and is itself
+  a residual collusion risk requiring external audit before deployment.
 - Signed pinning attestations reduce availability risk but cannot guarantee
   permanent retrieval. The opening pinset covers candidate and proposal
   content, and the final gate additionally requires every accepted agent/build

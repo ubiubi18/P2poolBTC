@@ -23,6 +23,7 @@ const BALLOT_DOMAIN: &[u8] = b"IDENA_CODE_DAO_EPOCH_BALLOT_V1";
 const PROPOSAL_SET_DOMAIN: &[u8] = b"IDENA_CODE_DAO_PROPOSAL_SET_V1";
 const PROPOSAL_ID_DOMAIN: &[u8] = b"IDENA_CODE_DAO_PROPOSAL_ID_V1";
 const MAX_CHALLENGE_BYTES: usize = 65_536;
+pub const COMMUNITY_GOVERNANCE_PARTICIPANT_THRESHOLD: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2676,6 +2677,7 @@ mod tests {
     #[test]
     fn experimental_parameter_set_has_the_locked_cid() {
         let parameters = EpochGovernanceParameterSetV1::experimental_defaults();
+        assert_eq!(COMMUNITY_GOVERNANCE_PARTICIPANT_THRESHOLD, 100);
         assert_eq!(parameters.normal.minimum_ai_attestations, 3);
         assert_eq!(parameters.normal.minimum_ai_independence_groups, 2);
         assert_eq!(parameters.normal.minimum_ai_families, 2);

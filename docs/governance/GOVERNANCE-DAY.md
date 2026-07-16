@@ -12,6 +12,33 @@ The exact local parameter set is
 the contract, the node API, and decision records reject any other parameter
 CID.
 
+## Community Activation
+
+Contract version `0.3.0` starts dormant. It accepts identity-metrics proofs,
+stake deposits, next-epoch stake activation, and read-only status queries, but
+it rejects review rounds, proposals, ballots, finalization, and execution until
+the founding threshold is met.
+
+A founding participant counts once only while all of these are true before
+activation:
+
+- the caller is a distinct authenticated Idena address;
+- its proof belongs to the current certified metrics root;
+- its state is Human, Verified, or Newbie; and
+- its active governance stake is at least the locked minimum.
+
+The immutable threshold is **100 qualifying participants**. Losing eligibility
+or dropping below minimum stake removes the registration before activation.
+At 100, anyone may call `activateCommunityGovernance`; there is no deployer,
+maintainer, or emergency-key privilege. The transition is one-way and freezes
+the founding count for auditability. Later voters still need current eligible
+metrics and snapshotted active stake.
+
+This is a breadth interlock, not proof that 100 people are independent. It does
+not eliminate identity farming, stake splitting, collusion, or low turnout. It
+also does not deploy the contract, authorize a release, install code, or change
+the canonical CID automatically.
+
 ## Schedule
 
 Each epoch has one immutable schedule:

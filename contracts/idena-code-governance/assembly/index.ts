@@ -68,6 +68,7 @@ import {
   GOV_VOTING_PERIOD_BLOCKS,
   GOV_REVIEW_PERIOD_BLOCKS,
 } from "./generated_parameters";
+import { bootstrapMigrationAttestationsPass } from "./attestation_gates";
 import {
   allocate,
   argumentString,
@@ -100,6 +101,8 @@ import {
   isBoundRevertProposal,
   recordEpochExecution,
   registerEpochProposal,
+  requireCommunityGovernanceActive,
+  syncCommunityGovernanceParticipant,
   verifiedAttestationDiversitySupported,
 } from "./epoch_governance";
 import {
@@ -175,6 +178,7 @@ import {
 } from "./validation";
 
 export {
+  activateCommunityGovernance,
   anchorGovernanceEpoch,
   attachAiReviewRoot,
   attachBuildRoot,
@@ -186,6 +190,7 @@ export {
   freezeEpochProposalSet,
   getCanonicalHistory,
   getCanonicalHistoryPage,
+  communityGovernanceStatus,
   getEpochBallotReceipt,
   getEpochDecisionRecord,
   getEpochProposalSet,
@@ -202,7 +207,7 @@ export {
 export { allocate };
 
 const SCHEMA_VERSION = "1";
-const CONTRACT_VERSION = "0.2.0";
+const CONTRACT_VERSION = "0.3.0";
 const INITIALIZED_KEY = "governance:initialized";
 const CANONICAL_CID_KEY = "governance:canonical-cid";
 const PARAMETER_CID_KEY = "governance:parameter-cid";
@@ -355,6 +360,7 @@ export function finalizeUnbonding(): usize {
   const newWeight = recordedWeight(address, newStake);
   replaceGlobalWeight(oldWeight, newWeight);
   refreshPendingStakeWeight(address, loadMetrics(address), newStake, newWeight);
+  syncCommunityGovernanceParticipant(address, !newWeight.isZero());
   removeKey(key);
   emitVersionedEvent("GovernanceWithdrawalFinalizedV1", [address, amount.toString()]);
   transfer(hexToBytes(address), amount);
@@ -407,6 +413,7 @@ export function registerIdentityMetricsProof(
   const newWeight = weightForMetrics(oldStake, state, trust);
   replaceGlobalWeight(oldWeight, newWeight);
   refreshPendingStakeWeight(address, record, oldStake, newWeight);
+  syncCommunityGovernanceParticipant(address, !newWeight.isZero());
   emitVersionedEvent("IdentityMetricsRegisteredV1", [address, root, sourceEpoch.toString()]);
   return okJson("root", root);
 }
@@ -492,6 +499,7 @@ export function openReviewRound(
   scopeDagCborHexPtr: usize,
 ): usize {
   ensureInitialized();
+  requireCommunityGovernanceActive();
   const opener = callerHex();
   requireCurrentEligibleMetrics(opener);
   const parent = argumentString(parentCidPtr, 128);
@@ -759,6 +767,7 @@ export function createProposal(
   proposalDagCborHexPtr: usize,
 ): usize {
   ensureInitialized();
+  requireCommunityGovernanceActive();
   requireNoPayment();
   const weightLastChangedBeforeSettlement = parseU64(getString(WEIGHT_LAST_CHANGED_BLOCK_KEY));
   syncGlobalWeightEpoch();
@@ -1631,6 +1640,7 @@ function activateStakeFor(address: string): bool {
   const newStake = oldStake + amount;
   setString(activeStakeKey(address), newStake.toString());
   removeKey(key);
+  syncCommunityGovernanceParticipant(address, !registeredWeight(address, newStake).isZero());
   emitVersionedEvent("GovernanceStakeActivatedV1", [address, amount.toString(), activationEpoch.toString()]);
   return true;
 }
@@ -1690,6 +1700,7 @@ function slashGovernanceStake(address: string): u128 {
   const newWeight = recordedWeight(address, newStake);
   replaceGlobalWeight(oldWeight, newWeight);
   refreshPendingStakeWeight(address, loadMetrics(address), newStake, newWeight);
+  syncCommunityGovernanceParticipant(address, !newWeight.isZero());
   const withdrawal = withdrawalKey(address);
   if (hasKey(withdrawal)) {
     const fields = getString(withdrawal).split("~");
@@ -2021,7 +2032,10 @@ function countPrefixed(values: string[], prefix: string): u32 {
 }
 
 function attestationGatesPass(proposal: Proposal): bool {
-  if (proposal.isCritical() && !verifiedAttestationDiversitySupported()) return false;
+  const verifiedDiversity = verifiedAttestationDiversitySupported();
+  const bootstrapMigration = !verifiedDiversity
+    && bootstrapMigrationAttestationsPass(proposal);
+  if (proposal.isCritical() && !verifiedDiversity && !bootstrapMigration) return false;
   const agentMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_ATTESTATIONS : GOV_NORMAL_MIN_AI_ATTESTATIONS;
   const modelMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_FAMILIES : GOV_NORMAL_MIN_AI_FAMILIES;
   const runtimeMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS : GOV_NORMAL_MIN_AI_RUNTIME_GROUPS;
@@ -2035,6 +2049,10 @@ function attestationGatesPass(proposal: Proposal): bool {
     || (proposal.isCritical() && proposal.waiverCid.length > 0);
   const minimumExpiryValue = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
   const requiredAvailabilityUntil = checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
+  if (bootstrapMigration) {
+    return minimumExpiryValue.length > 0
+      && parseU64(minimumExpiryValue) >= requiredAvailabilityUntil;
+  }
   return proposal.agentLeafCount > 0
     && proposal.agentSubmittedCount == proposal.agentLeafCount
     && proposal.buildLeafCount > 0
@@ -2058,8 +2076,10 @@ export function attestationDiversityCapability(): usize {
   ensureInitialized();
   requireNoPayment();
   return returnString(
-    "{\"schemaVersion\":1,\"criticalExecutionEnabled\":"
+    "{\"schemaVersion\":2,\"criticalExecutionEnabled\":"
       + (verifiedAttestationDiversitySupported() ? "true" : "false")
+      + ",\"migrationExecutionEnabled\":true"
+      + ",\"migrationMode\":\"owner-authenticated-bootstrap-v1\""
       + ",\"mode\":\""
       + getString(ATTESTATION_DIVERSITY_CAPABILITY_KEY)
       + "\"}",

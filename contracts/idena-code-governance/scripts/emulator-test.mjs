@@ -99,8 +99,20 @@ const deployedParameters = JSON.parse(call("governanceParameters", [], {
 assert.equal(deployedParameters.parameterSetCid, parameterCid);
 assert.equal(deployedParameters.chainId, "idena-code-governance-day-local-testnet-v3:10002");
 assert.equal(deployedParameters.schemaVersion, 2);
-assert.equal(deployedParameters.contractVersion, "0.2.0");
+assert.equal(deployedParameters.contractVersion, "0.3.0");
 assert.deepEqual(deployedParameters.parameterProfile, lockedParameters);
+assert.deepEqual(JSON.parse(call("communityGovernanceStatus", [], {
+  caller: addresses[7], block: 1n, epoch: 10,
+})), {
+  schemaVersion: 1,
+  active: false,
+  participantCount: 0,
+  participantThreshold: 100,
+  participantDefinition: "eligible-current-metrics-and-minimum-active-stake",
+  permissionlessActivation: true,
+  automaticDeployment: false,
+  activationBlock: null,
+});
 assert.deepEqual(
   [deployedParameters.parameterProfile.normal.minimumAiAttestations,
     deployedParameters.parameterProfile.normal.minimumAiIndependenceGroups,
@@ -119,8 +131,10 @@ const diversityCapability = JSON.parse(call("attestationDiversityCapability", []
   caller: addresses[7], block: 1n, epoch: 10,
 }));
 assert.deepEqual(diversityCapability, {
-  schemaVersion: 1,
+  schemaVersion: 2,
   criticalExecutionEnabled: false,
+  migrationExecutionEnabled: true,
+  migrationMode: "owner-authenticated-bootstrap-v1",
   mode: "blocked-unverified-v1",
 });
 // Legacy regression cases below deliberately bypass the production deployment
@@ -190,6 +204,34 @@ const certificationAfterRejectedConflict = JSON.parse(call(
 assert.equal(certificationAfterRejectedConflict.certified, true);
 assert.equal(certificationAfterRejectedConflict.conflict, false);
 assert.equal(certificationAfterRejectedConflict.attestations, 3);
+
+const preActivationStatus = JSON.parse(call("communityGovernanceStatus", [], {
+  caller: addresses[7], block: 3n, epoch: 11,
+}));
+assert.equal(preActivationStatus.active, false);
+assert.equal(preActivationStatus.participantCount, addresses.length);
+storage.set("epoch-governance:enabled", Buffer.from("1"));
+const dormantReview = proposalFixtures(
+  "dormant-community", addresses, initialCid, cid("dormant-candidate"), false, 3, 11,
+);
+expectFailure(() => call("openReviewRound", dormantReview.openArgs, {
+  caller: addresses[0], block: 3n, epoch: 11, payment: 25n * 10n ** 18n,
+}));
+expectFailure(() => call("activateCommunityGovernance", [], {
+  caller: addresses[12], block: 3n, epoch: 11,
+}));
+storage.set("epoch-governance:community-participant-count", Buffer.from("100"));
+const activatedCommunity = JSON.parse(call("activateCommunityGovernance", [], {
+  caller: addresses[12], block: 4n, epoch: 11,
+}));
+assert.equal(activatedCommunity.active, true);
+assert.equal(activatedCommunity.participantCount, 100);
+assert.equal(activatedCommunity.participantThreshold, 100);
+assert.equal(activatedCommunity.activationBlock, 4);
+expectFailure(() => call("activateCommunityGovernance", [], {
+  caller: addresses[0], block: 4n, epoch: 11,
+}));
+storage.delete("epoch-governance:enabled");
 
 const unstableSnapshot = proposalFixtures(
   "same-block-snapshot", addresses, initialCid, cid("same-block-candidate"), false, 44, 12,
@@ -940,9 +982,13 @@ const metricsMigration = proposalFixtures(
   "identity-metrics-migration", addresses, delayed.candidateCid,
   cid("identity-metrics-migration-candidate"), false, 2820, 23,
   false, null, "migrations/identity-metrics-v11.json", "migration",
+  false, false, 0, true,
 );
 metricsMigration.proposalValue.candidateIdentityMetricsRoot = migratedMetricTree.root;
 metricsMigration.proposalValue.candidateIdentityMetricsEpoch = 11;
+// Exercise the production deployment state: only the stronger owner-authenticated
+// migration path may move the canonical CID while critical execution is blocked.
+storage.set("governance:attestation-diversity-capability", Buffer.from("blocked-unverified-v1"));
 const metricsMigrationCreate = prepareProposal(metricsMigration, 2780n, 2820n, 23);
 call("openVoting", [metricsMigrationCreate.proposalId], {
   caller: addresses[7], block: 2860n, epoch: 23,
@@ -963,6 +1009,7 @@ state = JSON.parse(call("executeProposal", [metricsMigrationCreate.proposalId], 
   caller: addresses[7], block: 3100n, epoch: 23,
 }));
 assert.equal(state.state, "Executed");
+storage.set("governance:attestation-diversity-capability", Buffer.from("verified-receipts-v1"));
 assert.equal(decoder.decode(storage.get("governance:scheduled-weight-delta")), scheduledBeforeMigration);
 assert.equal(BigInt(decoder.decode(storage.get("governance:total-weight"))), globalBeforeMigration);
 
@@ -1421,6 +1468,7 @@ function proposalFixtures(
   includeSecondaryCandidateArtifact = false,
   insufficientRuntimeDiversity = false,
   criticalFindingOwners = 0,
+  bootstrapOwnerBreadth = false,
 ) {
   const parentManifest = ecosystemManifests.get(parentCid);
   assert.ok(parentManifest, `missing parent manifest fixture for ${parentCid}`);
@@ -1546,7 +1594,7 @@ function proposalFixtures(
     runtime: insufficientRuntimeDiversity
       ? `${prefix}-runtime-${index % 2}`
       : `${prefix}-runtime-${index}`,
-    owner: owners[index % 3],
+    owner: owners[bootstrapOwnerBreadth ? index : index % 3],
     unresolved: index < criticalFindingOwners ? 1 : 0,
   }));
   if (duplicateAgentInstance) {
@@ -2159,7 +2207,7 @@ function ecosystemManifestFixture(prefix, parentCid, source, artifacts) {
     }],
     compatibilityPins: {},
     toolchainLocks: { "/node": "24.18.0", "rust:compiler": "1.97.0" },
-    governanceContractVersion: "0.2.0",
+    governanceContractVersion: "0.3.0",
     governanceParameterSetCid: link(parameterCid),
   };
   const packaged = dagObject(value);

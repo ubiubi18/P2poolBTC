@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v3",
+  "releaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v5",
   "status": "experimental-uncommitted-candidate",
   "authorizedForDeployment": false,
   "authorizedForRelease": false,
@@ -134,16 +134,16 @@
     "legacyVtableCallbackCount": 31,
     "extensionPlacement": "after-legacy-go-api-prefix",
     "contractImportCount": 13,
-    "contractExportCount": 65
+    "contractExportCount": 67
   },
   "contractArtifact": {
-    "contractVersion": "0.2.0",
+    "contractVersion": "0.3.0",
     "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
-    "cid": "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i",
-    "sha256": "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2",
-    "size": 303259,
+    "cid": "bafkreieagb6aslelkzer5rfjtsa7edksjwqefkiaqgkfnibyy44txvurmm",
+    "sha256": "80307c092c8b56491ec4a99c81f20d524da042a900819456a038c7393bd69163",
+    "size": 307453,
     "abiImports": 13,
-    "abiExports": 65,
+    "abiExports": 67,
     "buildStatus": "local-non-attested"
   },
   "runtimeIntegrationTestOverlay": {
@@ -186,6 +186,9 @@
     "externalAuditAttestations": 0
   },
   "requiredFinalizationGates": {
+    "communityGovernanceParticipantThreshold": 100,
+    "communityGovernanceActivationPermissionless": true,
+    "communityGovernanceAutomaticDeployment": false,
     "exactCandidateCommitsAndSourceCids": false,
     "allNativeBindingPlatformsRebuilt": false,
     "legacyReplayAndPreActivationDifferential": false,
@@ -200,6 +203,6 @@
     "Null candidate commits remain a deliberate fail-closed blocker until each patch is reviewed and committed in its own repository. A source CID identifies the current bytes but does not create release authority.",
     "No local actor may label its own duplicate builds, pin accounts, or audit reports as independent evidence.",
     "No activation height or genesis is authorized. The fixed node activation source therefore returns no activation and the candidate remains inactive by construction on every network and height.",
-    "The historical governance-fork lock and its d894 artifact remain unchanged. Current Governance Day candidate and build-plan records use only the post-audit 976000 artifact."
+    "The historical governance-fork lock and its d894 artifact remain unchanged. Current Governance Day candidate and build-plan records use only the dormant-community-gated 80307c artifact."
   ]
 }

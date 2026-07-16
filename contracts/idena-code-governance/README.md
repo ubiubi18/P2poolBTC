@@ -6,6 +6,15 @@ setter after deployment. A proposal can update the canonical ecosystem CID only
 after its independent PoS, PoHW, AI-review, reproducible-build, availability,
 challenge, and timelock gates pass. Execution is permissionless.
 
+Version `0.3.0` also has an immutable community-launch interlock. The contract
+starts dormant and rejects review rounds, proposals, epoch ballots,
+finalization, and execution until 100 distinct eligible identities each have a
+current metrics proof and minimum active governance stake. Registrations track
+stake and eligibility changes before activation. Once the threshold is met,
+any caller may invoke `activateCommunityGovernance`; the call grants no role,
+does not install software, and does not change the canonical CID. Use
+`communityGovernanceStatus` to inspect the count and activation block.
+
 The adapter uses the exact host imports exposed by the pinned `idena-wasm`
 runtime. External method arguments are Idena `Region` pointers containing raw
 RPC argument bytes. Do not pass native AssemblyScript string pointers.
@@ -34,7 +43,9 @@ is dirty, any revision differs, or the fork lock is not marked
 `canonical-locked-source`. The published prototype remains
 `committed-experimental-prototype` and therefore fails this release gate.
 
-The emulator exercises initialization, exact identity Merkle proofs,
+The emulator exercises dormant initialization, qualifying participant
+registration, rejection below the 100-participant threshold, permissionless
+one-way community activation, exact identity Merkle proofs,
 independently certified metrics roots, delayed stake activation, vote
 replacement, permissionless review rounds, all acceptance gates,
 attestation-set completeness, all three bounded raw-result challenge types,

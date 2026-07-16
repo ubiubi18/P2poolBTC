@@ -39,11 +39,14 @@ test "$STATUS" = blocked-release-readiness
 
 For this lane, `review-ready`, a clean checkout, a verified
 `blocked-release-readiness` policy, and a verified manifest are the expected
-initial success result. A deeper reviewer should explicitly run
-`cargo fetch --locked` and then rerun the onboarding command with `--run-tests`;
-the test run itself is offline. Do not continue to the privileged installation or
-registration commands below. The candidate branch can move, so include the
-exact `git rev-parse HEAD` value in every review report. The generated receipt
+initial success result. It is a static guarded review, not a test result. A
+deeper reviewer must treat the checkout as hostile and run locked tests in a
+disposable clean-room VM with no credentials or host wallets: log the explicit
+dependency-fetch phase, disconnect the network, and then run tests directly.
+The onboarding command refuses `--run-tests`. Do not continue to the privileged
+installation or registration commands below. The candidate branch can move, so
+include the canonical source CID and CAR SHA-256 when available, plus the exact
+`git rev-parse HEAD` value only as mirror metadata. The generated receipt
 contains only aggregate diagnostics; inspect the generated `issue-report.md`
 before posting it.
 
@@ -348,7 +351,23 @@ scripts/pohw-experiment-register-miner.sh \
 
 The status must be `needs_registry_transaction`. It creates protected local
 P2Pool keys and a public commitment, but no ownership challenge may be signed
-yet. Call `registerMiner(<miner_id>, <registration_commitment>)` on the exact
+yet. Before opening a wallet or burning IDNA, verify the deployment against your
+own synchronized loopback Idena RPC with the manifest-attested `p2pool-node`:
+
+```sh
+POLICY='/path/to/independently-verified-idena-anchor-policy.json'
+IDENA_API_KEY_FILE='/path/to/private/idena-api.key'
+
+"$P2POOL" verify-idena-registry-deployment \
+  --idena-anchor-policy "$POLICY" \
+  --idena-rpc-url http://127.0.0.1:9009 \
+  --idena-api-key-file "$IDENA_API_KEY_FILE"
+```
+
+Continue only when the exact output is
+`Idena registry deployment verified against synchronized local RPC`. A policy
+JSON or coordinator statement cannot replace this chain-backed check. Then call
+`registerMiner(<miner_id>, <registration_commitment>)` on the exact
 contract from the verified public policy, attach at least its immutable minimum
 burn, and wait for the policy's finality depth. This is a real public Idena
 transaction that burns real IDNA; review the exact fee and arguments in your
@@ -369,7 +388,7 @@ CONTRACT_ADDRESS=$(python3 -c \
   --miner-id "$POHW_MINER_ID" \
   --registration-sequence 1 \
   --idena-rpc-url http://127.0.0.1:9009 \
-  --idena-api-key-file '/path/to/private/idena-api.key' \
+  --idena-api-key-file "$IDENA_API_KEY_FILE" \
   > "$POHW_EXPERIMENT_OUTPUT_ROOT/miner-registry-anchor.json"
 
 export POHW_MINER_REGISTRY_ANCHOR_FILE="$POHW_EXPERIMENT_OUTPUT_ROOT/miner-registry-anchor.json"

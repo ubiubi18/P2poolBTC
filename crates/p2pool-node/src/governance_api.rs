@@ -4,6 +4,7 @@ use governance_core::{
     evaluate_gates, frozen_proposal_set_root, package_dag_cbor, package_development_policy,
     AcceptanceEvidence, CriticalFindingWaiverV1, DevelopmentPolicyBundleV1, EpochGateParametersV1,
     EpochGovernanceParameterSetV1, GateParameterSet, RiskClass,
+    COMMUNITY_GOVERNANCE_PARTICIPANT_THRESHOLD,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -35,6 +36,7 @@ pub struct GovernanceDashboardResponseV1 {
     #[serde(default)]
     pub development_policy: Option<DevelopmentPolicyBundleV1>,
     pub identity_metrics: Option<GovernanceIdentityMetricsCertificationV1>,
+    pub community_activation: GovernanceCommunityActivationV1,
     pub repositories: Vec<GovernanceRepositoryViewV1>,
     pub proposals: Vec<GovernanceProposalViewV1>,
     #[serde(default)]
@@ -43,6 +45,18 @@ pub struct GovernanceDashboardResponseV1 {
     pub canonical_history: Vec<GovernanceCanonicalExecutionViewV1>,
     #[serde(default)]
     pub recovery: Option<GovernanceRecoveryViewV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GovernanceCommunityActivationV1 {
+    pub active: bool,
+    pub participant_count: u32,
+    pub participant_threshold: u32,
+    pub participant_definition: String,
+    pub permissionless_activation: bool,
+    pub automatic_deployment: bool,
+    pub activation_block: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +282,15 @@ fn unconfigured() -> GovernanceDashboardResponseV1 {
         development_policy_cid: None,
         development_policy: None,
         identity_metrics: None,
+        community_activation: GovernanceCommunityActivationV1 {
+            active: false,
+            participant_count: 0,
+            participant_threshold: COMMUNITY_GOVERNANCE_PARTICIPANT_THRESHOLD,
+            participant_definition: "eligible-current-metrics-and-minimum-active-stake".to_string(),
+            permissionless_activation: true,
+            automatic_deployment: false,
+            activation_block: None,
+        },
         repositories: vec![],
         proposals: vec![],
         epoch_governance: None,
@@ -291,6 +314,7 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
             .as_deref()
             .context("configured governance snapshot has no contract address")?,
     )?;
+    validate_community_activation(value)?;
     validate_object_cid(
         value
             .current_canonical_ecosystem_cid
@@ -475,6 +499,34 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
     validate_epoch_governance(value.epoch_governance.as_ref(), &proposal_ids)?;
     validate_canonical_history(value)?;
     validate_recovery(value.recovery.as_ref())?;
+    Ok(())
+}
+
+fn validate_community_activation(value: &GovernanceDashboardResponseV1) -> Result<()> {
+    let activation = &value.community_activation;
+    if activation.participant_threshold != COMMUNITY_GOVERNANCE_PARTICIPANT_THRESHOLD
+        || activation.participant_definition != "eligible-current-metrics-and-minimum-active-stake"
+        || !activation.permissionless_activation
+        || activation.automatic_deployment
+    {
+        bail!("governance community activation policy is invalid");
+    }
+    if activation.active {
+        if activation.participant_count < activation.participant_threshold
+            || activation.activation_block.is_none()
+        {
+            bail!("active governance lacks its participant-threshold proof");
+        }
+    } else if activation.activation_block.is_some() {
+        bail!("dormant governance cannot have an activation block");
+    }
+    if !activation.active
+        && (!value.proposals.is_empty()
+            || value.epoch_governance.is_some()
+            || !value.canonical_history.is_empty())
+    {
+        bail!("dormant governance snapshot contains active DAO state");
+    }
     Ok(())
 }
 
@@ -1136,6 +1188,12 @@ mod tests {
         value
     }
 
+    fn mark_community_governance_active(value: &mut GovernanceDashboardResponseV1) {
+        value.community_activation.active = true;
+        value.community_activation.participant_count = 100;
+        value.community_activation.activation_block = Some(42);
+    }
+
     #[test]
     fn checked_in_governance_day_ui_fixture_has_a_bound_proposal_set_root() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1145,7 +1203,40 @@ mod tests {
         validate_dashboard(&value).unwrap();
         assert_eq!(value.status, "operator-validated-local-snapshot");
         assert_eq!(value.proposals.len(), 1);
+        assert!(value.community_activation.active);
+        assert_eq!(value.community_activation.participant_count, 100);
         assert_eq!(value.epoch_governance.unwrap().phase, "Grace");
+    }
+
+    #[test]
+    fn dormant_community_governance_rejects_active_dao_state() {
+        let mut value = configured_dashboard();
+        validate_dashboard(&value).unwrap();
+
+        value.proposals.push(passing_proposal());
+        assert!(validate_dashboard(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("dormant governance snapshot contains active DAO state"));
+    }
+
+    #[test]
+    fn community_activation_requires_exact_threshold_policy() {
+        let mut value = configured_dashboard();
+        value.community_activation.active = true;
+        value.community_activation.participant_count = 99;
+        value.community_activation.activation_block = Some(100);
+        assert!(validate_dashboard(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("participant-threshold proof"));
+
+        value.community_activation.participant_count = 100;
+        value.community_activation.participant_threshold = 99;
+        assert!(validate_dashboard(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("activation policy is invalid"));
     }
 
     fn epoch_view(proposal_id: String) -> GovernanceEpochViewV1 {
@@ -1435,6 +1526,7 @@ mod tests {
     #[test]
     fn epoch_snapshot_requires_a_frozen_sorted_proposal_set() {
         let mut value = configured_dashboard();
+        mark_community_governance_active(&mut value);
         let proposal = passing_proposal();
         value.epoch_governance = Some(epoch_view(proposal.proposal_id.clone()));
         value.proposals = vec![proposal];
@@ -1464,6 +1556,7 @@ mod tests {
     #[test]
     fn canonical_history_is_continuous_and_reverts_only_prior_executions() {
         let mut value = configured_dashboard();
+        mark_community_governance_active(&mut value);
         let first_canonical = value.current_canonical_ecosystem_cid.clone().unwrap();
         let second_canonical = cid("second-canonical");
         value.current_canonical_ecosystem_cid = Some(second_canonical.clone());

@@ -2048,7 +2048,7 @@ tr:last-child td {
 
 .governance-canonical {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr) minmax(220px, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr);
   gap: 1px;
   border: 1px solid var(--line-strong);
   background: var(--line);

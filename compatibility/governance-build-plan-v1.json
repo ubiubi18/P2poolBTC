@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "planId": "ubiubi18-governance-build-v1",
   "status": "experimental-local-only",
-  "forkReleaseId": "idena-code-governance-testnet-fork-2026.07.13-v1",
+  "forkReleaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v5",
   "sourceDateEpoch": 1783963545,
   "toolchains": {
     "go": "1.26.5",
@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreidomnwe3m6xysdh3oimvwqz44tfbmah3vnl54z3rloysevlmikaam",
-          "expectedSha256": "6e636c4db3d7c4867db90cada19e72650b007dd5abef33b8add8912ab6214003",
-          "expectedSize": 48313
+          "expectedCid": "bafkreihnlj5vjfqodjhxayzia3fqrul32ml5kmnoujexfpojwpnqd45sf4",
+          "expectedSha256": "ed5a7b54960e1a4f70632806cb08d17bd317d531aea24972bdc9b3db01f3b22f",
+          "expectedSize": 47974
         },
         {
           "name": "experiment-1-full-consensus.json",
@@ -271,7 +271,7 @@
         {
           "repository": "P2poolBTC",
           "path": "compatibility/governance-day-fork-candidate-lock.json",
-          "sha256": "1274951a28f18fcd120745aada38c8f56dadc9d7fb336fd87eedf0ffa17b58cb",
+          "sha256": "cbf668d936e570108b8328fd05ca0928d00511361e904f4b2e6ca379abf6233c",
           "format": "digest-only"
         },
         {
@@ -283,7 +283,7 @@
         {
           "repository": "P2poolBTC",
           "path": "scripts/pohw-governance-runtime-gate.py",
-          "sha256": "cca48edcdad3442fa36a76399b46ad3a7d639e1705414c03420ad23ea076d43e",
+          "sha256": "8b751392840cd420a7459873d1038b160cb76e5d56da1b61bf9afb131f6af2e9",
           "format": "digest-only"
         },
         {
@@ -346,9 +346,9 @@
           "platform": "wasm",
           "architecture": "wasm32",
           "deterministic": true,
-          "expectedCid": "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i",
-          "expectedSha256": "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2",
-          "expectedSize": 303259
+          "expectedCid": "bafkreieagb6aslelkzer5rfjtsa7edksjwqefkiaqgkfnibyy44txvurmm",
+          "expectedSha256": "80307c092c8b56491ec4a99c81f20d524da042a900819456a038c7393bd69163",
+          "expectedSize": 307453
         }
       ],
       "reproducibility": "deterministic-core",

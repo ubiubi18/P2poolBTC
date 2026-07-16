@@ -129,6 +129,7 @@ ACTION_LABELS = {
     "release-build-evidence-published": "Wait for reproducible release-build evidence.",
     "external-security-review-passed": "Wait for the required independent security review to pass.",
     "registry-deployment-finalized": "Wait for finalized Idena registry deployment evidence.",
+    "registry-chain-verification": "Verify the exact registry deployment through a synchronized loopback Idena RPC before registering an identity.",
     "immutable-v2-anchor-policy-published": "Wait for the immutable V2 Idena anchor policy.",
     "independent-second-node-rehearsal-passed": "Wait for a successful independent second-node rehearsal.",
     "independent-registry-build-operators": "Wait for enough independent matching registry builds.",
@@ -456,15 +457,9 @@ def _stage_attested_executable(
             raise OnboardingError(f"cannot create an immutable snapshot for {label}: {exc}") from exc
         return
 
-    with tempfile.TemporaryDirectory(prefix="pohw-attested-executable-") as directory:
-        staged = Path(directory) / "artifact"
-        descriptor = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            _copy_attested_executable(source, descriptor, label, expected)
-        finally:
-            os.close(descriptor)
-        os.chmod(directory, 0o500)
-        yield StagedExecutable(str(staged))
+    raise OnboardingError(
+        "immutable attested executable snapshots are supported only on Linux"
+    )
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -1515,6 +1510,9 @@ def _verify_canonical_source(
         raise OnboardingError(
             "launch policy candidate differs from the independently selected ecosystem CID"
         )
+    source_car_binding = _hash_regular_file(
+        source_car, "P2poolBTC source CAR", MAX_CAR_BYTES
+    )
     bindings = _extract_ecosystem_bindings(candidate_ecosystem_car, expected_ecosystem)
     ecosystem_verification = _attested_command_json(
         governance_cli,
@@ -1626,12 +1624,18 @@ def _verify_canonical_source(
         or not _is_positive_int(verification.get("files"))
     ):
         raise OnboardingError("local source tree does not match the candidate ecosystem")
+    if (
+        _hash_regular_file(source_car, "P2poolBTC source CAR", MAX_CAR_BYTES)
+        != source_car_binding
+    ):
+        raise OnboardingError("source CAR changed during verification")
     commit, clean = _git_source_state(repo_root)
     commit_matches = bindings["source_commit"] is None or commit == bindings["source_commit"]
     if not clean or not commit_matches:
         raise OnboardingError("Git state does not match the canonical source metadata")
     return {
         **bindings,
+        "source_car_sha256": source_car_binding[0],
         "source_commit_matches": commit_matches,
         "governance_cli_verified": True,
     }
@@ -1648,8 +1652,15 @@ def verify_release(
     source_car: Path | None,
     governance_cli: Path | None,
     idena_anchor_policy: Path | None,
+    p2pool_node: Path | None,
+    idena_rpc_url: str,
+    idena_api_key_file: Path | None,
     run_tests: bool,
 ) -> dict[str, Any]:
+    if run_tests:
+        raise OnboardingError(
+            "onboarding never executes repository tests; use the documented disposable clean-room builder workflow"
+        )
     policy = validated["policy"]
     static_bindings_verified = _static_policy_bindings_verified(repo_root, validated)
     source_commit, source_tree_clean = _git_source_state(repo_root)
@@ -1676,7 +1687,12 @@ def verify_release(
     policy_status = policy.get("status")
     manifest_verified = static_bindings_verified
     launch_policy_verified = static_bindings_verified
-    if policy_status == READY_POLICY_STATUS and canonical_source_verified:
+    if (
+        policy_status == READY_POLICY_STATUS
+        and canonical_source_verified
+        and manifest_verified
+        and launch_policy_verified
+    ):
         manifest_command = (
             sys.executable,
             str(repo_root / "scripts" / "pohw-experiment-1-manifest.py"),
@@ -1707,25 +1723,39 @@ def verify_release(
                 policy_command.extend((option, str(value)))
         launch_policy_verified = _command_succeeded(policy_command, repo_root)
     focused_tests_passed: bool | None = None
-    if run_tests:
-        if source_tree_clean and canonical_source_verified:
-            tests = run_command(
+    registry_chain_verified = False
+    if (
+        policy_status == READY_POLICY_STATUS
+        and canonical_source_verified
+        and manifest_verified
+        and launch_policy_verified
+    ):
+        if (
+            p2pool_node is not None
+            and idena_anchor_policy is not None
+            and idena_api_key_file is not None
+        ):
+            result = _run_attested_command(
+                p2pool_node,
+                "p2pool-node",
+                source_binding["artifacts"]["p2pool-node"],  # type: ignore[index]
                 (
-                    "cargo",
-                    "test",
-                    "--locked",
-                    "--offline",
-                    "-p",
-                    "pohw-core",
-                    "-p",
-                    "p2pool-node",
+                    "verify-idena-registry-deployment",
+                    "--idena-anchor-policy",
+                    str(idena_anchor_policy),
+                    "--idena-rpc-url",
+                    idena_rpc_url,
+                    "--idena-api-key-file",
+                    str(idena_api_key_file),
                 ),
-                cwd=repo_root,
-                timeout=3600,
+                repo_root,
+                timeout=60,
             )
-            focused_tests_passed = tests.returncode == 0
-        else:
-            focused_tests_passed = False
+            registry_chain_verified = (
+                result.returncode == 0
+                and result.stdout
+                == b"Idena registry deployment verified against synchronized local RPC\n"
+            )
     final_commit, final_tree_clean = _git_source_state(repo_root)
     source_tree_clean = bool(
         source_tree_clean
@@ -1747,6 +1777,8 @@ def verify_release(
             missing.append("source-car-required")
         if not canonical_source_verified:
             missing.append("canonical-source-verification")
+        if not registry_chain_verified:
+            missing.append("registry-chain-verification")
     canonical_source_published = bool(
         launch_policy_verified
         and isinstance(policy.get("public_join_readiness"), dict)
@@ -1758,6 +1790,7 @@ def verify_release(
         and source_tree_clean
         and canonical_source_published
         and canonical_source_verified
+        and registry_chain_verified
         and policy_status == READY_POLICY_STATUS
         and not missing
     )
@@ -1771,9 +1804,11 @@ def verify_release(
         "candidate_ecosystem_cid": source_binding["ecosystem_cid"] if source_binding else None,
         "candidate_ecosystem_verified": source_binding is not None,
         "canonical_source_cid": source_binding["source_cid"] if source_binding else None,
+        "source_car_sha256": source_binding["source_car_sha256"] if source_binding else None,
         "canonical_source_verified": canonical_source_verified,
         "source_commit_matches": source_binding["source_commit_matches"] if source_binding else None,
         "governance_cli_verified": source_binding["governance_cli_verified"] if source_binding else False,
+        "registry_chain_verified": registry_chain_verified,
         "attested_artifacts": source_binding["artifacts"] if source_binding else {},
         "focused_tests_passed": focused_tests_passed,
         "canonical_source_published": canonical_source_published,
@@ -2333,21 +2368,22 @@ def build_receipt(
 ) -> dict[str, Any]:
     stages = {stage_id: "pending" for stage_id in STAGE_IDS}
     stages["system-check"] = "passed" if host["eligible_for_role"] else "blocked"
-    verification_ok = bool(
+    source_review_ok = bool(
         release["manifest_verified"]
         and release["launch_policy_verified"]
         and release["source_tree_clean"]
         and release.get("focused_tests_passed") is not False
     )
-    stages["release-verification"] = "passed" if verification_ok else "blocked"
     next_actions: list[str] = []
     if not host["eligible_for_role"]:
+        stages["release-verification"] = "blocked" if role["live_join"] else "not-required"
         journey = "host-not-ready"
         stages["identity-registration"] = "blocked" if role["live_join"] else "not-required"
         stages["network-join"] = "blocked" if role["live_join"] else "not-required"
         stages["success-proof"] = "blocked"
         next_actions.extend(host["failed_checks"])
-    elif not verification_ok:
+    elif not source_review_ok:
+        stages["release-verification"] = "blocked"
         journey = "verification-failed"
         stages["identity-registration"] = "blocked" if role["live_join"] else "not-required"
         stages["network-join"] = "blocked" if role["live_join"] else "not-required"
@@ -2363,30 +2399,37 @@ def build_receipt(
         if release.get("focused_tests_passed") is False:
             next_actions.append("pass-focused-tests")
     elif not role["live_join"]:
+        stages["release-verification"] = (
+            "passed" if release.get("canonical_source_verified") is True else "not-required"
+        )
         journey = "review-ready"
         stages["identity-registration"] = "not-required"
         stages["network-join"] = "not-required"
         stages["success-proof"] = "passed"
         next_actions.append("review-experiment-and-report-findings")
     elif not release["public_join_ready"]:
+        stages["release-verification"] = "blocked"
         journey = "blocked-public-join"
         stages["identity-registration"] = "blocked"
         stages["network-join"] = "blocked"
         stages["success-proof"] = "blocked"
         next_actions.extend(release["missing_release_gates"])
     elif live is None:
+        stages["release-verification"] = "passed"
         journey = "ready-for-identity-registration"
         stages["identity-registration"] = "pending"
         stages["network-join"] = "pending"
         stages["success-proof"] = "pending"
         next_actions.append("complete-local-identity-ownership-registration")
     elif _live_succeeded(live, live_policy):
+        stages["release-verification"] = "passed"
         journey = "live-join-verified"
         stages["identity-registration"] = "passed"
         stages["network-join"] = "passed"
         stages["success-proof"] = "passed"
         next_actions.append("keep-redacted-receipt-and-monitor-node")
     else:
+        stages["release-verification"] = "passed"
         journey = "live-join-incomplete"
         stages["identity-registration"] = "passed" if live["registered_miner"] else "blocked"
         stages["network-join"] = (
@@ -2482,9 +2525,11 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
                 "candidate_ecosystem_cid",
                 "candidate_ecosystem_verified",
                 "canonical_source_cid",
+                "source_car_sha256",
                 "canonical_source_verified",
                 "source_commit_matches",
                 "governance_cli_verified",
+                "registry_chain_verified",
                 "attested_artifacts",
                 "focused_tests_passed",
                 "canonical_source_published",
@@ -2503,6 +2548,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         "candidate_ecosystem_verified",
         "canonical_source_verified",
         "governance_cli_verified",
+        "registry_chain_verified",
         "canonical_source_published",
         "public_join_ready",
     ):
@@ -2536,6 +2582,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         if (
             not _is_dag_cbor_cid(release.get("candidate_ecosystem_cid"))
             or not _is_dag_cbor_cid(release.get("canonical_source_cid"))
+            or not _is_sha256(release.get("source_car_sha256"))
             or release.get("candidate_ecosystem_verified") is not True
             or release.get("source_commit_matches") is not True
             or release.get("governance_cli_verified") is not True
@@ -2567,6 +2614,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         release.get("candidate_ecosystem_cid") is not None
         or release.get("candidate_ecosystem_verified") is not False
         or release.get("canonical_source_cid") is not None
+        or release.get("source_car_sha256") is not None
         or release.get("source_commit_matches") is not None
         or release.get("governance_cli_verified") is not False
         or release["attested_artifacts"] != {}
@@ -2579,6 +2627,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         or release.get("source_tree_clean") is not True
         or release.get("canonical_source_published") is not True
         or release.get("canonical_source_verified") is not True
+        or release.get("registry_chain_verified") is not True
         or missing_release_gates
     ):
         raise OnboardingError("receipt public-join claim is inconsistent")
@@ -2756,6 +2805,21 @@ def render_html(receipt: Mapping[str, Any]) -> str:
         )
         for action in receipt["next_action_codes"]
     ) or "<li>None</li>"
+    release = receipt["release"]
+    release_rows = "".join(
+        "<li><strong>{}</strong><code>{}</code></li>".format(
+            html.escape(label), html.escape(str(value))
+        )
+        for label, value in (
+            ("Canonical source CID", release.get("canonical_source_cid") or "unavailable"),
+            ("Source CAR SHA-256", release.get("source_car_sha256") or "unavailable"),
+            ("Git commit metadata", release.get("source_commit") or "unavailable"),
+            (
+                "Registry chain verification",
+                "passed" if release.get("registry_chain_verified") is True else "not verified",
+            ),
+        )
+    )
     document = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
@@ -2774,6 +2838,8 @@ li { display: flex; justify-content: space-between; gap: 16px; padding: 13px 0; 
 <header><div class="eyebrow">Experimental, no-value network</div><h1>Community onboarding receipt</h1>
 <div class="status">@@JOURNEY@@</div><p>Role: <strong>@@ROLE@@</strong></p></header>
 <section><h2>Five-stage journey</h2><ul>@@STAGES@@</ul></section>
+<section><h2>Verified release binding</h2><ul>@@RELEASE@@</ul>
+<p>The source CID and CAR digest are authoritative. The Git commit is mirror metadata only.</p></section>
 <section><h2>Next actions</h2><ul>@@ACTIONS@@</ul></section>
 <section class="note"><strong>Privacy:</strong> this report intentionally excludes identity, miner, peer, wallet, RPC-secret, and local-path data. It is diagnostic evidence, not a release or chain attestation.</section>
 </main></body></html>
@@ -2784,6 +2850,7 @@ li { display: flex; justify-content: space-between; gap: 16px; padding: 13px 0; 
         )
         .replace("@@ROLE@@", html.escape(receipt["role"].replace("-", " ").title()))
         .replace("@@STAGES@@", stage_rows)
+        .replace("@@RELEASE@@", release_rows)
         .replace("@@ACTIONS@@", actions)
     )
 
@@ -2801,7 +2868,9 @@ Do not add identity addresses, miner IDs, peer endpoints, wallet data, RPC crede
 - Receipt schema: `{receipt['schema_version']}`
 - Role: `{receipt['role']}`
 - Journey status: `{receipt['journey_status']}`
-- Exact source commit: `{receipt['release']['source_commit'] or 'unavailable'}`
+- Canonical source CID: `{receipt['release']['canonical_source_cid'] or 'unavailable'}`
+- Source CAR SHA-256: `{receipt['release']['source_car_sha256'] or 'unavailable'}`
+- Git commit metadata: `{receipt['release']['source_commit'] or 'unavailable'}`
 - Activation ID: `{receipt['release']['activation_id'] or 'unavailable'}`
 - Policy status: `{receipt['release']['policy_status']}`
 - Manifest verified: `{str(receipt['release']['manifest_verified']).lower()}`
@@ -2881,7 +2950,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--run-tests",
         action="store_true",
-        help="run the focused locked Rust tests offline on a clean tree",
+        help="refuse and direct the operator to the disposable clean-room builder workflow",
     )
     parser.add_argument("--json", action="store_true", help="print only the redacted receipt JSON")
     parser.add_argument("--open-report", action="store_true", help="open the generated local static report")
@@ -2903,6 +2972,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--governance-cli", type=Path)
     parser.add_argument("--idena-anchor-policy", type=Path)
+    parser.add_argument(
+        "--idena-rpc-url",
+        default="http://127.0.0.1:9009",
+        help="synchronized loopback Idena RPC used to verify the registry deployment",
+    )
+    parser.add_argument("--idena-api-key-file", type=Path)
     parser.add_argument("--probe-live", action="store_true", help="read-only live proof; policy must already be ready")
     parser.add_argument("--p2pool-node", type=Path)
     parser.add_argument("--p2pool-datadir", type=Path)
@@ -2953,6 +3028,9 @@ def execute(
         source_car=args.source_car,
         governance_cli=args.governance_cli,
         idena_anchor_policy=args.idena_anchor_policy,
+        p2pool_node=args.p2pool_node,
+        idena_rpc_url=args.idena_rpc_url,
+        idena_api_key_file=args.idena_api_key_file,
         run_tests=args.run_tests,
     )
     live = None

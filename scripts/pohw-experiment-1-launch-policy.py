@@ -15,7 +15,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -305,15 +304,9 @@ def stage_attested_executable(
             ) from exc
         return
 
-    with tempfile.TemporaryDirectory(prefix="pohw-attested-executable-") as directory:
-        staged = Path(directory) / "artifact"
-        descriptor = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            copy_attested_executable(source, descriptor, label, expected_sha256)
-        finally:
-            os.close(descriptor)
-        os.chmod(directory, 0o500)
-        yield StagedExecutable(str(staged))
+    raise LaunchPolicyError(
+        "immutable attested executable snapshots are supported only on Linux"
+    )
 
 
 def run_bounded(

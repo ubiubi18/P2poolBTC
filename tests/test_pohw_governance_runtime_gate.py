@@ -288,6 +288,10 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
             ROOT / "compatibility" / "governance-day-local-candidate-lock.json"
         )
         plan = MODULE.load_json(ROOT / "compatibility" / "governance-build-plan-v1.json")
+        candidate = MODULE.load_json(
+            ROOT / "compatibility" / "governance-day-fork-candidate-lock.json"
+        )
+        self.assertEqual(plan["forkReleaseId"], candidate["releaseId"])
         target = next(item for item in plan["targets"] if item["id"] == "governance-contract")
         artifact = next(item for item in target["artifacts"] if item["name"] == "idena-code-governance.wasm")
         locked = lock["contractArtifact"]
@@ -321,10 +325,10 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
             ROOT / "compatibility" / "governance-fork-lock.json"
         )["governancePrototype"]["contractArtifact"]
 
-        self.assertEqual(current["sha256"], "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2")
-        self.assertEqual(current["size"], 303259)
-        self.assertEqual(current["cid"], "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i")
-        self.assertEqual(current["abiExports"], 65)
+        self.assertEqual(current["sha256"], "80307c092c8b56491ec4a99c81f20d524da042a900819456a038c7393bd69163")
+        self.assertEqual(current["size"], 307453)
+        self.assertEqual(current["cid"], "bafkreieagb6aslelkzer5rfjtsa7edksjwqefkiaqgkfnibyy44txvurmm")
+        self.assertEqual(current["abiExports"], 67)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"{current['size']:,} bytes", readme)
         self.assertEqual(

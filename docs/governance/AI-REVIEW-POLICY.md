@@ -57,11 +57,16 @@ owner's qualifying attestations must use one model-family claim. Repeated
 attestations can contribute to the attestation count, but the owner and family
 count only once for diversity. Model-family and provider labels remain
 self-asserted audit metadata until authenticated provider receipts exist.
-Consequently, this contract version refuses critical-proposal acceptance and
-exposes `attestationDiversityCapability()` as
-`blocked-unverified-v1`. Enabling critical execution requires a separate DAO
-contract migration with objective receipt verification; there is no admin or
-proposal switch in the current contract.
+Consequently, this contract version refuses critical and consensus proposal
+acceptance and exposes `attestationDiversityCapability()` as
+`blocked-unverified-v1`. There is no admin or proposal switch that enables the
+reserved capability in place. A migration can nevertheless reach a separately
+audited successor through `owner-authenticated-bootstrap-v1`: it ignores
+self-asserted family/platform diversity and instead requires five distinct
+eligible review owners, three builder owners, three availability owners,
+complete leaves, matching artifacts, and no unresolved critical findings,
+waiver, or build conflict. All critical vote, breadth, challenge, and timelock
+gates still apply.
 
 An unresolved critical finding blocks finalization once the configured number
 of distinct reviewer owners corroborates it. A waiver is a separate immutable

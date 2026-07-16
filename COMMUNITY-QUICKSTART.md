@@ -14,12 +14,14 @@ mainnet key in the experiment.
 
 Until the public interlock opens, community onboarding has three independent
 preparation tracks. None imports an identity, contacts a peer, starts a service,
-or mines. Record the exact commit from `git rev-parse HEAD` for every result.
+or mines. Record the exact commit from `git rev-parse HEAD` as mirror metadata.
+When canonical artifacts exist, also record the source CID and source-CAR
+SHA-256; those content identities are authoritative, while the commit is not.
 
 ### Observer or source reviewer
 
 ```sh
-./scripts/pohw-community-onboard.sh --role observer --run-tests
+./scripts/pohw-community-onboard.sh --role observer
 ```
 
 The expected result is `review-ready`. Report reproducible defects with the
@@ -28,8 +30,11 @@ finding.
 
 ### Independent miner-registry builder
 
-Use a clean machine or clean-room VM that is not operated by the first builder.
-Use the exact locked Node.js and pnpm versions, then build from source:
+Treat the source tree as hostile. Use a disposable clean-room VM that is not
+operated by the first builder, mount no wallets or credentials, keep the source
+read-only where practical, and disable network access after a separately logged
+dependency-fetch phase. Use the exact locked Node.js and pnpm versions, then
+build from source:
 
 ```sh
 test "$(node --version)" = "v24.18.0"
@@ -75,7 +80,7 @@ not by itself a builder, audit, availability, or deployment attestation.
 
 | Role | Minimum checked by the tool | What it does now |
 | --- | --- | --- |
-| `observer` | 2 CPU cores, 4 GiB RAM, 5 GiB free | Builds/tests and reviews locally; never joins the network |
+| `observer` | 2 CPU cores, 4 GiB RAM, 5 GiB free | Performs static source/policy checks; never executes repository tests or joins the network |
 | `pruned-miner` | Linux, systemd, SSD, 4 cores, 16 GiB RAM, 100 GiB free | Checks readiness for the future pruned live-node path |
 | `archive-operator` | Linux, systemd, SSD, 4 cores, 16 GiB RAM, 900 GiB free | Checks readiness for the future archival-node path |
 
@@ -123,13 +128,16 @@ On Windows PowerShell, run the same state machine with:
 .\scripts\pohw-community-onboard.ps1 --role observer
 ```
 
-This default check does not contact a package registry. For a deeper review,
-explicitly fetch the lockfile-pinned Rust dependencies, inspect that fetch, and
-then run the tests offline through the same tool:
+This default check does not contact a package registry or execute repository
+build/test commands. `--run-tests` deliberately refuses: onboarding receipts
+must not turn hostile source into an unsandboxed command runner. For a deeper
+review, use a disposable VM with no wallets, SSH agent, provider tokens, API
+keys, or host mounts. Log a distinct dependency-fetch phase, disconnect the
+network, then run the locked checks directly inside that disposable environment:
 
 ```sh
 cargo fetch --locked
-./scripts/pohw-community-onboard.sh --role observer --run-tests
+cargo test --locked --workspace
 ```
 
 For a future pruned-node host readiness check:
@@ -140,9 +148,9 @@ For a future pruned-node host readiness check:
   --storage-path /srv/sharechain
 ```
 
-Today, a clean observer checkout should end at `review-ready`. If `--run-tests`
-was selected, that result also requires the offline focused tests to pass. A miner should
-end at `blocked-public-join`, because the independent release, registry, and
+Today, a clean observer checkout should end at `review-ready`; this means the
+guarded static review completed, not that project tests or release verification
+passed. A miner should end at `blocked-public-join`, because the independent release, registry, and
 second-node gates are not complete. That block is a safety result, not an
 installation failure. Do not bypass it.
 
@@ -161,7 +169,7 @@ posting anything.
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
-| `review-ready` | Source, manifest, policy, host, and requested tests passed for an offline review | Review code and docs; report findings with `issue-report.md` |
+| `review-ready` | Guarded static source, manifest, policy, and host checks completed; project code was not executed | Review code and docs; use a disposable clean-room builder for tests |
 | `host-not-ready` | The selected role exceeds this host or required tools are missing | Read the plain-language next actions; choose `observer` if appropriate |
 | `verification-failed` | Source is dirty or a pinned verifier/test failed | Stop and use a clean exact checkout; do not override the failure |
 | `blocked-public-join` | Local checks passed, but public release gates remain incomplete | Wait; do not register an identity or start services |
@@ -181,7 +189,8 @@ generated `issue-report.md` and the repository's
 then include:
 
 - the receipt schema, selected role, journey status, and stage statuses;
-- the exact source commit you reviewed;
+- the canonical source CID and source-CAR SHA-256 when published;
+- the exact Git commit reviewed as optional mirror metadata;
 - the next-action codes;
 - what you expected and what happened; and
 - the smallest reproducible command that does not contain private data.
@@ -210,6 +219,8 @@ READINESS_EVIDENCE_CAR='/path/to/deployment-readiness-evidence.car'
 ANCHOR_POLICY='/path/to/finalized-idena-anchor-policy-v2.json'
 GOVERNANCE_CLI='/path/to/manifest-attested/pohw-governance'
 P2POOL_NODE='/usr/local/libexec/p2pool-experiment-1/p2pool-node'
+IDENA_RPC_URL='http://127.0.0.1:9009'
+IDENA_API_KEY_FILE='/path/to/private/idena-api.key'
 BITCOIN_CLI='/usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli'
 STORAGE_ROOT='/srv'
 POHW_DATADIR='/srv/sharechain/<activation-specific-directory>'
@@ -228,6 +239,8 @@ MINER_ID='<your locally registered miner ID>'
   --readiness-car "$READINESS_CAR" \
   --readiness-evidence-car "$READINESS_EVIDENCE_CAR" \
   --idena-anchor-policy "$ANCHOR_POLICY" \
+  --idena-rpc-url "$IDENA_RPC_URL" \
+  --idena-api-key-file "$IDENA_API_KEY_FILE" \
   --probe-live \
   --p2pool-node "$P2POOL_NODE" \
   --p2pool-datadir "$POHW_DATADIR" \
@@ -237,6 +250,13 @@ MINER_ID='<your locally registered miner ID>'
   --bitcoin-datadir "$BITCOIN_DATADIR" \
   --bitcoin-cookie-file "$BITCOIN_COOKIE"
 ```
+
+This evidence-bound live verifier requires Linux because it executes reviewed
+binaries only from sealed immutable `memfd` snapshots. Other platforms fail
+closed instead of staging a mutable temporary executable. The result cannot be
+`ready-for-identity-registration` unless the attested `p2pool-node` verifies the
+exact registry deployment and finality through that synchronized loopback Idena
+RPC. Never paste the API key or its file contents into a report.
 
 `STORAGE_ROOT` must be an existing non-symlink root on the filesystem that
 contains both data directories. It may be service-owned; the checker requires
