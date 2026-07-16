@@ -76,9 +76,11 @@ identities, at least three Verified or Human. Critical proposals need twelve,
 at least five Verified or Human. Breadth does not replace weighted voting.
 
 PoAW and proof-of-verification-work are independent gates. Normal proposals
-need 3 reviews across 2 model/runtime families and 2 eligible owners, plus 2
-builders. Critical proposals need 5 reviews across 3 families and 3 owners,
-plus 3 builders on at least 2 platform families. Normal availability requires
+need 3 reviews, 2 owner-bound runtime groups, 2 model-family claims, and 2
+eligible owners, plus 2 builders. Critical proposals need 5 reviews, 3 owner
+groups, 3 model-family claims, and 3 owners, plus 3 builders on at least 2
+platform families. One owner can submit at most two reviews and can contribute
+only one qualifying model-family claim per round. Normal availability requires
 2 independent providers; critical availability requires 3.
 
 PoS alone, PoHW alone, AI alone, or build workers alone cannot accept a

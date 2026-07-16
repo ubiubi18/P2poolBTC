@@ -1,0 +1,109 @@
+{
+  "schema_version": "pohw-community-onboarding-profile/v1",
+  "experiment_id": "pohw-experiment-1-full-consensus",
+  "policy_path": "compatibility/experiment-1-launch-policy.json",
+  "manifest_path": "compatibility/experiment-1-full-consensus.json",
+  "roles": {
+    "observer": {
+      "live_join": false,
+      "minimum_cpu_cores": 2,
+      "minimum_memory_gib": 4,
+      "minimum_free_storage_gib": 5,
+      "requires_linux": false,
+      "requires_systemd": false,
+      "requires_ssd": false,
+      "required_command_groups": [
+        [
+          "git"
+        ],
+        [
+          "python3"
+        ]
+      ]
+    },
+    "pruned-miner": {
+      "live_join": true,
+      "minimum_cpu_cores": 4,
+      "minimum_memory_gib": 16,
+      "minimum_free_storage_gib": 100,
+      "requires_linux": true,
+      "requires_systemd": true,
+      "requires_ssd": true,
+      "required_command_groups": [
+        [
+          "git"
+        ],
+        [
+          "cargo"
+        ],
+        [
+          "python3"
+        ],
+        [
+          "cmake"
+        ],
+        [
+          "ninja"
+        ],
+        [
+          "c++",
+          "g++",
+          "clang++"
+        ],
+        [
+          "systemctl"
+        ]
+      ]
+    },
+    "archive-operator": {
+      "live_join": true,
+      "minimum_cpu_cores": 4,
+      "minimum_memory_gib": 16,
+      "minimum_free_storage_gib": 900,
+      "requires_linux": true,
+      "requires_systemd": true,
+      "requires_ssd": true,
+      "required_command_groups": [
+        [
+          "git"
+        ],
+        [
+          "cargo"
+        ],
+        [
+          "python3"
+        ],
+        [
+          "cmake"
+        ],
+        [
+          "ninja"
+        ],
+        [
+          "c++",
+          "g++",
+          "clang++"
+        ],
+        [
+          "systemctl"
+        ]
+      ]
+    }
+  },
+  "live_success": {
+    "checkpoint_height": 958175,
+    "checkpoint_hash": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
+    "rpc_port": 40414,
+    "minimum_bitcoin_peers": 1,
+    "minimum_reachable_gossip_peers": 1,
+    "minimum_active_shares": 1,
+    "minimum_miner_active_shares": 1,
+    "maximum_miner_share_age_seconds": 3600,
+    "maximum_core_tip_age_seconds": 7200,
+    "maximum_future_clock_skew_seconds": 300,
+    "minimum_snapshot_voters": 3,
+    "require_registered_miner": true,
+    "require_verified_snapshot": true,
+    "require_accepted_bitcoin_template": true
+  }
+}

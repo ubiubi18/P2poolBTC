@@ -1,5 +1,46 @@
 import { u128Safe as u128 } from "as-bignum/assembly";
 import {
+  GOV_CANCELLATION_FEE_ATOMS,
+  GOV_COMMIT_END_OFFSET,
+  GOV_COMMIT_START_OFFSET,
+  GOV_CRITICAL_CRITICAL_FINDING_OWNER_THRESHOLD,
+  GOV_CRITICAL_GRACE_BLOCKS,
+  GOV_CRITICAL_MIN_AI_ATTESTATIONS,
+  GOV_CRITICAL_MIN_AI_FAMILIES,
+  GOV_CRITICAL_MIN_AI_OWNER_IDENTITIES,
+  GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS,
+  GOV_CRITICAL_MIN_AVAILABILITY_PROVIDERS,
+  GOV_CRITICAL_MIN_BUILDERS,
+  GOV_CRITICAL_MIN_BUILDER_PLATFORMS,
+  GOV_CRITICAL_MIN_PARTICIPATING_IDENTITIES,
+  GOV_CRITICAL_MIN_STRONG_YES,
+  GOV_CRITICAL_MIN_YES_IDENTITIES,
+  GOV_CRITICAL_TURNOUT_QUORUM_BPS,
+  GOV_CRITICAL_YES_THRESHOLD_BPS,
+  GOV_EPOCH_EXECUTION_WINDOW_BLOCKS,
+  GOV_MAX_PROPOSALS_PER_EPOCH,
+  GOV_MIN_ACTIVE_STAKE_ATOMS,
+  GOV_NORMAL_CRITICAL_FINDING_OWNER_THRESHOLD,
+  GOV_NORMAL_GRACE_BLOCKS,
+  GOV_NORMAL_MIN_AI_ATTESTATIONS,
+  GOV_NORMAL_MIN_AI_FAMILIES,
+  GOV_NORMAL_MIN_AI_OWNER_IDENTITIES,
+  GOV_NORMAL_MIN_AI_RUNTIME_GROUPS,
+  GOV_NORMAL_MIN_AVAILABILITY_PROVIDERS,
+  GOV_NORMAL_MIN_BUILDERS,
+  GOV_NORMAL_MIN_BUILDER_PLATFORMS,
+  GOV_NORMAL_MIN_PARTICIPATING_IDENTITIES,
+  GOV_NORMAL_MIN_STRONG_YES,
+  GOV_NORMAL_MIN_YES_IDENTITIES,
+  GOV_NORMAL_TURNOUT_QUORUM_BPS,
+  GOV_NORMAL_YES_THRESHOLD_BPS,
+  GOV_NO_QUORUM_FEE_ATOMS,
+  GOV_PROPOSAL_CUTOFF_OFFSET,
+  GOV_REJECTED_BOND_BURN_BPS,
+  GOV_REVEAL_END_OFFSET,
+  GOV_STALE_PROCESSING_FEE_ATOMS,
+} from "./generated_parameters";
+import {
   argumentString,
   burn,
   bytesToHex,
@@ -51,17 +92,16 @@ const METRICS_ROOT_KEY = "governance:metrics-root";
 const METRICS_EPOCH_KEY = "governance:metrics-epoch";
 // Replay domain for the explicitly inactive governance-day fork profile.
 // This contract build is not valid for the legacy Idena mainnet profile.
-const CHAIN_ID = "idena-code-governance-day-local-testnet-v2:10002";
-const MAX_EPOCH_PROPOSALS: u32 = 64;
-const PROPOSAL_CUTOFF_OFFSET: u64 = 40;
-const COMMIT_START_OFFSET: u64 = 80;
-const COMMIT_END_OFFSET: u64 = 100;
-const REVEAL_END_OFFSET: u64 = 120;
-const NORMAL_GRACE_BLOCKS: u64 = 60;
-const CRITICAL_GRACE_BLOCKS: u64 = 180;
-const EXECUTION_WINDOW_BLOCKS: u64 = 600;
-const MIN_ACTIVE_STAKE_ATOMS = "1000000000000000000";
-const PROCESSING_FEE_ATOMS = "100000000000000000";
+const CHAIN_ID = "idena-code-governance-day-local-testnet-v3:10002";
+const MAX_EPOCH_PROPOSALS: u32 = GOV_MAX_PROPOSALS_PER_EPOCH;
+const PROPOSAL_CUTOFF_OFFSET: u64 = GOV_PROPOSAL_CUTOFF_OFFSET;
+const COMMIT_START_OFFSET: u64 = GOV_COMMIT_START_OFFSET;
+const COMMIT_END_OFFSET: u64 = GOV_COMMIT_END_OFFSET;
+const REVEAL_END_OFFSET: u64 = GOV_REVEAL_END_OFFSET;
+const NORMAL_GRACE_BLOCKS: u64 = GOV_NORMAL_GRACE_BLOCKS;
+const CRITICAL_GRACE_BLOCKS: u64 = GOV_CRITICAL_GRACE_BLOCKS;
+const EXECUTION_WINDOW_BLOCKS: u64 = GOV_EPOCH_EXECUTION_WINDOW_BLOCKS;
+const MIN_ACTIVE_STAKE_ATOMS = GOV_MIN_ACTIVE_STAKE_ATOMS;
 const BALLOT_DOMAIN = "IDENA_CODE_DAO_EPOCH_BALLOT_V1";
 const PROPOSAL_SET_DOMAIN = "IDENA_CODE_DAO_PROPOSAL_SET_V1";
 const MAX_CANONICAL_HISTORY_PAGE: u32 = 64;
@@ -137,7 +177,7 @@ export function cancelProposalBeforeCutoff(proposalIdPtr: usize): usize {
   assert(proposal.proposer == callerHex(), "only the authenticated proposer may cancel");
   assert(proposal.stakeEpoch == epoch, "proposal belongs to another governance epoch");
   assert(proposal.state == STATE_DRAFT || proposal.state == STATE_REVIEW_OPEN || proposal.state == STATE_REVERT_PROPOSED, "proposal can no longer be cancelled");
-  const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
+  const fee = minAmount(proposal.bondAmount(), parseAmount(GOV_CANCELLATION_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_CANCELLED_BEFORE_CUTOFF;
   releaseProposalCandidateLock(proposal);
@@ -325,11 +365,13 @@ function finalizeEpoch(epoch: u16): usize {
       continue;
     }
     const critical = proposal.isCritical();
-    const quorumBps: u16 = critical ? 3000 : 2000;
-    const yesBps: u16 = critical ? 7500 : 6667;
-    const participantMinimum: u32 = critical ? 12 : 7;
-    const yesMinimum: u32 = critical ? 12 : 7;
-    const strongMinimum: u32 = critical ? 5 : 3;
+    const quorumBps: u16 = critical ? GOV_CRITICAL_TURNOUT_QUORUM_BPS : GOV_NORMAL_TURNOUT_QUORUM_BPS;
+    const yesBps: u16 = critical ? GOV_CRITICAL_YES_THRESHOLD_BPS : GOV_NORMAL_YES_THRESHOLD_BPS;
+    const participantMinimum: u32 = critical
+      ? GOV_CRITICAL_MIN_PARTICIPATING_IDENTITIES
+      : GOV_NORMAL_MIN_PARTICIPATING_IDENTITIES;
+    const yesMinimum: u32 = critical ? GOV_CRITICAL_MIN_YES_IDENTITIES : GOV_NORMAL_MIN_YES_IDENTITIES;
+    const strongMinimum: u32 = critical ? GOV_CRITICAL_MIN_STRONG_YES : GOV_NORMAL_MIN_STRONG_YES;
     const decisive = checkedAmountAdd(proposal.yesWeightAmount(), proposal.noWeightAmount());
     const turnout = checkedAmountAdd(decisive, proposal.abstainWeightAmount());
     const participants = storedU32(epochParticipantCountKey(proposal.id));
@@ -624,12 +666,30 @@ function addEpochVote(proposal: Proposal, choice: string, weight: u128, state: s
 }
 
 export function epochAttestationGatesPass(proposal: Proposal): bool {
-  const minimumAgents: u32 = proposal.isCritical() ? 3 : 2;
-  const minimumFamilies: u32 = proposal.isCritical() ? 2 : 1;
-  const minimumBuilders: u32 = proposal.isCritical() ? 3 : 2;
-  const minimumBuilderPlatforms: u32 = proposal.isCritical() ? 2 : 1;
-  const minimumAvailabilityProviders: u32 = proposal.isCritical() ? 3 : 2;
-  const criticalFindingOwnerThreshold: u32 = proposal.isCritical() ? 3 : 2;
+  const minimumAgents: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AI_ATTESTATIONS
+    : GOV_NORMAL_MIN_AI_ATTESTATIONS;
+  const minimumFamilies: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AI_FAMILIES
+    : GOV_NORMAL_MIN_AI_FAMILIES;
+  const minimumRuntimeGroups: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS
+    : GOV_NORMAL_MIN_AI_RUNTIME_GROUPS;
+  const minimumOwners: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AI_OWNER_IDENTITIES
+    : GOV_NORMAL_MIN_AI_OWNER_IDENTITIES;
+  const criticalFindingThreshold: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_CRITICAL_FINDING_OWNER_THRESHOLD
+    : GOV_NORMAL_CRITICAL_FINDING_OWNER_THRESHOLD;
+  const minimumBuilders: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_BUILDERS
+    : GOV_NORMAL_MIN_BUILDERS;
+  const minimumBuilderPlatforms: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_BUILDER_PLATFORMS
+    : GOV_NORMAL_MIN_BUILDER_PLATFORMS;
+  const minimumAvailabilityProviders: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AVAILABILITY_PROVIDERS
+    : GOV_NORMAL_MIN_AVAILABILITY_PROVIDERS;
   const minimumExpiryValue = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
   const grace = proposal.isCritical() ? CRITICAL_GRACE_BLOCKS : NORMAL_GRACE_BLOCKS;
   const dynamicExecutionStart = checkedBlockAdd(currentBlock(), grace);
@@ -642,8 +702,12 @@ export function epochAttestationGatesPass(proposal: Proposal): bool {
     && proposal.availabilitySubmittedCount == proposal.availabilityLeafCount
     && proposal.agentCount >= minimumAgents
     && proposal.agentModelCount >= minimumFamilies
-    && proposal.agentOwnerCount >= (proposal.isCritical() ? 3 : 2)
-    && (proposal.unresolvedCriticalCount < criticalFindingOwnerThreshold || proposal.waiverCid.length > 0)
+    && proposal.agentRuntimeCount >= minimumRuntimeGroups
+    && proposal.agentOwnerCount >= minimumOwners
+    && (
+      proposal.unresolvedCriticalCount < criticalFindingThreshold
+        || (proposal.isCritical() && proposal.waiverCid.length > 0)
+    )
     && proposal.builderOwnerCount >= minimumBuilders
     && proposal.builderPlatformCount >= minimumBuilderPlatforms
     && proposal.artifactDigest.length == 64
@@ -653,7 +717,7 @@ export function epochAttestationGatesPass(proposal: Proposal): bool {
 }
 
 function settleNoQuorum(proposal: Proposal): void {
-  const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
+  const fee = minAmount(proposal.bondAmount(), parseAmount(GOV_NO_QUORUM_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_NO_QUORUM;
   releaseProposalCandidateLock(proposal);
@@ -663,7 +727,7 @@ function settleNoQuorum(proposal: Proposal): void {
 }
 
 function settleIncompleteProposal(proposal: Proposal): void {
-  const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
+  const fee = minAmount(proposal.bondAmount(), parseAmount(GOV_NO_QUORUM_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_EXPIRED;
   releaseProposalCandidateLock(proposal);
@@ -672,20 +736,20 @@ function settleIncompleteProposal(proposal: Proposal): void {
 }
 
 function settleEpochRejected(proposal: Proposal): void {
-  const half = proposal.bondAmount() / u128.fromU64(2);
-  const treasury = proposal.bondAmount() - half;
+  const burned = basisPoints(proposal.bondAmount(), GOV_REJECTED_BOND_BURN_BPS);
+  const treasury = proposal.bondAmount() - burned;
   proposal.refundableBond = "0";
   proposal.state = STATE_REJECTED;
   releaseProposalCandidateLock(proposal);
   releaseConfiscatedProposalReservation(proposal);
   saveProposal(proposal);
-  if (!half.isZero()) burn(half);
+  if (!burned.isZero()) burn(burned);
   addTreasury(treasury);
-  emitVersionedEvent("ProposalRejectedByEpochV1", [proposal.id, half.toString(), treasury.toString()]);
+  emitVersionedEvent("ProposalRejectedByEpochV1", [proposal.id, burned.toString(), treasury.toString()]);
 }
 
 function settleEpochStale(proposal: Proposal): void {
-  const fee = minAmount(proposal.bondAmount(), parseAmount(PROCESSING_FEE_ATOMS));
+  const fee = minAmount(proposal.bondAmount(), parseAmount(GOV_STALE_PROCESSING_FEE_ATOMS));
   proposal.refundableBond = (proposal.bondAmount() - fee).toString();
   proposal.state = STATE_STALE;
   releaseProposalCandidateLock(proposal);
@@ -888,6 +952,13 @@ function writeU64(target: Uint8Array, offset: i32, value: u64): i32 {
 function hashText(value: string): string { return bytesToHex(sha256(stringToBytes(value))); }
 function validHash(value: string): string { assert(isCanonicalHash(value), "value must be lowercase SHA-256"); return value; }
 function minAmount(left: u128, right: u128): u128 { return left < right ? left : right; }
+function basisPoints(value: u128, bps: u16): u128 {
+  assert(bps <= 10000, "invalid basis points");
+  const scale = u128.fromU64(10000);
+  const quotient = value / scale;
+  const remainder = value % scale;
+  return quotient * u128.fromU64(bps) + (remainder * u128.fromU64(bps)) / scale;
+}
 function canonicalAddress(value: string): string {
   assert(value.length == 42 && value.startsWith("0x"), "address must be canonical 0x hex");
   const hex = value.substring(2);

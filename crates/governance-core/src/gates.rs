@@ -11,6 +11,7 @@ pub struct AcceptanceEvidence {
     pub distinct_yes_identities: u32,
     pub verified_or_human_yes_identities: u32,
     pub valid_agent_attestations: u32,
+    pub distinct_agent_runtime_groups: u32,
     pub distinct_agent_families: u32,
     pub distinct_agent_owner_identities: u32,
     pub unresolved_critical_findings: u32,
@@ -63,9 +64,10 @@ pub fn evaluate_gates(
     let pohw_passed = evidence.distinct_yes_identities >= parameters.minimum_yes_identities
         && evidence.verified_or_human_yes_identities >= parameters.minimum_verified_or_human_yes;
     let poaw_passed = evidence.valid_agent_attestations >= parameters.minimum_agent_attestations
+        && evidence.distinct_agent_runtime_groups >= parameters.minimum_agent_runtime_groups
         && evidence.distinct_agent_families >= parameters.minimum_agent_families
         && evidence.distinct_agent_owner_identities >= parameters.minimum_agent_owners
-        && evidence.unresolved_critical_findings == 0;
+        && evidence.unresolved_critical_findings < parameters.critical_finding_owner_threshold;
     let build_passed = evidence.valid_builders >= parameters.minimum_builders
         && evidence.distinct_builder_platforms >= parameters.minimum_builder_platforms
         && evidence.matching_core_artifact_digests;
@@ -87,8 +89,9 @@ pub fn evaluate_gates(
         poaw: gate(
             poaw_passed,
             format!(
-                "attestations={} families={} owners={} unresolved-critical={}",
+                "attestations={} runtimes={} families={} owners={} unresolved-critical={}",
                 evidence.valid_agent_attestations,
+                evidence.distinct_agent_runtime_groups,
                 evidence.distinct_agent_families,
                 evidence.distinct_agent_owner_identities,
                 evidence.unresolved_critical_findings
@@ -177,6 +180,7 @@ mod tests {
             distinct_yes_identities: 7,
             verified_or_human_yes_identities: 3,
             valid_agent_attestations: 3,
+            distinct_agent_runtime_groups: 2,
             distinct_agent_families: 2,
             distinct_agent_owner_identities: 2,
             unresolved_critical_findings: 0,
@@ -206,6 +210,58 @@ mod tests {
         assert!(result.pos.passed);
         assert!(!result.poaw.passed);
         assert!(!result.accepted);
+
+        let mut missing_runtime_operator = evidence.clone();
+        missing_runtime_operator.distinct_agent_runtime_groups = 1;
+        let result = evaluate_gates(
+            RiskClass::Normal,
+            &parameters.normal,
+            &parameters.critical,
+            &missing_runtime_operator,
+        );
+        assert!(result.pos.passed);
+        assert!(!result.poaw.passed);
+        assert!(!result.accepted);
+    }
+
+    #[test]
+    fn critical_findings_require_distinct_owner_corroboration() {
+        let parameters = GovernanceParameterSetV1::experimental_defaults();
+        let mut evidence = AcceptanceEvidence {
+            yes_weight: 25,
+            no_weight: 5,
+            abstain_weight: 0,
+            total_registered_weight: 100,
+            distinct_yes_identities: 7,
+            verified_or_human_yes_identities: 3,
+            valid_agent_attestations: 3,
+            distinct_agent_runtime_groups: 2,
+            distinct_agent_families: 2,
+            distinct_agent_owner_identities: 2,
+            unresolved_critical_findings: 1,
+            valid_builders: 2,
+            distinct_builder_platforms: 1,
+            matching_core_artifact_digests: true,
+            independent_data_availability_providers: 2,
+        };
+        let lone_reviewer = evaluate_gates(
+            RiskClass::Normal,
+            &parameters.normal,
+            &parameters.critical,
+            &evidence,
+        );
+        assert!(lone_reviewer.poaw.passed);
+        assert!(lone_reviewer.accepted);
+
+        evidence.unresolved_critical_findings = 2;
+        let corroborated = evaluate_gates(
+            RiskClass::Normal,
+            &parameters.normal,
+            &parameters.critical,
+            &evidence,
+        );
+        assert!(!corroborated.poaw.passed);
+        assert!(!corroborated.accepted);
     }
 
     #[test]

@@ -142,7 +142,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         ],
         compatibility_pins: BTreeMap::new(),
         toolchain_locks: BTreeMap::from([("rust".to_string(), "1.96.1".to_string())]),
-        governance_contract_version: "0.1.0".to_string(),
+        governance_contract_version: GOVERNANCE_CONTRACT_VERSION.to_string(),
         governance_parameter_set_cid: parameter_package.root_cid.to_string(),
     })
     .unwrap();
@@ -163,7 +163,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
         ],
         compatibility_pins: BTreeMap::new(),
         toolchain_locks: BTreeMap::from([("rust".to_string(), "1.96.1".to_string())]),
-        governance_contract_version: "0.1.0".to_string(),
+        governance_contract_version: GOVERNANCE_CONTRACT_VERSION.to_string(),
         governance_parameter_set_cid: parameter_package.root_cid.to_string(),
     })
     .unwrap();
@@ -328,7 +328,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
     let mut agent_packages = Vec::new();
     for index in 0..5usize {
         let owner = address((index % 3 + 1) as u8);
-        let family = format!("family-{index}");
+        let family = format!("family-{}", index % 3);
         let payload = AgentReviewAttestationV1 {
             schema_version: 1,
             parent_ecosystem_cid: parent.root_cid.to_string(),
@@ -436,7 +436,7 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
             verified_cids: verified_cids.into_iter().collect(),
             probe_result_cid,
             available: true,
-            observed_at_block_or_timestamp: 20,
+            observed_at_block_or_timestamp: 50,
             expires_at_block: 2_000,
             bond_atoms: ONE_IDNA.to_string(),
             authentication: "on-chain-submitter".to_string(),
@@ -588,8 +588,6 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
                     test_result_cid: package.value.test_results_cid.clone(),
                     tests_passed_claim: true,
                     bond_atoms: ONE_IDNA,
-                    commitment_proof: agent_commitment.proofs[&package.root_cid.to_string()]
-                        .clone(),
                 },
                 GovernanceClock {
                     block: 20,
@@ -613,8 +611,6 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
                     test_result_cid: package.value.test_results_cid.clone(),
                     tests_passed_claim: true,
                     bond_atoms: ONE_IDNA,
-                    commitment_proof: build_commitment.proofs[&package.root_cid.to_string()]
-                        .clone(),
                 },
                 GovernanceClock {
                     block: 20,
@@ -648,8 +644,6 @@ fn executes_two_repository_candidate_and_retrieves_both_generations() {
                     available_claim: true,
                     expires_at_block: package.value.expires_at_block,
                     bond_atoms: ONE_IDNA,
-                    commitment_proof: availability_commitment.proofs[&package.root_cid.to_string()]
-                        .clone(),
                 },
                 GovernanceClock {
                     block: 50,

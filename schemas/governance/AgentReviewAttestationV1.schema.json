@@ -32,7 +32,11 @@
         "summary":{"type":"string","minLength":1,"maxLength":4096},
         "evidenceCid":{"anyOf":[{"$ref":"common.schema.json#/$defs/ContentCid"},{"type":"null"}]},
         "resolved":{"type":"boolean"}
-      }
+      },
+      "allOf":[{
+        "if":{"properties":{"severity":{"const":"critical"},"resolved":{"const":false}},"required":["severity","resolved"]},
+        "then":{"properties":{"evidenceCid":{"$ref":"common.schema.json#/$defs/ContentCid"}}}
+      }]
     }},
     "unresolvedCriticalFindings":{"type":"integer","minimum":0,"maximum":4294967295},
     "verdict":{"enum":["approve","reject","abstain"]},

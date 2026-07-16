@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/CriticalFindingWaiverV1.schema.json",
+  "title": "CriticalFindingWaiverV1",
+  "description": "A critical-risk waiver bound to one frozen agent-review root. It cannot waive later or unrelated findings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reviewRoundId",
+    "parentEcosystemCid",
+    "candidateEcosystemCid",
+    "patchCid",
+    "riskClass",
+    "agentReviewRoot",
+    "unresolvedCriticalOwnerCount",
+    "scope",
+    "rationaleCid",
+    "authorIdenaAddress",
+    "creationBlock"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "reviewRoundId": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "parentEcosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "candidateEcosystemCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "patchCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "riskClass": {"enum": ["critical", "consensus", "migration"]},
+    "agentReviewRoot": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "unresolvedCriticalOwnerCount": {"type": "integer", "minimum": 3, "maximum": 256},
+    "scope": {"const": "all-corroborated-unresolved-critical-findings-in-agent-review-root"},
+    "rationaleCid": {"$ref": "common.schema.json#/$defs/ContentCid"},
+    "authorIdenaAddress": {"$ref": "common.schema.json#/$defs/Address"},
+    "creationBlock": {"type": "integer", "minimum": 0}
+  }
+}

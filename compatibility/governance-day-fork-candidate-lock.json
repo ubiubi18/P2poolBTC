@@ -8,6 +8,7 @@
   "forkProfile": {
     "forkIdentifier": "idena-code-governance-day-local-testnet-v3",
     "networkId": 10002,
+    "ballotReplayDomain": "idena-code-governance-day-local-testnet-v3:10002",
     "consensusChangesAllowed": true,
     "consensusDeltaImplemented": true,
     "consensusDeltaActive": false,
@@ -133,15 +134,16 @@
     "legacyVtableCallbackCount": 31,
     "extensionPlacement": "after-legacy-go-api-prefix",
     "contractImportCount": 13,
-    "contractExportCount": 63
+    "contractExportCount": 64
   },
   "contractArtifact": {
+    "contractVersion": "0.2.0",
     "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
-    "cid": "bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq",
-    "sha256": "eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc",
-    "size": 289677,
+    "cid": "bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili",
+    "sha256": "976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a",
+    "size": 302419,
     "abiImports": 13,
-    "abiExports": 63,
+    "abiExports": 64,
     "buildStatus": "local-non-attested"
   },
   "runtimeIntegrationTestOverlay": {
@@ -150,19 +152,19 @@
     "baseSha256": "5d6a26c1ea95d002a6321b9055307c139c160c9242f04226d990750e39e129d3",
     "baseSize": 13048,
     "patchPath": "integrations/governance-epoch-anchor/idena-go-runtime-test.patch",
-    "patchCid": "bafkreigipvo445fmj2jpvvkwvzxwvf3cp2un2l2ncyimj46qvkuqbg66b4",
-    "patchSha256": "c87d5dce74ac4e92fad556ae6f6a97627ea8dd2f4d1610c4f3d0aaa9009bde0f",
+    "patchCid": "bafkreicnr2hqc75imukrhbf7qlv4chm6loxcln2ow4h3ruy6xoncjkgfn4",
+    "patchSha256": "4d8e8f017fa865151384bf82ebc11d9e5bae25b74eb70fb8d31ebb9a24a8c56f",
     "patchSize": 7908,
     "targetPath": "vm/wasm/pohw_governance_contract_runtime_gate_test.go",
     "testName": "TestGovernanceContractProductionRuntimeDeterminism",
-    "resultCid": "bafkreidanrhekcmtb4j5bfu36yoq477gsclnprx55ipyz7uped54fdumcu",
-    "resultSha256": "606c4e4509930f13d0969bf61d0e7fe69096d7c6fdea1f8cfe8f20fbc28e8c15",
+    "resultCid": "bafkreigplw4udb54o5fzaozua3qw7ohq7p5xexrspuryyz23catnskauyu",
+    "resultSha256": "cf5db94187bc774b903b3406e16fb8f0fbfb725e327d238c675b1026d92814c5",
     "resultSize": 15953
   },
   "parameterSet": {
-    "cid": "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq",
-    "sha256": "788782538cbcb9137d4b9e9feb6b5ed368a7017067dda158c4383e68da73a02c",
-    "lockSha256": "9de72604c0693cf0b29c3be37c0559cf3f87ef91e936bb7ac3113f75082e144a"
+    "cid": "bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei",
+    "sha256": "7541f5d1dfc2652c8db1e99a13b172056330cd4bf1d47c5adecc333933e42622",
+    "lockSha256": "0a4028f80cdb54a25413d3e20c4196ca8543631246bb632d74452faa5ec07e4e"
   },
   "toolchains": {
     "rust": "1.97.0",
@@ -198,6 +200,6 @@
     "Null candidate commits remain a deliberate fail-closed blocker until each patch is reviewed and committed in its own repository. A source CID identifies the current bytes but does not create release authority.",
     "No local actor may label its own duplicate builds, pin accounts, or audit reports as independent evidence.",
     "No activation height or genesis is authorized. The fixed node activation source therefore returns no activation and the candidate remains inactive by construction on every network and height.",
-    "The historical governance-fork lock and its d894 artifact remain unchanged. Current Governance Day candidate and build-plan records use only the post-audit eba64f artifact."
+    "The historical governance-fork lock and its d894 artifact remain unchanged. Current Governance Day candidate and build-plan records use only the post-audit 976000 artifact."
   ]
 }

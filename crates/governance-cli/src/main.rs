@@ -2472,6 +2472,7 @@ fn passing_normal_evidence(yes_weight: u128, no_weight: u128, total: u128) -> Ac
         distinct_yes_identities: 10,
         verified_or_human_yes_identities: 10,
         valid_agent_attestations: 3,
+        distinct_agent_runtime_groups: 2,
         distinct_agent_families: 2,
         distinct_agent_owner_identities: 2,
         unresolved_critical_findings: 0,

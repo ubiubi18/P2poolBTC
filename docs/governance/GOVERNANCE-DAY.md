@@ -8,7 +8,7 @@ commits, and reveals a ballot.
 This implementation is experimental local-test software. It does not deploy a
 contract, publish a release, install code, or change a live canonical CID.
 The exact local parameter set is
-`bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`; proposals,
+`bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei`; proposals,
 the contract, the node API, and decision records reject any other parameter
 CID.
 

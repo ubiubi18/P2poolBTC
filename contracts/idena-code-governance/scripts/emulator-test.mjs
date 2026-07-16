@@ -77,7 +77,11 @@ const metricLeaves = addresses.map((address, index) => ({
 }));
 const metricTree = metricsTree(metricLeaves);
 
-const parameterCid = "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
+const lockedParameters = JSON.parse(await readFile(
+  new URL("../../../compatibility/governance-day-parameters.json", import.meta.url),
+  "utf8",
+));
+const parameterCid = dagObject(lockedParameters).cid;
 const ecosystemManifests = new Map();
 const initialSource = sourceManifestFixture("P2poolBTC", [
   sourceFileFixture("fixture.txt", "initial-source-content"),
@@ -89,6 +93,28 @@ expectFailure(() => call("deploy", [initialCid, cid("wrong-parameters"), metricT
 }));
 call("deploy", [initialCid, parameterCid, metricTree.root, "10"], { caller: addresses[0], block: 1n, epoch: 10 });
 assert.equal(storage.get("epoch-governance:enabled").toString(), "1");
+const deployedParameters = JSON.parse(call("governanceParameters", [], {
+  caller: addresses[7], block: 1n, epoch: 10,
+}));
+assert.equal(deployedParameters.parameterSetCid, parameterCid);
+assert.equal(deployedParameters.chainId, "idena-code-governance-day-local-testnet-v3:10002");
+assert.equal(deployedParameters.schemaVersion, 2);
+assert.equal(deployedParameters.contractVersion, "0.2.0");
+assert.deepEqual(deployedParameters.parameterProfile, lockedParameters);
+assert.deepEqual(
+  [deployedParameters.parameterProfile.normal.minimumAiAttestations,
+    deployedParameters.parameterProfile.normal.minimumAiIndependenceGroups,
+    deployedParameters.parameterProfile.normal.minimumAiFamilies,
+    deployedParameters.parameterProfile.normal.minimumAiOwnerIdentities],
+  [3, 2, 2, 2],
+);
+assert.deepEqual(
+  [deployedParameters.parameterProfile.critical.minimumAiAttestations,
+    deployedParameters.parameterProfile.critical.minimumAiIndependenceGroups,
+    deployedParameters.parameterProfile.critical.minimumAiFamilies,
+    deployedParameters.parameterProfile.critical.minimumAiOwnerIdentities],
+  [5, 3, 3, 3],
+);
 // Legacy regression cases below deliberately bypass the production deployment
 // invariant through direct emulator storage access. No contract method can do this.
 storage.delete("epoch-governance:enabled");
@@ -433,7 +459,7 @@ const create = JSON.parse(call("createProposal", first.createArgs, {
 assert.match(create.proposalId, /^[0-9a-f]{64}$/);
 const storedProposalKey = `proposal:${create.proposalId}`;
 const validStoredProposal = Buffer.from(storage.get(storedProposalKey));
-for (const [field, invalid] of [[8, "256"], [34, "4294967296"], [52, "2"]]) {
+for (const [field, invalid] of [[8, "256"], [34, "4294967296"], [53, "2"]]) {
   const corrupt = decoder.decode(validStoredProposal).split("~");
   corrupt[field] = invalid;
   storage.set(storedProposalKey, Buffer.from(corrupt.join("~")));
@@ -619,23 +645,147 @@ exerciseFalseClaimChallenge("agent-false-claim", "agent_test_result", 1600);
 exerciseFalseClaimChallenge("builder-false-claim", "builder_test_result", 1800);
 exerciseFalseClaimChallenge("availability-false-claim", "availability_probe", 2000);
 
-const duplicateAgents = proposalFixtures(
-  "duplicate-agents",
+const repeatedOwnerAgentsBranch = snapshotHarnessState();
+const repeatedOwnerAgents = proposalFixtures(
+  "repeated-owner-agents",
   addresses,
   first.candidateCid,
-  cid("candidate-duplicate-agents"),
+  cid("candidate-repeated-owner-agents"),
   false,
   2200,
   21,
   true,
 );
-const duplicateRound = openAndFreezeReview(duplicateAgents, 2160n, 2200n, 21, 21);
-bindProposalToReview(duplicateAgents, duplicateRound.reviewRoundId);
-expectFailure(() => call("createProposal", duplicateAgents.createArgs, {
+const repeatedOwnerRound = openAndFreezeReview(repeatedOwnerAgents, 2160n, 2200n, 21, 21);
+assert.equal(repeatedOwnerRound.validReviews, 5);
+assert.equal(repeatedOwnerRound.reviewModelFamilies, 3);
+assert.equal(repeatedOwnerRound.reviewRuntimeGroups, 3);
+assert.equal(repeatedOwnerRound.reviewOwners, 3);
+bindProposalToReview(repeatedOwnerAgents, repeatedOwnerRound.reviewRoundId);
+call("createProposal", repeatedOwnerAgents.createArgs, {
   caller: addresses[0], block: 2200n, epoch: 21,
+});
+restoreHarnessState(repeatedOwnerAgentsBranch);
+
+const runtimeDiversityBranch = snapshotHarnessState();
+const insufficientRuntimeDiversity = proposalFixtures(
+  "insufficient-runtime-diversity",
+  addresses,
+  first.candidateCid,
+  cid("candidate-insufficient-runtime-diversity"),
+  false,
+  2290,
+  21,
+  false,
+  null,
+  "crates/p2pool-node/src/lib.rs",
+  "critical",
+  false,
+  true,
+);
+const runtimeDiversityRound = openAndFreezeReview(
+  insufficientRuntimeDiversity, 2250n, 2290n, 21, 21,
+);
+bindProposalToReview(insufficientRuntimeDiversity, runtimeDiversityRound.reviewRoundId);
+const runtimeRoundState = JSON.parse(call("reviewRoundState", [runtimeDiversityRound.reviewRoundId], {
+  caller: addresses[7], block: 2290n, epoch: 21,
 }));
-call("expireReviewRound", [duplicateRound.reviewRoundId], { caller: addresses[7], block: 2241n, epoch: 21 });
-withdrawExpiredRoundBonds(duplicateRound.reviewRoundId, duplicateAgents, 2242n, 21);
+assert.equal(runtimeRoundState.reviewRuntimeGroups, runtimeRoundState.reviewOwners);
+assert.equal(runtimeRoundState.reviewRuntimeGroups, 3);
+call("createProposal", insufficientRuntimeDiversity.createArgs, {
+  caller: addresses[0], block: 2290n, epoch: 21,
+});
+restoreHarnessState(runtimeDiversityBranch);
+
+const criticalReviewGriefingBranch = snapshotHarnessState();
+const loneCriticalReviewer = proposalFixtures(
+  "lone-critical-reviewer", addresses, first.candidateCid, cid("candidate-lone-critical-reviewer"),
+  false, 2290, 21, false, null, "docs/operator-guide.md", "normal", false, false, 1,
+);
+const loneCriticalRound = openAndFreezeReview(loneCriticalReviewer, 2250n, 2290n, 21, 21);
+assert.equal(loneCriticalRound.unresolvedCriticalFindings, 1);
+bindProposalToReview(loneCriticalReviewer, loneCriticalRound.reviewRoundId);
+call("createProposal", loneCriticalReviewer.createArgs, {
+  caller: addresses[0], block: 2290n, epoch: 21,
+});
+restoreHarnessState(criticalReviewGriefingBranch);
+
+const corroboratedNormalFinding = proposalFixtures(
+  "corroborated-normal-finding", addresses, first.candidateCid, cid("candidate-corroborated-normal-finding"),
+  false, 2290, 21, false, null, "docs/operator-guide.md", "normal", false, false, 2,
+);
+const corroboratedNormalRound = openAndFreezeReview(
+  corroboratedNormalFinding, 2250n, 2290n, 21, 21,
+);
+assert.equal(corroboratedNormalRound.unresolvedCriticalFindings, 2);
+bindProposalToReview(corroboratedNormalFinding, corroboratedNormalRound.reviewRoundId);
+expectFailure(() => call("createProposal", corroboratedNormalFinding.createArgs, {
+  caller: addresses[0], block: 2290n, epoch: 21,
+}));
+const burnsBeforeAdverseExpiry = burns.length;
+call("expireReviewRound", [corroboratedNormalRound.reviewRoundId], {
+  caller: addresses[7], block: 2331n, epoch: 21,
+});
+assert.equal(burns.length, burnsBeforeAdverseExpiry);
+call("withdrawExpiredReviewBond", [corroboratedNormalRound.reviewRoundId], {
+  caller: addresses[0], block: 2332n, epoch: 21,
+});
+assert.equal(transfers.at(-1).amount, 25n * 10n ** 18n);
+restoreHarnessState(criticalReviewGriefingBranch);
+
+const typedWaiverBranch = snapshotHarnessState();
+const typedWaiverFixture = proposalFixtures(
+  "typed-critical-waiver", addresses, first.candidateCid, cid("candidate-typed-critical-waiver"),
+  false, 2290, 21, false, null, "crates/p2pool-node/src/lib.rs", "critical", false, false, 3,
+);
+const typedWaiverOpened = JSON.parse(call("openReviewRound", typedWaiverFixture.openArgs, {
+  caller: addresses[0], block: 2250n, epoch: 21, payment: 25n * 10n ** 18n,
+}));
+submitEvidenceAttestations(typedWaiverOpened.reviewRoundId, typedWaiverFixture, 2251n, 21);
+const typedWaiverEvidence = JSON.parse(call("freezeReviewRound", [typedWaiverOpened.reviewRoundId], {
+  caller: addresses[7], block: 2290n, epoch: 21,
+}));
+assert.equal(typedWaiverEvidence.unresolvedCriticalFindings, 3);
+const waiverRationaleCid = cid("typed-critical-waiver-rationale");
+const waiverValue = {
+  schemaVersion: 1,
+  reviewRoundId: typedWaiverOpened.reviewRoundId,
+  parentEcosystemCid: typedWaiverFixture.parentCid,
+  candidateEcosystemCid: typedWaiverFixture.candidateCid,
+  patchCid: typedWaiverFixture.patchCid,
+  riskClass: "critical",
+  agentReviewRoot: typedWaiverEvidence.agentReviewRoot,
+  unresolvedCriticalOwnerCount: 3,
+  scope: "all-corroborated-unresolved-critical-findings-in-agent-review-root",
+  rationaleCid: waiverRationaleCid,
+  authorIdenaAddress: `0x${addresses[0].toString("hex")}`,
+  creationBlock: 2290,
+};
+const forgedWaiver = dagObject({ ...waiverValue, unresolvedCriticalOwnerCount: 2 });
+expectFailure(() => call("registerCriticalFindingWaiver", [
+  typedWaiverOpened.reviewRoundId, forgedWaiver.cid, forgedWaiver.hex,
+], { caller: addresses[0], block: 2290n, epoch: 21 }));
+const typedWaiver = dagObject(waiverValue);
+const waiverState = JSON.parse(call("registerCriticalFindingWaiver", [
+  typedWaiverOpened.reviewRoundId, typedWaiver.cid, typedWaiver.hex,
+], { caller: addresses[0], block: 2290n, epoch: 21 }));
+assert.equal(waiverState.criticalFindingWaiverCid, typedWaiver.cid);
+refreshAvailabilityRequirements(typedWaiverFixture, [typedWaiver.cid, waiverRationaleCid]);
+submitAvailabilityAttestations(typedWaiverOpened.reviewRoundId, typedWaiverFixture, 2290n, 21);
+const typedWaiverFrozen = JSON.parse(call("freezeReviewRound", [typedWaiverOpened.reviewRoundId], {
+  caller: addresses[7], block: 2290n, epoch: 21,
+}));
+typedWaiverFixture.proposalValue.criticalFindingWaiverCid = cid("unregistered-waiver");
+bindProposalToReview(typedWaiverFixture, typedWaiverFrozen.reviewRoundId);
+expectFailure(() => call("createProposal", typedWaiverFixture.createArgs, {
+  caller: addresses[0], block: 2290n, epoch: 21,
+}));
+typedWaiverFixture.proposalValue.criticalFindingWaiverCid = typedWaiver.cid;
+bindProposalToReview(typedWaiverFixture, typedWaiverFrozen.reviewRoundId);
+call("createProposal", typedWaiverFixture.createArgs, {
+  caller: addresses[0], block: 2290n, epoch: 21,
+});
+restoreHarnessState(typedWaiverBranch);
 
 const selfClassifiedNormal = proposalFixtures(
   "self-classified-normal",
@@ -1260,6 +1410,8 @@ function proposalFixtures(
   scopePath = "crates/p2pool-node/src/lib.rs",
   scopeRisk = "critical",
   includeSecondaryCandidateArtifact = false,
+  insufficientRuntimeDiversity = false,
+  criticalFindingOwners = 0,
 ) {
   const parentManifest = ecosystemManifests.get(parentCid);
   assert.ok(parentManifest, `missing parent manifest fixture for ${parentCid}`);
@@ -1381,9 +1533,12 @@ function proposalFixtures(
   });
   const attestationBlock = creationBlock - 39;
   const agents = Array.from({ length: 5 }, (_, index) => ({
-    model: `model-family-${index}`,
+    model: `model-family-${index % 3}`,
+    runtime: insufficientRuntimeDiversity
+      ? `${prefix}-runtime-${index % 2}`
+      : `${prefix}-runtime-${index}`,
     owner: owners[index % 3],
-    unresolved: 0,
+    unresolved: index < criticalFindingOwners ? 1 : 0,
   }));
   if (duplicateAgentInstance) {
     agents[3].model = agents[0].model;
@@ -1401,7 +1556,7 @@ function proposalFixtures(
       affectedRepositories: [{ repository: "P2poolBTC", cid: sourceCid }],
       modelIdentifier: `${prefix}-review-${index}`,
       modelRevision: null,
-      providerOrRuntimeIdentifier: `${prefix}-runtime-${index}`,
+      providerOrRuntimeIdentifier: agents[index].runtime,
       modelFamily: agents[index].model,
       agentPolicyCid: cid(`${prefix}-agent-policy`),
       systemPromptPolicyCid: cid(`${prefix}-prompt-policy`),
@@ -1411,7 +1566,12 @@ function proposalFixtures(
       testsPassed: true,
       staticAnalysisResultsCid: cid(`${prefix}-static-${index}`),
       dependencyFindingsCid: cid(`${prefix}-dependencies-${index}`),
-      securityFindings: [],
+      securityFindings: agents[index].unresolved > 0 ? [{
+        severity: "critical",
+        summary: `Corroborated critical finding ${index}`,
+        evidenceCid: cid(`${prefix}-critical-finding-${index}`),
+        resolved: false,
+      }] : [],
       unresolvedCriticalFindings: agents[index].unresolved,
       verdict: "approve",
       ownerIdenaAddress: `0x${agents[index].owner.toString("hex")}`,
@@ -1500,7 +1660,7 @@ function proposalFixtures(
       verifiedCids,
       probeResultCid: availability[index].testResult.cid,
       available: true,
-      observedAtBlockOrTimestamp: attestationBlock,
+      observedAtBlockOrTimestamp: creationBlock,
       expiresAtBlock: creationBlock + 1000,
       bondAtoms: (10n ** 18n).toString(),
       authentication: "on-chain-submitter",
@@ -1595,7 +1755,7 @@ function openAndFreezeReview(fixtures, openBlock, freezeBlock, openEpoch, freeze
   const frozen = JSON.parse(call("freezeReviewRound", [opened.reviewRoundId], {
     caller: addresses[7], block: freezeBlock, epoch: freezeEpoch,
   }));
-  assert.equal(frozen.schemaVersion, 1);
+  assert.equal(frozen.schemaVersion, 2);
   assert.equal(frozen.agentReviewRoot, fixtures.agentTree.root);
   assert.equal(frozen.buildAttestationRoot, fixtures.buildTree.root);
   assert.equal(frozen.dataAvailabilityRoot, fixtures.availabilityTree.root);
@@ -1815,6 +1975,18 @@ function submitAvailabilityAttestations(reviewRoundId, fixtures, atBlock, atEpoc
   ], { caller: item.owner, block: atBlock, epoch: atEpoch, payment: 10n ** 18n }));
 }
 
+function refreshAvailabilityRequirements(fixtures, extraCids) {
+  for (const item of fixtures.availability) {
+    const verifiedCids = [...new Set([...item.value.verifiedCids, ...extraCids])].sort();
+    Object.assign(item, dagObject({ ...item.value, verifiedCids }));
+  }
+  const fields = fixtures.availability.map((item) => (
+    `${item.cid}|${fixtures.candidateCid}|${fixtures.pinset.cid}|${item.value.providerId}|${item.owner.toString("hex")}`
+  ));
+  fixtures.availabilityTree = attestationTree("data_availability_v1", fields);
+  fixtures.proposalValue.dataAvailabilityRoot = fixtures.availabilityTree.root;
+}
+
 function call(method, args, context = {}) {
   const snapshot = snapshotHarnessState();
   caller = Buffer.from(context.caller ?? caller);
@@ -1978,7 +2150,7 @@ function ecosystemManifestFixture(prefix, parentCid, source, artifacts) {
     }],
     compatibilityPins: {},
     toolchainLocks: { "/node": "24.18.0", "rust:compiler": "1.97.0" },
-    governanceContractVersion: "0.1.0",
+    governanceContractVersion: "0.2.0",
     governanceParameterSetCid: link(parameterCid),
   };
   const packaged = dagObject(value);
@@ -2073,7 +2245,7 @@ function u32be(value) {
 }
 
 function epochBallotCommitment({ epoch, voter, frozenRoot, choices, nonce, salt }) {
-  const chainId = Buffer.from("idena-code-governance-day-local-testnet-v2:10002");
+  const chainId = Buffer.from("idena-code-governance-day-local-testnet-v3:10002");
   return digest(Buffer.concat([
     Buffer.from("IDENA_CODE_DAO_EPOCH_BALLOT_V1"),
     u32be(chainId.length),

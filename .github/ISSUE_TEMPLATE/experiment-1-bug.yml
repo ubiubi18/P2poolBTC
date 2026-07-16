@@ -21,6 +21,7 @@ body:
         - Idena eligibility or snapshot accounting
         - FROST vault
         - Explorer or dashboard
+        - Onboarding or host readiness
         - Documentation
         - Other
     validations:
@@ -54,6 +55,28 @@ body:
       placeholder: Ubuntu 24.04, x86_64
     validations:
       required: true
+  - type: dropdown
+    id: onboarding_status
+    attributes:
+      label: Onboarding journey status
+      description: Select the status from the generated redacted receipt, or Not run.
+      options:
+        - Not run
+        - review-ready
+        - host-not-ready
+        - verification-failed
+        - blocked-public-join
+        - ready-for-identity-registration
+        - live-join-incomplete
+        - live-join-verified
+    validations:
+      required: true
+  - type: input
+    id: onboarding_actions
+    attributes:
+      label: Redacted next-action codes
+      description: Paste only the public codes from issue-report.md; never paste a path, address, endpoint, or raw log.
+      placeholder: use-clean-exact-source
   - type: textarea
     id: reproduction
     attributes:

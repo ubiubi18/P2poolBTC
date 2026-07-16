@@ -7,6 +7,13 @@ adds marker plus signature-domain replay protection. It is not Bitcoin mainnet
 and its coins have no promised value. Mining is paused and public joining is
 blocked until the revision-3 build and all interlock evidence pass.
 
+Start with the
+[five-minute guarded quick start](COMMUNITY-QUICKSTART.md). Its one read-only
+command chooses a role, verifies the pinned candidate, shows the same five
+stages used by this runbook, and creates a private redacted issue template. Use
+the longer procedure below only when that command says the relevant next stage
+is available.
+
 ## Choose Your Journey
 
 There are two different journeys. Do not mix them.
@@ -22,23 +29,23 @@ git clone https://github.com/ubiubi18/P2poolBTC.git
 cd P2poolBTC
 git switch --detach origin/vibe/experiment-1-release-readiness
 test -z "$(git status --short)"
-git rev-parse HEAD
+./scripts/pohw-community-onboard.sh --role observer
 
 STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
   compatibility/experiment-1-launch-policy.json | \
   sed -n 's/^launch policy verified: //p')
 test "$STATUS" = blocked-release-readiness
-
-python3 scripts/pohw-experiment-1-manifest.py verify \
-  compatibility/experiment-1-full-consensus.json
-cargo test --locked -p p2pool-node -p pohw-core
 ```
 
-For this lane, `blocked-release-readiness`, a clean checkout, a verified
-manifest, and passing tests are the expected success result. Do not continue to
-the privileged installation or registration commands below. The candidate
-branch can move, so include the exact `git rev-parse HEAD` value in every review
-report.
+For this lane, `review-ready`, a clean checkout, a verified
+`blocked-release-readiness` policy, and a verified manifest are the expected
+initial success result. A deeper reviewer should explicitly run
+`cargo fetch --locked` and then rerun the onboarding command with `--run-tests`;
+the test run itself is offline. Do not continue to the privileged installation or
+registration commands below. The candidate branch can move, so include the
+exact `git rev-parse HEAD` value in every review report. The generated receipt
+contains only aggregate diagnostics; inspect the generated `issue-report.md`
+before posting it.
 
 ### Lane B: Join Live Only After The Interlock Opens
 
@@ -46,7 +53,7 @@ The live journey has five stages:
 
 | Stage | Outcome required before continuing |
 | --- | --- |
-| 1. Verify release | Exact release commit, source CID, CAR digest, build evidence, launch policy, and manifest all verify independently |
+| 1. Verify release | The ecosystem CID read independently from Idena governance, its DAG-CBOR CAR, exact P2poolBTC source CAR, runtime artifacts, release commit, build evidence, launch policy, and manifest all agree |
 | 2. Build Core | The pinned Bitcoin Core v31.1 fork is built from source in an isolated `chain=pohw` profile |
 | 3. Verify Core | Activation and manifest match, RPC is loopback-only, initial block download is complete, and the pinned height-958175 checkpoint hash matches |
 | 4. Register identity | An eligible public Idena address signs only the exact registration challenge and gossip accepts the envelope |
@@ -63,7 +70,9 @@ screenshots for review. Do not invite people to connect miners to the live
 experiment yet. Public joining is blocked until all of these are published and
 independently checked:
 
-- an exact source commit, canonical source CID, CAR digest, and build evidence;
+- an exact source commit, DAO-selected ecosystem CID, canonical DAG-CBOR
+  ecosystem CAR, P2poolBTC source CAR, each CAR digest, runtime artifact
+  digests, and build evidence, all retrievable from public IPFS;
 - at least two independent matching builds of the ownerless miner-registry WASM;
 - an external security review with no unresolved release-blocking finding;
 - a finalized Idena deployment receipt and immutable V2 anchor policy; and
@@ -85,8 +94,11 @@ are also suitable for isolated source review and local rehearsal, but a local
 rehearsal is not evidence that the public network is open.
 
 This is a source-first procedure. There is no coordinator-signed installer and
-no lead-developer key to trust. Every participant builds the exact source,
-verifies the activation manifest, and validates the fork locally.
+no lead-developer key to trust. Every participant independently reads the
+canonical ecosystem CID from Idena governance, reproduces the exact source,
+verifies the activation manifest and CAR contents, and validates the fork
+locally. A Git branch, gateway response, launch-policy file, or executable is
+not allowed to authenticate itself.
 
 This guide joins the existing Experiment 1 network only after the interlock
 passes. Use the exact release commit and source CID, the tracked manifest, and
@@ -117,7 +129,8 @@ intend to create a separate experiment.
 - Git, Rust, CMake, Ninja, a C++ compiler, Python 3, and Bitcoin Core build
   dependencies.
 - A systemd-based Ubuntu host with the `ubuntu` operator account and an
-  SSD-backed `/srv/sharechain`. The procedure creates the fixed non-login
+  SSD-backed `/srv` containing `/srv/sharechain` and `/srv/bitcoin`. The
+  procedure creates the fixed non-login
   `pohw` service account and uses the evidence-installed `/opt/p2pool` server
   profile. A different service account or layout needs separately reviewed
   units rather than an untracked local rewrite.
@@ -139,9 +152,11 @@ Hetzner host.
 ## 1. Build And Verify The Source
 
 GitHub is a mirror, not the canonical authority. Obtain the exact release
-commit, source CID, CAR digest, and build-evidence digest through independent
-channels. A literal placeholder means there is no release and you must stop.
-Then use a fresh checkout:
+commit, ecosystem CID, ecosystem CAR, P2poolBTC source CAR, and build-evidence
+digest through independent channels. Read the ecosystem CID from Idena
+governance through your own synchronized node; do not derive it from GitHub,
+the CAR, or the launch-policy file it is meant to verify. A literal placeholder
+means there is no release and you must stop. Then use a fresh checkout:
 
 ```sh
 git clone https://github.com/ubiubi18/P2poolBTC.git
@@ -157,8 +172,12 @@ cargo build --locked --release -p p2pool-node -p governance-cli
 cargo test --locked -p p2pool-node -p pohw-core -p governance-core -p governance-cli
 ```
 
-`git status --short` must print nothing. Compare the full activation ID and
-manifest SHA-256 with independent participants:
+`git status --short` must print nothing. These commands are a build rehearsal,
+not yet canonical source proof. Section 5 supplies the independent ecosystem
+CID and CARs to the onboarding verifier, which hashes the governance binary
+before executing it and proves that this tree reproduces the source CID.
+Compare the full activation ID and manifest SHA-256 with independent
+participants:
 
 ```sh
 python3 - <<'PY'
@@ -399,8 +418,10 @@ account or filesystem layout is not supported by these fixed units.
 
 ### 5.1 Install The Evidence-Bound Runtime
 
-Obtain the complete `rust-workspace` evidence directory, its SHA-256, and the
-canonical source CID through independent channels. The directory must contain
+Obtain the complete `rust-workspace` evidence directory, its SHA-256, the
+canonical ecosystem CID, its deterministic CAR, and the P2poolBTC source CAR
+through independent channels. The ecosystem CID must come from the Idena
+governance reference, not from either downloaded CAR. The directory must contain
 `build-evidence.json`, `source-verification.json`, `test-results.json`, and
 `build-environment.json`. Do not derive either expected value from that same
 directory.
@@ -415,6 +436,9 @@ BUILD_PLAN="$REPO/compatibility/governance-build-plan-v1.json"
 EVIDENCE_DIR='/path/to/independently-obtained-rust-workspace-evidence'
 EXPECTED_EVIDENCE_SHA256='<published-build-evidence-sha256>'
 EXPECTED_SOURCE_CID='<published-canonical-source-cid>'
+EXPECTED_ECOSYSTEM_CID='<CID-read-independently-from-Idena-governance>'
+CANDIDATE_ECOSYSTEM_CAR='/path/to/EcosystemManifestV1.car'
+P2POOL_SOURCE_CAR='/path/to/P2poolBTC-source.car'
 
 [[ "$EXPECTED_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
   echo 'Missing independently obtained build-evidence SHA-256.' >&2; exit 1;
@@ -422,6 +446,14 @@ EXPECTED_SOURCE_CID='<published-canonical-source-cid>'
 [[ "$EXPECTED_SOURCE_CID" =~ ^b[a-z2-7]{20,120}$ ]] || {
   echo 'Missing independently obtained canonical source CID.' >&2; exit 1;
 }
+[[ "$EXPECTED_ECOSYSTEM_CID" =~ ^b[a-z2-7]{20,120}$ ]] || {
+  echo 'Missing independently obtained canonical ecosystem CID.' >&2; exit 1;
+}
+for car in "$CANDIDATE_ECOSYSTEM_CAR" "$P2POOL_SOURCE_CAR"; do
+  test -s "$car"
+  test -f "$car"
+  test ! -L "$car"
+done
 for name in build-evidence.json source-verification.json \
   test-results.json build-environment.json; do
   test -f "$EVIDENCE_DIR/$name"
@@ -501,6 +533,7 @@ INSTALLED_NODE="$RUNTIME_DIR/p2pool-node"
 for artifact in \
   "$INSTALLED_NODE" \
   "$RUNTIME_DIR/pohw-governance" \
+  "$RUNTIME_DIR/pohw-governance.sha256" \
   "$RUNTIME_DIR/pohw-experiment-1-launch-policy.py" \
   "$RUNTIME_DIR/compatibility/experiment-1-full-consensus.json" \
   "$RUNTIME_DIR/compatibility/experiment-1-launch-policy.json" \
@@ -518,6 +551,10 @@ for artifact in \
   sudo test -f "$artifact"
   sudo test ! -L "$artifact"
 done
+GOVERNANCE_SHA256=$(cat "$RUNTIME_DIR/pohw-governance.sha256")
+[[ "$GOVERNANCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+test "$(sha256sum "$RUNTIME_DIR/pohw-governance" | awk '{print $1}')" = \
+  "$GOVERNANCE_SHA256"
 test "$(sudo systemctl show -p FragmentPath --value \
   bitcoind-pohw-experiment-1.service)" = \
   /etc/systemd/system/bitcoind-pohw-experiment-1.service
@@ -557,11 +594,12 @@ The installer deliberately rejects an unknown service state. On a fresh host,
 the inert placeholders make the three names provably inactive; they cannot be
 enabled or manually started and are never executed. The installer must replace
 them before the artifact and effective-unit checks run. Its final line and every
-check above must pass. It copies both binaries, the launch verifier and its
-three bound compatibility inputs, both wrappers, the health checker, all three
-base units, and all server/Experiment-1 drop-ins from the exact verified
-source/evidence set. It does not execute either candidate binary as root and it
-does not start any service.
+check above must pass. It copies both binaries, the evidence-derived governance
+binary digest companion, the launch verifier and its three bound compatibility
+inputs, both wrappers, the health checker, all three base units, and all
+server/Experiment-1 drop-ins from the exact verified source/evidence set. It
+does not execute either candidate binary as root and it does not start any
+service.
 
 ### 5.2 Stage Policy, Snapshot, Peers, And Secrets
 
@@ -622,7 +660,8 @@ python3 scripts/pohw-experiment-1-launch-policy.py \
   --repo-root "$REPO" \
   --readiness-car "$READINESS_REPORT_SOURCE" \
   --readiness-evidence-car "$READINESS_EVIDENCE_SOURCE" \
-  --governance-cli "$REPO/target/release/pohw-governance" \
+  --governance-cli "$RUNTIME_DIR/pohw-governance" \
+  --governance-cli-sha256 "$GOVERNANCE_SHA256" \
   --idena-anchor-policy "$POLICY_SOURCE" \
   --require-ready
 case "$(stat -c %a "$IDENA_API_KEY_SOURCE")" in
@@ -1071,6 +1110,7 @@ STATUS=$(sudo -u pohw -g pohw /usr/bin/python3 -I \
   --readiness-evidence-car \
     /etc/pohw/experiment-1-deployment-readiness-evidence.car \
   --governance-cli /usr/local/libexec/p2pool-experiment-1/pohw-governance \
+  --governance-cli-sha256 "$GOVERNANCE_SHA256" \
   --idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json \
   --require-ready | sed -n 's/^launch policy verified: //p')
 test "$STATUS" = ready-for-public-join
@@ -1170,14 +1210,49 @@ that the candidate can be reviewed and built locally.
 
 ### Live Join Success
 
+After this miner has submitted a share, run the guarded proof from the same
+clean canonical checkout. It re-parses the DAO-selected ecosystem CAR, hashes
+the governance verifier before executing it, reproduces the local source CID,
+rechecks all four runtime artifact digests, and probes only the reviewed local
+Core systemd service and loopback RPC:
+
+```sh
+./scripts/pohw-community-onboard.sh \
+  --role pruned-miner \
+  --storage-path /srv \
+  --expected-ecosystem-cid "$EXPECTED_ECOSYSTEM_CID" \
+  --candidate-ecosystem-car "$CANDIDATE_ECOSYSTEM_CAR" \
+  --source-car "$P2POOL_SOURCE_CAR" \
+  --governance-cli "$RUNTIME_DIR/pohw-governance" \
+  --readiness-car "$READINESS_REPORT_SOURCE" \
+  --readiness-evidence-car "$READINESS_EVIDENCE_SOURCE" \
+  --idena-anchor-policy /etc/pohw/idena-anchor-policy-v2.json \
+  --probe-live \
+  --p2pool-node "$INSTALLED_NODE" \
+  --p2pool-datadir "$POHW_DATADIR" \
+  --snapshot-dir "$POHW_SNAPSHOT_DIR" \
+  --miner-id "$POHW_MINER_ID" \
+  --bitcoin-cli /usr/local/libexec/pohw-bitcoin-core-v31.1/bin/bitcoin-cli \
+  --bitcoin-datadir /srv/bitcoin/pohw \
+  --bitcoin-cookie-file /run/bitcoin-pohw-rpc/.cookie
+```
+
+The only complete onboarding result is `live-join-verified`. Historical global
+shares cannot satisfy this proof: the registered miner must have at least one
+active share timestamped within the last hour. Core must have a fully verified
+tip no more than two hours old, at least one fork peer, the exact manifest-bound
+consensus fingerprint and checkpoint, and the attested running executable and
+arguments behind `bitcoind-pohw-experiment-1.service`. The Idena snapshot must
+mark this miner eligible and have at least three distinct verified voters.
+
 | Check | Required result |
 | --- | --- |
-| Source | Clean checkout, manifest verification passes, source/activation values match independent participants |
-| Core | `chain=pohw`, `ibd=False`, fork height advances, RPC remains loopback-only |
+| Source | The independently read DAO ecosystem CID, ecosystem CAR, source CAR, clean checkout, optional Git metadata, and attested executable digests all agree |
+| Core | Exact local systemd executable/profile, `chain=pohw`, `ibd=False`, fresh fully verified tip, at least one peer, and loopback-only RPC |
 | Identity | Local replay reports one registration for your miner and the gossip peer accepts its envelope |
-| Snapshot | Your eligible identity is present in the independently verified snapshot with the required vote quorum |
-| Sharechain | `stored_share_count` and your active share score increase after a submitted share |
-| Block | The bounded miner receives an accepted Stratum response and `bitcoin-cli -chain=pohw getblockcount` increases |
+| Snapshot | Your eligible identity is present in the independently verified snapshot with at least three distinct voters |
+| Sharechain | The global share tip exists and this miner has a fresh active share; another miner's historical share does not count |
+| Block | Optional stronger mining proof: when this miner finds an accepted fork block, the local Core height increases |
 | UI | The dashboard shows the same aggregate height/share counts as your local commands |
 
 Record the Core height and local share count before connecting a miner, then

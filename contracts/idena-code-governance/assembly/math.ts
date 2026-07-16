@@ -1,11 +1,22 @@
 import { u128Safe as u128, u256Safe as u256 } from "as-bignum/assembly";
+import {
+  GOV_FLIP_PENALTY_SCALE,
+  GOV_FLIP_PRIOR_REPORTED,
+  GOV_FLIP_PRIOR_TOTAL,
+  GOV_FLIP_TRUST_CEILING_BPS,
+  GOV_FLIP_TRUST_FLOOR_BPS,
+  GOV_STAKE_QUANTUM_ATOMS,
+  GOV_STATUS_HUMAN_BPS,
+  GOV_STATUS_NEWBIE_BPS,
+  GOV_STATUS_VERIFIED_BPS,
+} from "./generated_parameters";
 
-export const STATUS_HUMAN_BPS: u16 = 10000;
-export const STATUS_VERIFIED_BPS: u16 = 8500;
-export const STATUS_NEWBIE_BPS: u16 = 7000;
-export const PRIOR_REPORTED: u64 = 1;
-export const PRIOR_TOTAL: u64 = 20;
-export const STAKE_QUANTUM_ATOMS: u64 = 1_000_000_000_000;
+export const STATUS_HUMAN_BPS: u16 = GOV_STATUS_HUMAN_BPS;
+export const STATUS_VERIFIED_BPS: u16 = GOV_STATUS_VERIFIED_BPS;
+export const STATUS_NEWBIE_BPS: u16 = GOV_STATUS_NEWBIE_BPS;
+export const PRIOR_REPORTED: u64 = GOV_FLIP_PRIOR_REPORTED;
+export const PRIOR_TOTAL: u64 = GOV_FLIP_PRIOR_TOTAL;
+export const STAKE_QUANTUM_ATOMS: u64 = GOV_STAKE_QUANTUM_ATOMS;
 
 export function statusBps(state: string): u16 {
   if (state == "Human") return STATUS_HUMAN_BPS;
@@ -18,9 +29,10 @@ export function flipTrustBps(total: u64, reported: u64): u16 {
   assert(reported <= total, "reported authored flips exceed finalized authored flips");
   const numerator = (u128.fromU64(reported) + u128.fromU64(PRIOR_REPORTED)) * u128.fromU64(10000);
   const rate = numerator / (u128.fromU64(total) + u128.fromU64(PRIOR_TOTAL));
-  const penalty = (rate * u128.fromU64(15000)) / u128.fromU64(10000);
-  let trust: u64 = 4000;
-  if (penalty < u128.fromU64(6000)) trust = 10000 - penalty.lo;
+  const penalty = (rate * u128.fromU64(GOV_FLIP_PENALTY_SCALE)) / u128.fromU64(10000);
+  let trust: u64 = GOV_FLIP_TRUST_FLOOR_BPS;
+  const trustRange = <u64>(GOV_FLIP_TRUST_CEILING_BPS - GOV_FLIP_TRUST_FLOOR_BPS);
+  if (penalty < u128.fromU64(trustRange)) trust = <u64>GOV_FLIP_TRUST_CEILING_BPS - penalty.lo;
   return <u16>trust;
 }
 
@@ -36,7 +48,11 @@ export function integerSqrt(value: u128): u128 {
 }
 
 export function effectiveVoteWeight(stakeAtoms: u128, identityStatusBps: u16, trustBps: u16): u128 {
-  if (identityStatusBps == 0 || trustBps < 4000 || trustBps > 10000) return u128.Zero;
+  if (
+    identityStatusBps == 0
+      || trustBps < GOV_FLIP_TRUST_FLOOR_BPS
+      || trustBps > GOV_FLIP_TRUST_CEILING_BPS
+  ) return u128.Zero;
   const quanta = stakeAtoms / u128.fromU64(STAKE_QUANTUM_ATOMS);
   const score = integerSqrt(quanta);
   return (score * u128.fromU64(identityStatusBps) * u128.fromU64(trustBps))

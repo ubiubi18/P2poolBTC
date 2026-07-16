@@ -195,10 +195,11 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
             policy,
             POLICY,
             ROOT,
-            car_path,
-            evidence_path,
-            verifier_path,
-            anchor_path,
+            readiness_car_path=car_path,
+            readiness_evidence_car_path=evidence_path,
+            governance_cli_path=verifier_path,
+            governance_cli_sha256=hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+            idena_anchor_policy_path=anchor_path,
         )
 
     def test_checked_in_policy_is_valid_and_blocked(self):
@@ -268,6 +269,8 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                     str(evidence_path),
                     "--governance-cli",
                     str(verifier_path),
+                    "--governance-cli-sha256",
+                    hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
                     "--idena-anchor-policy",
                     str(anchor_path),
                     "--require-ready",
@@ -451,11 +454,48 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                     policy,
                     POLICY,
                     ROOT,
-                    None,
-                    evidence_path,
-                    verifier_path,
-                    anchor_path,
+                    readiness_car_path=None,
+                    readiness_evidence_car_path=evidence_path,
+                    governance_cli_path=verifier_path,
+                    governance_cli_sha256=hashlib.sha256(
+                        verifier_path.read_bytes()
+                    ).hexdigest(),
+                    idena_anchor_policy_path=anchor_path,
                 )
+
+    def test_readiness_verifier_binary_is_digest_bound(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            policy, car_path, evidence_path, verifier_path, anchor_path = (
+                self.build_ready_policy(directory)
+            )
+            with self.assertRaisesRegex(
+                MODULE.LaunchPolicyError, "independently selected SHA-256"
+            ):
+                MODULE.validate(
+                    policy,
+                    POLICY,
+                    ROOT,
+                    readiness_car_path=car_path,
+                    readiness_evidence_car_path=evidence_path,
+                    governance_cli_path=verifier_path,
+                    governance_cli_sha256="00" * 32,
+                    idena_anchor_policy_path=anchor_path,
+                )
+
+            digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
+            verifier_path.with_name(verifier_path.name + ".sha256").write_text(
+                digest + "\n", encoding="ascii"
+            )
+            MODULE.validate(
+                policy,
+                POLICY,
+                ROOT,
+                readiness_car_path=car_path,
+                readiness_evidence_car_path=evidence_path,
+                governance_cli_path=verifier_path,
+                idena_anchor_policy_path=anchor_path,
+            )
 
     def test_duplicate_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -66,8 +66,9 @@ proposal after all gates, challenge period, and timelock pass.
   turnout. One identity is not one equal political vote.
 - PoHW: distinct eligible Idena identities, bounded state multiplier, and exact
   finalized authored-flip trust. Identity age is ignored.
-- PoAW: content-addressed AI review attestations with owner and runtime-family
-  diversity. AI agents cannot execute proposals.
+- PoAW: content-addressed AI review attestations with authenticated owner-group
+  diversity and one bounded model-family claim per owner. Runtime and provider
+  labels remain audit metadata. AI agents cannot execute proposals.
 - Proof of verification work: independent reproducible builds, tests, SBOMs,
   static/dependency analysis, and matching core artifact digests.
 

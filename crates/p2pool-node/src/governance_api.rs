@@ -1,9 +1,9 @@
 use anyhow::{bail, Context, Result};
 use cid::{Cid, Version};
 use governance_core::{
-    evaluate_gates, frozen_proposal_set_root, package_development_policy, AcceptanceEvidence,
-    DevelopmentPolicyBundleV1, EpochGateParametersV1, EpochGovernanceParameterSetV1,
-    GateParameterSet, RiskClass,
+    evaluate_gates, frozen_proposal_set_root, package_dag_cbor, package_development_policy,
+    AcceptanceEvidence, CriticalFindingWaiverV1, DevelopmentPolicyBundleV1, EpochGateParametersV1,
+    EpochGovernanceParameterSetV1, GateParameterSet, RiskClass,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -18,7 +18,7 @@ const MAX_GATE_ATTESTATIONS: u32 = 256;
 const MAX_CANONICAL_HISTORY_ENTRIES: usize = 1_024;
 const EXPERIMENTAL_LABEL: &str = "EXPERIMENTAL / NO-VALUE / NOT DAO-DEPLOYED";
 const EXPECTED_GOVERNANCE_PARAMETER_SET_CID: &str =
-    "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
+    "bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -132,7 +132,13 @@ pub struct GovernanceProposalViewV1 {
     pub proposal_cid: String,
     pub scope_evidence_cid: String,
     pub scope_evidence_verified: bool,
+    #[serde(default)]
+    pub parent_canonical_ecosystem_cid: Option<String>,
     pub candidate_ecosystem_cid: String,
+    #[serde(default)]
+    pub patch_cid: Option<String>,
+    #[serde(default)]
+    pub proposer_address: Option<String>,
     pub parameter_set_cid: String,
     pub review_round_id: String,
     pub review_round_state: String,
@@ -154,7 +160,9 @@ pub struct GovernanceProposalViewV1 {
     #[serde(default)]
     pub critical_finding_waiver_cid: Option<String>,
     #[serde(default)]
-    pub critical_finding_waiver_verified: bool,
+    pub review_round_critical_finding_waiver_cid: Option<String>,
+    #[serde(default)]
+    pub critical_finding_waiver: Option<CriticalFindingWaiverV1>,
     pub ai_reviews: GovernanceReviewGateV1,
     pub builds: GovernanceBuildGateV1,
     pub data_availability: GovernanceAvailabilityGateV1,
@@ -170,6 +178,8 @@ pub struct GovernanceProposalViewV1 {
 pub struct GovernanceReviewGateV1 {
     pub valid_attestations: u32,
     pub required_attestations: u32,
+    pub distinct_runtime_groups: u32,
+    pub required_runtime_groups: u32,
     pub distinct_model_families: u32,
     pub required_model_families: u32,
     pub distinct_owner_identities: u32,
@@ -328,6 +338,10 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
     if value.proposals.len() > MAX_GOVERNANCE_PROPOSALS {
         bail!("governance snapshot exceeds the proposal limit");
     }
+    let snapshot_current_block = value
+        .epoch_governance
+        .as_ref()
+        .map(|epoch| epoch.current_block);
     let mut proposal_ids = BTreeSet::new();
     for proposal in &value.proposals {
         validate_sha256(&proposal.proposal_id)?;
@@ -336,7 +350,27 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
         if !proposal.scope_evidence_verified {
             bail!("proposal scope evidence was not verified against source and patch CARs");
         }
+        let binding_count = [
+            proposal.parent_canonical_ecosystem_cid.as_ref(),
+            proposal.patch_cid.as_ref(),
+            proposal.proposer_address.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .count();
+        if binding_count != 0 && binding_count != 3 {
+            bail!("proposal waiver-binding metadata is incomplete");
+        }
+        if let Some(parent_cid) = proposal.parent_canonical_ecosystem_cid.as_deref() {
+            validate_object_cid(parent_cid)?;
+        }
         validate_object_cid(&proposal.candidate_ecosystem_cid)?;
+        if let Some(patch_cid) = proposal.patch_cid.as_deref() {
+            validate_object_cid(patch_cid)?;
+        }
+        if let Some(proposer_address) = proposal.proposer_address.as_deref() {
+            validate_address(proposer_address)?;
+        }
         validate_object_cid(&proposal.parameter_set_cid)?;
         if proposal.parameter_set_cid != EXPECTED_GOVERNANCE_PARAMETER_SET_CID {
             bail!("proposal parameter set does not match this dashboard build");
@@ -436,7 +470,7 @@ fn validate_dashboard(value: &GovernanceDashboardResponseV1) -> Result<()> {
         }
         validate_text(&proposal.challenge_status, 1, 160)?;
         validate_text(&proposal.execution_status, 1, 160)?;
-        validate_proposal_gates(proposal)?;
+        validate_proposal_gates_at_block(proposal, snapshot_current_block)?;
     }
     validate_epoch_governance(value.epoch_governance.as_ref(), &proposal_ids)?;
     validate_canonical_history(value)?;
@@ -614,10 +648,25 @@ fn validate_recovery(recovery: Option<&GovernanceRecoveryViewV1>) -> Result<()> 
     Ok(())
 }
 
-fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
+fn validate_proposal_gates_at_block(
+    proposal: &GovernanceProposalViewV1,
+    snapshot_current_block: Option<u64>,
+) -> Result<()> {
+    let profile = EpochGovernanceParameterSetV1::experimental_defaults();
+    let maximum_owner_attestations = proposal
+        .ai_reviews
+        .distinct_owner_identities
+        .checked_mul(
+            profile
+                .contract_resource_limits
+                .max_attestations_per_owner_per_class,
+        )
+        .context("proposal AI attestation ownership count overflows")?;
     let counts = [
         proposal.ai_reviews.valid_attestations,
         proposal.ai_reviews.required_attestations,
+        proposal.ai_reviews.distinct_runtime_groups,
+        proposal.ai_reviews.required_runtime_groups,
         proposal.ai_reviews.distinct_model_families,
         proposal.ai_reviews.required_model_families,
         proposal.ai_reviews.distinct_owner_identities,
@@ -638,6 +687,7 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
     ];
     if counts.iter().any(|count| *count > MAX_GATE_ATTESTATIONS)
         || proposal.ai_reviews.required_attestations == 0
+        || proposal.ai_reviews.required_runtime_groups == 0
         || proposal.ai_reviews.required_model_families == 0
         || proposal.ai_reviews.required_owner_identities == 0
         || proposal.builds.required_builders == 0
@@ -645,8 +695,14 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         || proposal.data_availability.required_attestors == 0
         || proposal.pohw.required_participating_identities == 0
         || proposal.pohw.required_yes_identities == 0
+        || proposal.ai_reviews.distinct_runtime_groups > proposal.ai_reviews.valid_attestations
+        || proposal.ai_reviews.distinct_runtime_groups
+            != proposal.ai_reviews.distinct_owner_identities
         || proposal.ai_reviews.distinct_model_families > proposal.ai_reviews.valid_attestations
+        || proposal.ai_reviews.distinct_model_families
+            > proposal.ai_reviews.distinct_owner_identities
         || proposal.ai_reviews.distinct_owner_identities > proposal.ai_reviews.valid_attestations
+        || proposal.ai_reviews.valid_attestations > maximum_owner_attestations
         || proposal.builds.distinct_platforms > proposal.builds.independent_builders
         || proposal.ai_reviews.valid_attestations > proposal.review_round_agent_attestations
         || proposal.builds.independent_builders > proposal.review_round_build_attestations
@@ -672,7 +728,6 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         bail!("proposal turnout exceeds snapshotted registered weight");
     }
 
-    let profile = EpochGovernanceParameterSetV1::experimental_defaults();
     let risk = match proposal.risk_class.as_str() {
         "normal" => RiskClass::Normal,
         "critical" => RiskClass::Critical,
@@ -682,18 +737,66 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
     };
     let valid_critical_finding_waiver = match (
         proposal.critical_finding_waiver_cid.as_deref(),
-        proposal.critical_finding_waiver_verified,
+        proposal.review_round_critical_finding_waiver_cid.as_deref(),
+        proposal.critical_finding_waiver.as_ref(),
     ) {
-        (None, false) => false,
-        (Some(cid), true) => {
+        (None, None, None) => false,
+        (Some(cid), Some(registered_cid), Some(waiver)) => {
             if !risk.is_critical() {
                 bail!("normal proposals cannot carry a critical-finding waiver");
             }
+            if cid != registered_cid {
+                bail!("proposal waiver differs from the contract review-round waiver");
+            }
             validate_object_cid(cid)
                 .context("critical-finding waiver CID is not a canonical immutable object")?;
+            let package = package_dag_cbor(waiver.clone())
+                .context("critical-finding waiver cannot be canonically encoded")?;
+            if package.root_cid.to_string() != cid {
+                bail!("critical-finding waiver content does not reproduce its declared CID");
+            }
+            let parent_cid = proposal
+                .parent_canonical_ecosystem_cid
+                .as_deref()
+                .context("critical-finding waiver has no proposal parent binding")?;
+            let patch_cid = proposal
+                .patch_cid
+                .as_deref()
+                .context("critical-finding waiver has no proposal patch binding")?;
+            let proposer_address = proposal
+                .proposer_address
+                .as_deref()
+                .context("critical-finding waiver has no authenticated proposer binding")?;
+            let current_block = snapshot_current_block
+                .context("critical-finding waiver has no snapshot block for freshness checks")?;
+            validate_object_cid(parent_cid)?;
+            validate_object_cid(patch_cid)?;
+            validate_address(proposer_address)?;
+            validate_content_cid(&waiver.rationale_cid)?;
+            validate_address(&waiver.author_idena_address)?;
+            if waiver.schema_version != 1
+                || waiver.review_round_id != proposal.review_round_id
+                || waiver.parent_ecosystem_cid != parent_cid
+                || waiver.candidate_ecosystem_cid != proposal.candidate_ecosystem_cid
+                || waiver.patch_cid != patch_cid
+                || waiver.risk_class != risk
+                || waiver.agent_review_root != proposal.agent_review_root
+                || waiver.unresolved_critical_owner_count
+                    != proposal.ai_reviews.unresolved_critical_findings
+                || waiver.unresolved_critical_owner_count
+                    < profile.critical.critical_finding_owner_threshold
+                || waiver.scope
+                    != "all-corroborated-unresolved-critical-findings-in-agent-review-root"
+                || waiver.author_idena_address != proposer_address
+                || waiver.creation_block > current_block
+            {
+                bail!("critical-finding waiver is not bound to this proposal and review round");
+            }
             true
         }
-        _ => bail!("critical-finding waiver CID and verification state are incomplete"),
+        _ => {
+            bail!("critical-finding waiver CID, contract registration, and content are incomplete")
+        }
     };
     let evidence = AcceptanceEvidence {
         yes_weight,
@@ -703,6 +806,7 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         distinct_yes_identities: proposal.pohw.distinct_yes_identities,
         verified_or_human_yes_identities: proposal.pohw.verified_or_human_yes_identities,
         valid_agent_attestations: proposal.ai_reviews.valid_attestations,
+        distinct_agent_runtime_groups: proposal.ai_reviews.distinct_runtime_groups,
         distinct_agent_families: proposal.ai_reviews.distinct_model_families,
         distinct_agent_owner_identities: proposal.ai_reviews.distinct_owner_identities,
         unresolved_critical_findings: if valid_critical_finding_waiver {
@@ -727,8 +831,9 @@ fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
         || proposal.pohw.required_yes_identities != expected.minimum_yes_identities
         || proposal.pohw.required_verified_or_human_yes != expected.minimum_verified_or_human_yes
         || proposal.ai_reviews.required_attestations != expected.minimum_ai_attestations
+        || proposal.ai_reviews.required_runtime_groups != expected.minimum_ai_independence_groups
         || proposal.ai_reviews.required_model_families != expected.minimum_ai_families
-        || proposal.ai_reviews.required_owner_identities != expected.minimum_ai_independence_groups
+        || proposal.ai_reviews.required_owner_identities != expected.minimum_ai_owner_identities
         || proposal.builds.required_builders != expected.minimum_builders
         || proposal.builds.required_platforms != expected.minimum_builder_platforms
         || proposal.data_availability.required_attestors
@@ -776,8 +881,10 @@ fn acceptance_parameters(parameters: EpochGateParametersV1) -> GateParameterSet 
         minimum_yes_identities: parameters.minimum_yes_identities,
         minimum_verified_or_human_yes: parameters.minimum_verified_or_human_yes,
         minimum_agent_attestations: parameters.minimum_ai_attestations,
+        minimum_agent_runtime_groups: parameters.minimum_ai_independence_groups,
         minimum_agent_families: parameters.minimum_ai_families,
-        minimum_agent_owners: parameters.minimum_ai_independence_groups,
+        minimum_agent_owners: parameters.minimum_ai_owner_identities,
+        critical_finding_owner_threshold: parameters.critical_finding_owner_threshold,
         minimum_builders: parameters.minimum_builders,
         minimum_builder_platforms: parameters.minimum_builder_platforms,
         minimum_data_availability_providers: parameters.minimum_data_availability_providers,
@@ -828,7 +935,7 @@ fn validate_address(value: &str) -> Result<()> {
             .bytes()
             .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
     {
-        bail!("governance contract address is invalid");
+        bail!("governance address is invalid");
     }
     Ok(())
 }
@@ -902,6 +1009,10 @@ mod tests {
     use super::*;
     use governance_core::cid_for;
 
+    fn validate_proposal_gates(proposal: &GovernanceProposalViewV1) -> Result<()> {
+        validate_proposal_gates_at_block(proposal, None)
+    }
+
     fn cid(label: &str) -> String {
         cid_for(0x71, label.as_bytes()).to_string()
     }
@@ -928,11 +1039,14 @@ mod tests {
             proposal_cid: cid("proposal"),
             scope_evidence_cid: cid("scope-evidence"),
             scope_evidence_verified: true,
+            parent_canonical_ecosystem_cid: Some(cid("parent")),
             candidate_ecosystem_cid: cid("candidate"),
+            patch_cid: Some(cid("patch")),
+            proposer_address: Some(format!("0x{}", "a".repeat(40))),
             parameter_set_cid: EXPECTED_GOVERNANCE_PARAMETER_SET_CID.to_string(),
             review_round_id: "5".repeat(64),
             review_round_state: "Claimed".to_string(),
-            review_round_agent_attestations: 3,
+            review_round_agent_attestations: 5,
             review_round_build_attestations: 3,
             review_round_availability_attestations: 3,
             affected_repositories: vec!["P2poolBTC".to_string()],
@@ -948,12 +1062,15 @@ mod tests {
             build_attestation_root: "7".repeat(64),
             data_availability_root: "8".repeat(64),
             critical_finding_waiver_cid: None,
-            critical_finding_waiver_verified: false,
+            review_round_critical_finding_waiver_cid: None,
+            critical_finding_waiver: None,
             ai_reviews: GovernanceReviewGateV1 {
-                valid_attestations: 3,
-                required_attestations: 3,
-                distinct_model_families: 2,
-                required_model_families: 2,
+                valid_attestations: 5,
+                required_attestations: 5,
+                distinct_runtime_groups: 3,
+                required_runtime_groups: 3,
+                distinct_model_families: 3,
+                required_model_families: 3,
                 distinct_owner_identities: 3,
                 required_owner_identities: 3,
                 unresolved_critical_findings: 0,
@@ -1116,6 +1233,15 @@ mod tests {
         forged_result.ai_reviews.valid_attestations = 2;
         assert!(validate_proposal_gates(&forged_result).is_err());
 
+        let mut owner_cap_bypass = proposal.clone();
+        owner_cap_bypass.ai_reviews.valid_attestations = 7;
+        owner_cap_bypass.review_round_agent_attestations = 7;
+        assert!(validate_proposal_gates(&owner_cap_bypass).is_err());
+
+        let mut family_inflation = proposal.clone();
+        family_inflation.ai_reviews.distinct_model_families = 4;
+        assert!(validate_proposal_gates(&family_inflation).is_err());
+
         let mut impossible_turnout = proposal.clone();
         impossible_turnout.pos.yes_weight = "101".to_string();
         assert!(validate_proposal_gates(&impossible_turnout).is_err());
@@ -1135,20 +1261,82 @@ mod tests {
     #[test]
     fn accepted_proposal_requires_an_explicit_verified_critical_finding_waiver() {
         let mut proposal = passing_proposal();
-        proposal.ai_reviews.unresolved_critical_findings = 1;
+        proposal.ai_reviews.unresolved_critical_findings = 3;
         assert!(validate_proposal_gates(&proposal).is_err());
 
         proposal.critical_finding_waiver_cid = Some(cid("critical-finding-waiver"));
         assert!(validate_proposal_gates(&proposal).is_err());
 
-        proposal.critical_finding_waiver_verified = true;
-        assert!(validate_proposal_gates(&proposal).is_ok());
+        proposal.review_round_critical_finding_waiver_cid =
+            proposal.critical_finding_waiver_cid.clone();
+        assert!(validate_proposal_gates(&proposal).is_err());
+
+        let waiver = CriticalFindingWaiverV1 {
+            schema_version: 1,
+            review_round_id: proposal.review_round_id.clone(),
+            parent_ecosystem_cid: proposal.parent_canonical_ecosystem_cid.clone().unwrap(),
+            candidate_ecosystem_cid: proposal.candidate_ecosystem_cid.clone(),
+            patch_cid: proposal.patch_cid.clone().unwrap(),
+            risk_class: RiskClass::Critical,
+            agent_review_root: proposal.agent_review_root.clone(),
+            unresolved_critical_owner_count: 3,
+            scope: "all-corroborated-unresolved-critical-findings-in-agent-review-root".to_string(),
+            rationale_cid: cid("critical-finding-waiver-rationale"),
+            author_idena_address: proposal.proposer_address.clone().unwrap(),
+            creation_block: 90,
+        };
+        let waiver_cid = package_dag_cbor(waiver.clone())
+            .unwrap()
+            .root_cid
+            .to_string();
+        proposal.critical_finding_waiver_cid = Some(waiver_cid.clone());
+        proposal.review_round_critical_finding_waiver_cid = Some(waiver_cid);
+        proposal.critical_finding_waiver = Some(waiver);
+        assert!(validate_proposal_gates_at_block(&proposal, Some(100)).is_ok());
+        assert!(validate_proposal_gates(&proposal).is_err());
+
+        let mut substituted_author = proposal.clone();
+        substituted_author
+            .critical_finding_waiver
+            .as_mut()
+            .unwrap()
+            .author_idena_address = format!("0x{}", "b".repeat(40));
+        let substituted_author_cid =
+            package_dag_cbor(substituted_author.critical_finding_waiver.clone().unwrap())
+                .unwrap()
+                .root_cid
+                .to_string();
+        substituted_author.critical_finding_waiver_cid = Some(substituted_author_cid.clone());
+        substituted_author.review_round_critical_finding_waiver_cid = Some(substituted_author_cid);
+        assert!(validate_proposal_gates_at_block(&substituted_author, Some(100)).is_err());
+
+        let mut future_waiver = proposal.clone();
+        future_waiver
+            .critical_finding_waiver
+            .as_mut()
+            .unwrap()
+            .creation_block = 101;
+        let future_waiver_cid =
+            package_dag_cbor(future_waiver.critical_finding_waiver.clone().unwrap())
+                .unwrap()
+                .root_cid
+                .to_string();
+        future_waiver.critical_finding_waiver_cid = Some(future_waiver_cid.clone());
+        future_waiver.review_round_critical_finding_waiver_cid = Some(future_waiver_cid);
+        assert!(validate_proposal_gates_at_block(&future_waiver, Some(100)).is_err());
+
+        proposal
+            .critical_finding_waiver
+            .as_mut()
+            .unwrap()
+            .rationale_cid = cid("substituted-rationale");
+        assert!(validate_proposal_gates_at_block(&proposal, Some(100)).is_err());
 
         proposal.critical_finding_waiver_cid = Some(raw_cid("raw-waiver-is-not-a-manifest"));
-        assert!(validate_proposal_gates(&proposal).is_err());
+        assert!(validate_proposal_gates_at_block(&proposal, Some(100)).is_err());
 
         proposal.critical_finding_waiver_cid = None;
-        assert!(validate_proposal_gates(&proposal).is_err());
+        assert!(validate_proposal_gates_at_block(&proposal, Some(100)).is_err());
     }
 
     #[test]
@@ -1160,11 +1348,30 @@ mod tests {
         proposal.pohw.required_yes_identities = 1;
         proposal.pohw.required_verified_or_human_yes = 0;
         proposal.ai_reviews.required_attestations = 1;
+        proposal.ai_reviews.required_runtime_groups = 1;
         proposal.ai_reviews.required_model_families = 1;
         proposal.ai_reviews.required_owner_identities = 1;
         proposal.builds.required_builders = 1;
         proposal.builds.required_platforms = 1;
         proposal.data_availability.required_attestors = 1;
+        assert!(validate_proposal_gates(&proposal).is_err());
+    }
+
+    #[test]
+    fn runtime_groups_are_authenticated_owner_groups() {
+        let mut proposal = passing_proposal();
+        proposal.ai_reviews.valid_attestations = 4;
+        proposal.ai_reviews.distinct_runtime_groups = 2;
+        proposal.ai_reviews.distinct_model_families = 2;
+        proposal.ai_reviews.distinct_owner_identities = 2;
+        proposal.ai_reviews.passed = false;
+        proposal.state = "Rejected".to_string();
+        assert!(validate_proposal_gates(&proposal).is_ok());
+
+        proposal.ai_reviews.distinct_runtime_groups = 3;
+        assert!(validate_proposal_gates(&proposal).is_err());
+        proposal.ai_reviews.distinct_runtime_groups = 2;
+        proposal.ai_reviews.passed = true;
         assert!(validate_proposal_gates(&proposal).is_err());
     }
 

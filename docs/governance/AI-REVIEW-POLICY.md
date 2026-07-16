@@ -47,12 +47,22 @@ and derives count-bound roots. A proposal can claim only that frozen round.
 This removes proposer-selected omission after a round opens; it does not prove
 that every possible reviewer learned about the round or was able to participate.
 
-Normal proposals require three valid attestations, two independently operated
-model/runtime families, and two eligible owner identities. Critical proposals
-require five, three families, and three owners. Several agents controlled by
-one identity count once for owner diversity. An unresolved critical finding
-blocks finalization. A waiver is a separate immutable CID and uses the critical
-proposal voting threshold.
+Normal proposals require three valid attestations, two authenticated owner
+groups, two model families, and two eligible owner identities. Critical
+proposals require five attestations, three owner groups, three model families,
+and three owners. The runtime-group gate is deliberately derived from eligible
+on-chain owners; a self-declared runtime label cannot create another group. One
+owner may submit at most two agent attestations in a round, and all of that
+owner's qualifying attestations must use one model-family claim. Repeated
+attestations can contribute to the attestation count, but the owner and family
+count only once for diversity. Model-family and provider labels remain
+self-asserted audit metadata until authenticated provider receipts exist.
+
+An unresolved critical finding blocks finalization once the configured number
+of distinct reviewer owners corroborates it. A waiver is a separate immutable
+`CriticalFindingWaiverV1` CID bound to the exact review round, roots, scope,
+finding-owner count, author, and rationale. Only a critical-risk proposal may
+carry it, and that proposal still uses every critical acceptance threshold.
 
 ## Objective slashing only
 

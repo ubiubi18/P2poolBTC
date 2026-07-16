@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/pohw-community-onboarding-profile-v1.schema.json",
+  "title": "P2poolBTC Community Onboarding Profile V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "policy_path",
+    "manifest_path",
+    "roles",
+    "live_success"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "pohw-community-onboarding-profile/v1"
+    },
+    "experiment_id": {
+      "const": "pohw-experiment-1-full-consensus"
+    },
+    "policy_path": {
+      "const": "compatibility/experiment-1-launch-policy.json"
+    },
+    "manifest_path": {
+      "const": "compatibility/experiment-1-full-consensus.json"
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observer",
+        "pruned-miner",
+        "archive-operator"
+      ],
+      "properties": {
+        "observer": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/role"
+            },
+            {
+              "properties": {
+                "live_join": {
+                  "const": false
+                },
+                "minimum_cpu_cores": {
+                  "const": 2
+                },
+                "minimum_memory_gib": {
+                  "const": 4
+                },
+                "minimum_free_storage_gib": {
+                  "const": 5
+                },
+                "requires_linux": {
+                  "const": false
+                },
+                "requires_systemd": {
+                  "const": false
+                },
+                "requires_ssd": {
+                  "const": false
+                },
+                "required_command_groups": {
+                  "const": [
+                    [
+                      "git"
+                    ],
+                    [
+                      "python3"
+                    ]
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "pruned-miner": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/role"
+            },
+            {
+              "$ref": "#/$defs/liveMiner"
+            },
+            {
+              "properties": {
+                "minimum_free_storage_gib": {
+                  "const": 100
+                }
+              }
+            }
+          ]
+        },
+        "archive-operator": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/role"
+            },
+            {
+              "$ref": "#/$defs/liveMiner"
+            },
+            {
+              "properties": {
+                "minimum_free_storage_gib": {
+                  "const": 900
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "live_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_height",
+        "checkpoint_hash",
+        "rpc_port",
+        "minimum_bitcoin_peers",
+        "minimum_reachable_gossip_peers",
+        "minimum_active_shares",
+        "minimum_miner_active_shares",
+        "maximum_miner_share_age_seconds",
+        "maximum_core_tip_age_seconds",
+        "maximum_future_clock_skew_seconds",
+        "minimum_snapshot_voters",
+        "require_registered_miner",
+        "require_verified_snapshot",
+        "require_accepted_bitcoin_template"
+      ],
+      "properties": {
+        "checkpoint_height": {
+          "const": 958175
+        },
+        "checkpoint_hash": {
+          "const": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6"
+        },
+        "rpc_port": {
+          "const": 40414
+        },
+        "minimum_bitcoin_peers": {
+          "const": 1
+        },
+        "minimum_reachable_gossip_peers": {
+          "const": 1
+        },
+        "minimum_active_shares": {
+          "const": 1
+        },
+        "minimum_miner_active_shares": {
+          "const": 1
+        },
+        "maximum_miner_share_age_seconds": {
+          "const": 3600
+        },
+        "maximum_core_tip_age_seconds": {
+          "const": 7200
+        },
+        "maximum_future_clock_skew_seconds": {
+          "const": 300
+        },
+        "minimum_snapshot_voters": {
+          "const": 3
+        },
+        "require_registered_miner": {
+          "const": true
+        },
+        "require_verified_snapshot": {
+          "const": true
+        },
+        "require_accepted_bitcoin_template": {
+          "const": true
+        }
+      }
+    }
+  },
+  "$defs": {
+    "liveMiner": {
+      "properties": {
+        "live_join": {
+          "const": true
+        },
+        "minimum_cpu_cores": {
+          "const": 4
+        },
+        "minimum_memory_gib": {
+          "const": 16
+        },
+        "requires_linux": {
+          "const": true
+        },
+        "requires_systemd": {
+          "const": true
+        },
+        "requires_ssd": {
+          "const": true
+        },
+        "required_command_groups": {
+          "const": [
+            [
+              "git"
+            ],
+            [
+              "cargo"
+            ],
+            [
+              "python3"
+            ],
+            [
+              "cmake"
+            ],
+            [
+              "ninja"
+            ],
+            [
+              "c++",
+              "g++",
+              "clang++"
+            ],
+            [
+              "systemctl"
+            ]
+          ]
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "live_join",
+        "minimum_cpu_cores",
+        "minimum_memory_gib",
+        "minimum_free_storage_gib",
+        "requires_linux",
+        "requires_systemd",
+        "requires_ssd",
+        "required_command_groups"
+      ],
+      "properties": {
+        "live_join": {
+          "type": "boolean"
+        },
+        "minimum_cpu_cores": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "minimum_memory_gib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "minimum_free_storage_gib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "requires_linux": {
+          "type": "boolean"
+        },
+        "requires_systemd": {
+          "type": "boolean"
+        },
+        "requires_ssd": {
+          "type": "boolean"
+        },
+        "required_command_groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+_.-]{1,64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

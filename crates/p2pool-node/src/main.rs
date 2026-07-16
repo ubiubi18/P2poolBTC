@@ -5306,6 +5306,22 @@ async fn multinode_preflight(
         .and_then(|value| value.get("registered"))
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let miner_activity = miner_id.as_ref().map(|id| {
+        let normalized = id.to_ascii_lowercase();
+        let active = state
+            .share_summaries()
+            .into_iter()
+            .filter(|share| share.active && share.miner_id.eq_ignore_ascii_case(&normalized))
+            .collect::<Vec<_>>();
+        let latest = active
+            .iter()
+            .max_by(|left, right| left.height.cmp(&right.height).then_with(|| left.share_hash.cmp(&right.share_hash)));
+        serde_json::json!({
+            "active_share_count": active.len(),
+            "latest_active_share_height": latest.map(|share| share.height),
+            "latest_template_created_at_unix": latest.and_then(|share| share.template_created_at_unix),
+        })
+    });
 
     let probe_peers: Vec<SocketAddr> = if peer_addrs.is_empty() {
         peers.iter().map(|peer| peer.addr).collect()
@@ -5349,6 +5365,7 @@ async fn multinode_preflight(
             "has_share_tip": status.replay.best_share_tip.is_some(),
         },
         "miner_registration": miner_registration,
+        "miner_activity": miner_activity,
         "snapshot_directory": latest_snapshot,
         "peer_book": peers,
         "peer_inventory_probe": peer_inventory,
@@ -7487,6 +7504,26 @@ mod tests {
                 .expect("secure test dir");
         }
         path
+    }
+
+    #[tokio::test]
+    async fn multinode_preflight_reports_requested_miner_activity_separately() {
+        let datadir = test_dir("pohw-preflight-miner-activity");
+
+        let report = multinode_preflight(
+            datadir.clone(),
+            None,
+            Some("Miner-1".to_string()),
+            Vec::new(),
+        )
+        .await
+        .expect("empty preflight");
+
+        assert_eq!(report["miner_activity"]["active_share_count"], 0);
+        assert!(report["miner_activity"]["latest_active_share_height"].is_null());
+        assert!(report["miner_activity"]["latest_template_created_at_unix"].is_null());
+        assert_eq!(report["local"]["replay"]["active_share_count"], 0);
+        std::fs::remove_dir_all(datadir).expect("cleanup test dir");
     }
 
     #[tokio::test]

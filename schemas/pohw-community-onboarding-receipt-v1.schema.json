@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/pohw-community-onboarding-receipt-v1.schema.json",
+  "title": "P2poolBTC Community Onboarding Receipt V1",
+  "description": "A deliberately redacted local readiness receipt. It is diagnostic evidence, not an identity, release, or chain attestation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at_utc",
+    "experiment_id",
+    "role",
+    "journey_status",
+    "release",
+    "host",
+    "stages",
+    "live",
+    "next_action_codes",
+    "privacy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "pohw-community-onboarding-receipt/v1"
+    },
+    "generated_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "experiment_id": {
+      "const": "pohw-experiment-1-full-consensus"
+    },
+    "role": {
+      "enum": [
+        "observer",
+        "pruned-miner",
+        "archive-operator"
+      ]
+    },
+    "journey_status": {
+      "enum": [
+        "review-ready",
+        "verification-failed",
+        "host-not-ready",
+        "blocked-public-join",
+        "ready-for-identity-registration",
+        "live-join-incomplete",
+        "live-join-verified"
+      ]
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_status",
+        "activation_id",
+        "manifest_verified",
+        "launch_policy_verified",
+        "source_commit",
+        "source_tree_clean",
+        "candidate_ecosystem_cid",
+        "candidate_ecosystem_verified",
+        "canonical_source_cid",
+        "canonical_source_verified",
+        "source_commit_matches",
+        "governance_cli_verified",
+        "attested_artifacts",
+        "focused_tests_passed",
+        "canonical_source_published",
+        "public_join_ready",
+        "missing_release_gates"
+      ],
+      "properties": {
+        "policy_status": {
+          "enum": [
+            "blocked-release-readiness",
+            "ready-for-public-join",
+            "invalid"
+          ]
+        },
+        "activation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_verified": {
+          "type": "boolean"
+        },
+        "launch_policy_verified": {
+          "type": "boolean"
+        },
+        "source_commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_tree_clean": {
+          "type": "boolean"
+        },
+        "candidate_ecosystem_cid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^bafyrei[a-z2-7]{52}$"
+        },
+        "candidate_ecosystem_verified": {
+          "type": "boolean"
+        },
+        "canonical_source_cid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^bafyrei[a-z2-7]{52}$"
+        },
+        "canonical_source_verified": {
+          "type": "boolean"
+        },
+        "source_commit_matches": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "governance_cli_verified": {
+          "type": "boolean"
+        },
+        "attested_artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pohw-governance": {
+              "$ref": "#/$defs/artifactBinding"
+            },
+            "p2pool-node": {
+              "$ref": "#/$defs/artifactBinding"
+            },
+            "bitcoin-cli": {
+              "$ref": "#/$defs/artifactBinding"
+            },
+            "bitcoind": {
+              "$ref": "#/$defs/artifactBinding"
+            }
+          }
+        },
+        "focused_tests_passed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "canonical_source_published": {
+          "type": "boolean"
+        },
+        "public_join_ready": {
+          "type": "boolean"
+        },
+        "missing_release_gates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+          }
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eligible_for_role",
+        "platform_class",
+        "cpu_cores",
+        "memory_gib",
+        "free_storage_gib",
+        "storage_path_verified",
+        "ssd_confirmed",
+        "systemd_available",
+        "missing_command_groups",
+        "failed_checks"
+      ],
+      "properties": {
+        "eligible_for_role": {
+          "type": "boolean"
+        },
+        "platform_class": {
+          "enum": [
+            "linux",
+            "macos",
+            "windows",
+            "other"
+          ]
+        },
+        "cpu_cores": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_gib": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "free_storage_gib": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "storage_path_verified": {
+          "type": "boolean"
+        },
+        "ssd_confirmed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "systemd_available": {
+          "type": "boolean"
+        },
+        "missing_command_groups": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9+_.|:-]{1,256}$"
+          }
+        },
+        "failed_checks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+          }
+        }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "system-check",
+              "release-verification",
+              "identity-registration",
+              "network-join",
+              "success-proof"
+            ]
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "blocked",
+              "pending",
+              "not-required"
+            ]
+          }
+        }
+      }
+    },
+    "live": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "core_ready",
+        "core_profile_verified",
+        "core_local_service_verified",
+        "checkpoint_verified",
+        "core_height",
+        "core_tip_age_seconds",
+        "bitcoin_peers",
+        "registered_miner",
+        "verified_snapshot",
+        "snapshot_voters",
+        "reachable_gossip_peers",
+        "accepted_bitcoin_template",
+        "active_shares",
+        "miner_active_shares",
+        "miner_share_age_seconds",
+        "share_tip_present"
+      ],
+      "properties": {
+        "core_ready": {
+          "type": "boolean"
+        },
+        "core_profile_verified": {
+          "type": "boolean"
+        },
+        "core_local_service_verified": {
+          "type": "boolean"
+        },
+        "checkpoint_verified": {
+          "type": "boolean"
+        },
+        "core_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "core_tip_age_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "bitcoin_peers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "registered_miner": {
+          "type": "boolean"
+        },
+        "verified_snapshot": {
+          "type": "boolean"
+        },
+        "snapshot_voters": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reachable_gossip_peers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted_bitcoin_template": {
+          "type": "boolean"
+        },
+        "active_shares": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "miner_active_shares": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "miner_share_age_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "share_tip_present": {
+          "type": "boolean"
+        }
+      }
+    },
+    "next_action_codes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,95}$"
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contains_identity_address",
+        "contains_miner_id",
+        "contains_peer_address",
+        "contains_wallet_data",
+        "contains_rpc_secret",
+        "contains_local_path"
+      ],
+      "properties": {
+        "contains_identity_address": {
+          "const": false
+        },
+        "contains_miner_id": {
+          "const": false
+        },
+        "contains_peer_address": {
+          "const": false
+        },
+        "contains_wallet_data": {
+          "const": false
+        },
+        "contains_rpc_secret": {
+          "const": false
+        },
+        "contains_local_path": {
+          "const": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cid",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "cid": {
+          "type": "string",
+          "pattern": "^bafkrei[a-z2-7]{52}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

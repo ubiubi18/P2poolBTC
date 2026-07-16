@@ -19,6 +19,7 @@ from typing import Any
 MAX_JSON_BYTES = 1024 * 1024
 MAX_CAR_BYTES = 4 * 1024 * 1024
 MAX_READINESS_EVIDENCE_CAR_BYTES = 16 * 1024 * 1024
+MAX_EXECUTABLE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CAR_HEADER_BYTES = 4 * 1024
 MAX_CBOR_DEPTH = 32
 MAX_CBOR_ITEMS = 1024
@@ -181,6 +182,71 @@ def read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     if not isinstance(value, dict):
         raise LaunchPolicyError(f"{label} root must be an object")
     return value, raw
+
+
+def hash_regular_file(path: Path, label: str, maximum: int) -> str:
+    try:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise LaunchPolicyError(f"{label} must be a regular non-symlink file")
+        if metadata.st_size <= 0 or metadata.st_size > maximum:
+            raise LaunchPolicyError(f"{label} size is outside its accepted range")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        digest = hashlib.sha256()
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+                or not stat.S_ISREG(opened.st_mode)
+            ):
+                raise LaunchPolicyError(f"{label} changed before it was opened")
+            total = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > maximum:
+                    raise LaunchPolicyError(f"{label} exceeds its size limit")
+                digest.update(chunk)
+            closed = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            closed.st_dev,
+            closed.st_ino,
+            closed.st_size,
+            closed.st_mtime_ns,
+        ) or total != opened.st_size:
+            raise LaunchPolicyError(f"{label} changed while it was read")
+        return digest.hexdigest()
+    except LaunchPolicyError:
+        raise
+    except OSError as exc:
+        raise LaunchPolicyError(f"cannot hash {label}: {exc}") from exc
+
+
+def expected_governance_cli_sha256(
+    governance_cli_path: Path, explicit_sha256: str | None
+) -> str:
+    if explicit_sha256 is not None:
+        return require_sha256(explicit_sha256, "pohw-governance verifier SHA-256")
+    digest_path = governance_cli_path.with_name(governance_cli_path.name + ".sha256")
+    raw = read_regular_file(digest_path, "pohw-governance verifier digest", 128)
+    try:
+        value = raw.decode("ascii").removesuffix("\n")
+    except UnicodeError as exc:
+        raise LaunchPolicyError("pohw-governance verifier digest is not ASCII") from exc
+    digest = require_sha256(value, "pohw-governance verifier SHA-256")
+    if raw != f"{digest}\n".encode("ascii"):
+        raise LaunchPolicyError("pohw-governance verifier digest file is not canonical")
+    return digest
 
 
 def resolve_repo_file(repo_root: Path, raw_path: Any, label: str) -> Path:
@@ -523,6 +589,7 @@ def verify_readiness_evidence(
     readiness_car_path: Path | None,
     readiness_evidence_car_path: Path | None,
     governance_cli_path: Path | None,
+    governance_cli_sha256: str | None,
 ) -> tuple[bool, str | None]:
     report_fields = (
         readiness.get("deployment_readiness_report_cid"),
@@ -587,6 +654,18 @@ def verify_readiness_evidence(
     ):
         raise LaunchPolicyError(
             "pohw-governance verifier must be an absolute executable regular non-symlink file"
+        )
+    expected_cli_sha256 = expected_governance_cli_sha256(
+        governance_cli_path, governance_cli_sha256
+    )
+    if (
+        hash_regular_file(
+            governance_cli_path, "pohw-governance verifier", MAX_EXECUTABLE_BYTES
+        )
+        != expected_cli_sha256
+    ):
+        raise LaunchPolicyError(
+            "pohw-governance verifier does not match its independently selected SHA-256"
         )
     try:
         result = subprocess.run(
@@ -779,6 +858,7 @@ def validate(
     readiness_car_path: Path | None = None,
     readiness_evidence_car_path: Path | None = None,
     governance_cli_path: Path | None = None,
+    governance_cli_sha256: str | None = None,
     idena_anchor_policy_path: Path | None = None,
 ) -> None:
     if policy.get("schema_version") != SCHEMA:
@@ -859,6 +939,7 @@ def validate(
         readiness_car_path,
         readiness_evidence_car_path,
         governance_cli_path,
+        governance_cli_sha256,
     )
     deployment_finalized = verify_registry_deployment(
         policy.get("registry_deployment"),
@@ -911,6 +992,13 @@ def main() -> int:
         help="exact pohw-governance binary used to recompute readiness evidence",
     )
     parser.add_argument(
+        "--governance-cli-sha256",
+        help=(
+            "independently selected lowercase SHA-256 for pohw-governance; "
+            "otherwise read the adjacent .sha256 file"
+        ),
+    )
+    parser.add_argument(
         "--idena-anchor-policy",
         type=Path,
         help="installed IdenaAnchorPolicyV2 bound by finalized deployment evidence",
@@ -930,6 +1018,7 @@ def main() -> int:
             args.readiness_car,
             args.readiness_evidence_car,
             args.governance_cli,
+            args.governance_cli_sha256,
             args.idena_anchor_policy,
         )
         if args.require_ready and policy.get("status") != READY_STATUS:

@@ -7,7 +7,7 @@
 
 use crate::{
     cid_for, effective_vote_weight, flip_trust_bps, normalize_address, verify_dag_cbor_car,
-    IdentityState, RiskClass, VoteChoice,
+    IdentityState, RiskClass, StatusBps, VoteChoice,
 };
 use cid::{Cid, Version};
 use serde::de::DeserializeOwned;
@@ -78,6 +78,8 @@ pub struct EpochGateParametersV1 {
     pub minimum_ai_attestations: u32,
     pub minimum_ai_independence_groups: u32,
     pub minimum_ai_families: u32,
+    pub minimum_ai_owner_identities: u32,
+    pub critical_finding_owner_threshold: u32,
     pub minimum_builders: u32,
     pub minimum_builder_platforms: u32,
     pub minimum_data_availability_providers: u32,
@@ -86,10 +88,67 @@ pub struct EpochGateParametersV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EpochIdentityMathParametersV1 {
+    pub idna_atoms_per_unit: String,
+    pub status_bps: StatusBps,
+    pub flip_prior_reported: u16,
+    pub flip_prior_total: u16,
+    pub flip_trust_floor_bps: u16,
+    pub flip_trust_ceiling_bps: u16,
+    pub flip_penalty_scale: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EpochLifecycleParametersV1 {
+    pub review_period_blocks: u64,
+    pub voting_period_blocks: u64,
+    pub challenge_period_blocks: u64,
+    pub timelock_blocks: u64,
+    pub execution_window_blocks: u64,
+    pub unbonding_delay_epochs: u16,
+    pub minimum_identity_metrics_attestations: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EpochContractBondPolicyV1 {
+    pub minimum_reviewer_bond_atoms: String,
+    pub minimum_builder_bond_atoms: String,
+    pub minimum_data_availability_bond_atoms: String,
+    pub stale_processing_fee_atoms: String,
+    pub rejected_proposal_return_bps: u16,
+    pub expired_review_round_return_bps: u16,
+    pub expired_proposal_return_bps: u16,
+    pub successful_challenge_proposer_return_bps: u16,
+    pub unavailable_attestation_slash_bps: u16,
+    pub fraudulent_actor_stake_slash_bps: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EpochContractResourceLimitsV1 {
+    pub max_stake_history: u32,
+    pub max_portable_artifact_size: u64,
+    pub max_committed_attestations: u32,
+    pub max_attestations_per_owner_per_class: u32,
+    pub max_required_availability_cids: u32,
+    pub max_scope_proof_bytes: u64,
+    pub max_scope_files_per_repository: u32,
+    pub max_scope_source_file_bytes: u64,
+    pub max_scope_source_tree_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EpochGovernanceParameterSetV1 {
     pub schema_version: u16,
     pub stake_quantum_atoms: String,
     pub minimum_active_stake_atoms: String,
+    pub identity_math: EpochIdentityMathParametersV1,
+    pub lifecycle: EpochLifecycleParametersV1,
+    pub contract_bond_policy: EpochContractBondPolicyV1,
+    pub contract_resource_limits: EpochContractResourceLimitsV1,
     pub normal_proposal_bond_atoms: String,
     pub critical_proposal_bond_atoms: String,
     pub rejected_bond_burn_bps: u16,
@@ -110,6 +169,51 @@ impl EpochGovernanceParameterSetV1 {
             schema_version: 1,
             stake_quantum_atoms: "1000000000000".to_string(),
             minimum_active_stake_atoms: "1000000000000000000".to_string(),
+            identity_math: EpochIdentityMathParametersV1 {
+                idna_atoms_per_unit: "1000000000000000000".to_string(),
+                status_bps: StatusBps {
+                    human: 10_000,
+                    verified: 8_500,
+                    newbie: 7_000,
+                },
+                flip_prior_reported: 1,
+                flip_prior_total: 20,
+                flip_trust_floor_bps: 4_000,
+                flip_trust_ceiling_bps: 10_000,
+                flip_penalty_scale: 15_000,
+            },
+            lifecycle: EpochLifecycleParametersV1 {
+                review_period_blocks: 40,
+                voting_period_blocks: 120,
+                challenge_period_blocks: 60,
+                timelock_blocks: 60,
+                execution_window_blocks: 600,
+                unbonding_delay_epochs: 4,
+                minimum_identity_metrics_attestations: 3,
+            },
+            contract_bond_policy: EpochContractBondPolicyV1 {
+                minimum_reviewer_bond_atoms: "1000000000000000000".to_string(),
+                minimum_builder_bond_atoms: "1000000000000000000".to_string(),
+                minimum_data_availability_bond_atoms: "1000000000000000000".to_string(),
+                stale_processing_fee_atoms: "100000000000000000".to_string(),
+                rejected_proposal_return_bps: 9_000,
+                expired_review_round_return_bps: 7_500,
+                expired_proposal_return_bps: 7_500,
+                successful_challenge_proposer_return_bps: 5_000,
+                unavailable_attestation_slash_bps: 5_000,
+                fraudulent_actor_stake_slash_bps: 500,
+            },
+            contract_resource_limits: EpochContractResourceLimitsV1 {
+                max_stake_history: 256,
+                max_portable_artifact_size: 9_007_199_254_740_991,
+                max_committed_attestations: 256,
+                max_attestations_per_owner_per_class: 2,
+                max_required_availability_cids: 4_096,
+                max_scope_proof_bytes: 600_000,
+                max_scope_files_per_repository: 2_048,
+                max_scope_source_file_bytes: 268_435_456,
+                max_scope_source_tree_bytes: 2_147_483_648,
+            },
             normal_proposal_bond_atoms: "10000000000000000000".to_string(),
             critical_proposal_bond_atoms: "25000000000000000000".to_string(),
             rejected_bond_burn_bps: 5_000,
@@ -149,9 +253,11 @@ impl EpochGovernanceParameterSetV1 {
                 minimum_participating_identities: 7,
                 minimum_yes_identities: 7,
                 minimum_verified_or_human_yes: 3,
-                minimum_ai_attestations: 2,
+                minimum_ai_attestations: 3,
                 minimum_ai_independence_groups: 2,
-                minimum_ai_families: 1,
+                minimum_ai_families: 2,
+                minimum_ai_owner_identities: 2,
+                critical_finding_owner_threshold: 2,
                 minimum_builders: 2,
                 minimum_builder_platforms: 1,
                 minimum_data_availability_providers: 2,
@@ -163,9 +269,11 @@ impl EpochGovernanceParameterSetV1 {
                 minimum_participating_identities: 12,
                 minimum_yes_identities: 12,
                 minimum_verified_or_human_yes: 5,
-                minimum_ai_attestations: 3,
+                minimum_ai_attestations: 5,
                 minimum_ai_independence_groups: 3,
-                minimum_ai_families: 2,
+                minimum_ai_families: 3,
+                minimum_ai_owner_identities: 3,
+                critical_finding_owner_threshold: 3,
                 minimum_builders: 3,
                 minimum_builder_platforms: 2,
                 minimum_data_availability_providers: 3,
@@ -177,6 +285,50 @@ impl EpochGovernanceParameterSetV1 {
     fn validate(&self) -> Result<ParsedEpochParameters, EpochGovernanceError> {
         if self.schema_version != 1
             || self.stake_quantum_atoms != "1000000000000"
+            || self.identity_math.idna_atoms_per_unit != "1000000000000000000"
+            || self.identity_math.status_bps.human != 10_000
+            || self.identity_math.status_bps.verified != 8_500
+            || self.identity_math.status_bps.newbie != 7_000
+            || self.identity_math.flip_prior_reported != 1
+            || self.identity_math.flip_prior_total != 20
+            || self.identity_math.flip_trust_floor_bps != 4_000
+            || self.identity_math.flip_trust_ceiling_bps != 10_000
+            || self.identity_math.flip_penalty_scale != 15_000
+            || self.lifecycle.review_period_blocks != 40
+            || self.lifecycle.voting_period_blocks != 120
+            || self.lifecycle.challenge_period_blocks != 60
+            || self.lifecycle.timelock_blocks != 60
+            || self.lifecycle.execution_window_blocks != 600
+            || self.lifecycle.unbonding_delay_epochs != 4
+            || self.lifecycle.minimum_identity_metrics_attestations != 3
+            || self.contract_bond_policy.minimum_reviewer_bond_atoms != "1000000000000000000"
+            || self.contract_bond_policy.minimum_builder_bond_atoms != "1000000000000000000"
+            || self
+                .contract_bond_policy
+                .minimum_data_availability_bond_atoms
+                != "1000000000000000000"
+            || self.contract_bond_policy.stale_processing_fee_atoms != "100000000000000000"
+            || self.contract_bond_policy.rejected_proposal_return_bps != 9_000
+            || self.contract_bond_policy.expired_review_round_return_bps != 7_500
+            || self.contract_bond_policy.expired_proposal_return_bps != 7_500
+            || self
+                .contract_bond_policy
+                .successful_challenge_proposer_return_bps
+                != 5_000
+            || self.contract_bond_policy.unavailable_attestation_slash_bps != 5_000
+            || self.contract_bond_policy.fraudulent_actor_stake_slash_bps != 500
+            || self.contract_resource_limits.max_stake_history != 256
+            || self.contract_resource_limits.max_portable_artifact_size != 9_007_199_254_740_991
+            || self.contract_resource_limits.max_committed_attestations != 256
+            || self
+                .contract_resource_limits
+                .max_attestations_per_owner_per_class
+                != 2
+            || self.contract_resource_limits.max_required_availability_cids != 4_096
+            || self.contract_resource_limits.max_scope_proof_bytes != 600_000
+            || self.contract_resource_limits.max_scope_files_per_repository != 2_048
+            || self.contract_resource_limits.max_scope_source_file_bytes != 268_435_456
+            || self.contract_resource_limits.max_scope_source_tree_bytes != 2_147_483_648
             || self.rejected_bond_burn_bps as u32 + self.rejected_bond_treasury_bps as u32 != 10_000
             || self.maximum_proposals_per_epoch == 0
             || !(self.schedule.proposal_cutoff < self.schedule.commit_start
@@ -190,6 +342,16 @@ impl EpochGovernanceParameterSetV1 {
         }
         validate_gate(self.normal)?;
         validate_gate(self.critical)?;
+        for amount in [
+            &self.contract_bond_policy.minimum_reviewer_bond_atoms,
+            &self.contract_bond_policy.minimum_builder_bond_atoms,
+            &self
+                .contract_bond_policy
+                .minimum_data_availability_bond_atoms,
+            &self.contract_bond_policy.stale_processing_fee_atoms,
+        ] {
+            parse_atoms(amount)?;
+        }
         Ok(ParsedEpochParameters {
             minimum_active_stake_atoms: parse_atoms(&self.minimum_active_stake_atoms)?,
             normal_proposal_bond_atoms: parse_atoms(&self.normal_proposal_bond_atoms)?,
@@ -272,8 +434,10 @@ pub enum EpochProposalKindV1 {
 pub struct EpochProposalContentV1 {
     pub schema_version: u16,
     pub title: String,
+    pub review_round_id: String,
     pub parent_canonical_ecosystem_cid: String,
     pub candidate_ecosystem_cid: String,
+    pub patch_cid: String,
     pub candidate_manifest_sha256: String,
     pub parameter_set_cid: String,
     pub affected_repositories: Vec<String>,
@@ -287,6 +451,7 @@ pub struct EpochProposalContentV1 {
     pub test_plan_cid: String,
     pub rollback_manifest_cid: String,
     pub rollback_instructions_cid: String,
+    pub critical_finding_waiver_cid: Option<String>,
     pub social_discussion: Option<SocialDiscussionReferenceV1>,
     pub proposal_kind: EpochProposalKindV1,
 }
@@ -298,7 +463,25 @@ pub struct AiReviewEvidenceV1 {
     pub valid_attestations: u32,
     pub independent_runtime_groups: u32,
     pub distinct_provider_families: u32,
+    pub distinct_owner_identities: u32,
     pub unresolved_critical_findings: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CriticalFindingWaiverV1 {
+    pub schema_version: u16,
+    pub review_round_id: String,
+    pub parent_ecosystem_cid: String,
+    pub candidate_ecosystem_cid: String,
+    pub patch_cid: String,
+    pub risk_class: RiskClass,
+    pub agent_review_root: String,
+    pub unresolved_critical_owner_count: u32,
+    pub scope: String,
+    pub rationale_cid: String,
+    pub author_idena_address: String,
+    pub creation_block: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +731,7 @@ struct ProposalRecord {
     bond_atoms: u128,
     bond_settled: bool,
     ai_review: Option<AiReviewEvidenceV1>,
+    critical_finding_waiver: Option<CriticalFindingWaiverV1>,
     manual_reviews: Vec<ManualReviewEvidenceV1>,
     build: Option<BuildRootEvidenceV1>,
     data_availability: Option<DataAvailabilityEvidenceV1>,
@@ -566,6 +750,7 @@ pub struct EpochProposalViewV1 {
     pub state: EpochProposalState,
     pub content: EpochProposalContentV1,
     pub ai_review: Option<AiReviewEvidenceV1>,
+    pub critical_finding_waiver: Option<CriticalFindingWaiverV1>,
     pub manual_reviews: Vec<ManualReviewEvidenceV1>,
     pub build: Option<BuildRootEvidenceV1>,
     pub data_availability: Option<DataAvailabilityEvidenceV1>,
@@ -639,6 +824,11 @@ impl EpochGovernanceEngine {
         validate_dag_cbor_cid(initial_canonical_ecosystem_cid)?;
         validate_dag_cbor_cid(parameter_set_cid)?;
         let parsed = parameters.validate()?;
+        let packaged_parameters = crate::package_dag_cbor(&parameters)
+            .map_err(|_| EpochGovernanceError::InvalidParameters)?;
+        if packaged_parameters.root_cid.to_string() != parameter_set_cid {
+            return Err(EpochGovernanceError::InvalidParameters);
+        }
         Ok(Self {
             chain_id: chain_id.to_string(),
             contract_address,
@@ -861,6 +1051,7 @@ impl EpochGovernanceEngine {
                 bond_atoms: attached_bond_atoms,
                 bond_settled: false,
                 ai_review: None,
+                critical_finding_waiver: None,
                 manual_reviews: Vec::new(),
                 build: None,
                 data_availability: None,
@@ -966,13 +1157,34 @@ impl EpochGovernanceEngine {
         clock: EpochGovernanceClock,
     ) -> Result<(), EpochGovernanceError> {
         validate_sha256(&evidence.root)?;
+        let max_valid_attestations = evidence
+            .distinct_owner_identities
+            .checked_mul(
+                self.parameters
+                    .contract_resource_limits
+                    .max_attestations_per_owner_per_class,
+            )
+            .ok_or(EpochGovernanceError::InvalidParameters)?;
         if evidence.valid_attestations == 0
-            || evidence.valid_attestations > 256
+            || evidence.valid_attestations
+                > self
+                    .parameters
+                    .contract_resource_limits
+                    .max_committed_attestations
+            || evidence.valid_attestations > max_valid_attestations
             || evidence.independent_runtime_groups == 0
             || evidence.independent_runtime_groups > evidence.valid_attestations
             || evidence.distinct_provider_families == 0
             || evidence.distinct_provider_families > evidence.valid_attestations
-            || evidence.unresolved_critical_findings > 256
+            || evidence.distinct_provider_families > evidence.distinct_owner_identities
+            || evidence.distinct_owner_identities == 0
+            || evidence.distinct_owner_identities > evidence.valid_attestations
+            || evidence.independent_runtime_groups != evidence.distinct_owner_identities
+            || evidence.unresolved_critical_findings
+                > self
+                    .parameters
+                    .contract_resource_limits
+                    .max_committed_attestations
         {
             return Err(EpochGovernanceError::InvalidParameters);
         }
@@ -1004,6 +1216,59 @@ impl EpochGovernanceEngine {
         if proposal.state == EpochProposalState::Submitted {
             proposal.state = EpochProposalState::ReviewOpen;
         }
+        Ok(())
+    }
+
+    pub fn attach_content_addressed_critical_finding_waiver_for_simulation(
+        &mut self,
+        authenticated_caller: &str,
+        proposal_id: &str,
+        claim_cid: &str,
+        claim_car: &[u8],
+        clock: EpochGovernanceClock,
+    ) -> Result<(), EpochGovernanceError> {
+        let caller = canonical_address(authenticated_caller)?;
+        let waiver: CriticalFindingWaiverV1 = verify_content_addressed_claim(claim_cid, claim_car)?;
+        let schedule = self
+            .epochs
+            .get(&clock.epoch)
+            .ok_or(EpochGovernanceError::NotFound)?
+            .schedule
+            .clone();
+        if clock.block >= schedule.commit_start_block {
+            return Err(EpochGovernanceError::InvalidWindow);
+        }
+        let proposal = self
+            .proposals
+            .get_mut(proposal_id)
+            .ok_or(EpochGovernanceError::NotFound)?;
+        let ai = proposal
+            .ai_review
+            .as_ref()
+            .ok_or(EpochGovernanceError::InvalidState)?;
+        if proposal.epoch != clock.epoch
+            || !proposal.content.risk_class.is_critical()
+            || proposal.content.critical_finding_waiver_cid.as_deref() != Some(claim_cid)
+            || proposal.critical_finding_waiver.is_some()
+            || waiver.schema_version != 1
+            || waiver.review_round_id != proposal.content.review_round_id
+            || waiver.parent_ecosystem_cid != proposal.content.parent_canonical_ecosystem_cid
+            || waiver.candidate_ecosystem_cid != proposal.content.candidate_ecosystem_cid
+            || waiver.patch_cid != proposal.content.patch_cid
+            || waiver.risk_class != proposal.content.risk_class
+            || waiver.agent_review_root != ai.root
+            || waiver.unresolved_critical_owner_count != ai.unresolved_critical_findings
+            || waiver.unresolved_critical_owner_count
+                < self.parameters.critical.critical_finding_owner_threshold
+            || waiver.scope != "all-corroborated-unresolved-critical-findings-in-agent-review-root"
+            || canonical_address(&waiver.author_idena_address)? != caller
+            || caller != proposal.proposer
+            || waiver.creation_block > clock.block
+        {
+            return Err(EpochGovernanceError::InvalidProposal);
+        }
+        validate_content_cid(&waiver.rationale_cid)?;
+        proposal.critical_finding_waiver = Some(waiver);
         Ok(())
     }
 
@@ -1728,11 +1993,19 @@ impl EpochGovernanceEngine {
         }
         validate_dag_cbor_cid(&content.parent_canonical_ecosystem_cid)?;
         validate_dag_cbor_cid(&content.candidate_ecosystem_cid)?;
+        validate_dag_cbor_cid(&content.patch_cid)?;
         validate_dag_cbor_cid(&content.parameter_set_cid)?;
+        validate_sha256(&content.review_round_id)?;
         validate_content_cid(&content.rationale_cid)?;
         validate_content_cid(&content.test_plan_cid)?;
         validate_content_cid(&content.rollback_manifest_cid)?;
         validate_content_cid(&content.rollback_instructions_cid)?;
+        if let Some(waiver_cid) = &content.critical_finding_waiver_cid {
+            validate_dag_cbor_cid(waiver_cid)?;
+            if !content.risk_class.is_critical() {
+                return Err(EpochGovernanceError::InvalidProposal);
+            }
+        }
         validate_sha256(&content.candidate_manifest_sha256)?;
         if content.parent_canonical_ecosystem_cid == content.candidate_ecosystem_cid
             || content.affected_repositories.is_empty()
@@ -2039,6 +2312,7 @@ fn proposal_view(record: &ProposalRecord) -> EpochProposalViewV1 {
         state: record.state,
         content: record.content.clone(),
         ai_review: record.ai_review.clone(),
+        critical_finding_waiver: record.critical_finding_waiver.clone(),
         manual_reviews: record.manual_reviews.clone(),
         build: record.build.clone(),
         data_availability: record.data_availability.clone(),
@@ -2131,10 +2405,15 @@ fn proposal_evidence_ready(
     let build = proposal.build.as_ref();
     let availability = proposal.data_availability.as_ref();
     ai.is_some_and(|value| {
+        let critical_findings_clear = value.unresolved_critical_findings
+            < gate.critical_finding_owner_threshold
+            || (proposal.content.risk_class.is_critical()
+                && proposal.critical_finding_waiver.is_some());
         value.valid_attestations >= gate.minimum_ai_attestations
             && value.independent_runtime_groups >= gate.minimum_ai_independence_groups
             && value.distinct_provider_families >= gate.minimum_ai_families
-            && value.unresolved_critical_findings == 0
+            && value.distinct_owner_identities >= gate.minimum_ai_owner_identities
+            && critical_findings_clear
     }) && build.is_some_and(|value| {
         value.valid_builders >= gate.minimum_builders
             && value.distinct_platforms >= gate.minimum_builder_platforms
@@ -2194,9 +2473,17 @@ fn validate_gate(gate: EpochGateParametersV1) -> Result<(), EpochGovernanceError
         || gate.minimum_ai_attestations == 0
         || gate.minimum_ai_independence_groups == 0
         || gate.minimum_ai_families == 0
+        || gate.minimum_ai_owner_identities == 0
+        || gate.critical_finding_owner_threshold < 2
         || gate.minimum_builders == 0
         || gate.minimum_builder_platforms == 0
-        || gate.minimum_data_availability_providers == 0
+        || gate.minimum_data_availability_providers < 2
+        || gate.minimum_ai_independence_groups > gate.minimum_ai_attestations
+        || gate.minimum_ai_independence_groups != gate.minimum_ai_owner_identities
+        || gate.minimum_ai_families > gate.minimum_ai_attestations
+        || gate.minimum_ai_owner_identities > gate.minimum_ai_attestations
+        || gate.critical_finding_owner_threshold > gate.minimum_ai_owner_identities
+        || gate.minimum_builder_platforms > gate.minimum_builders
         || gate.minimum_verified_or_human_yes > gate.minimum_yes_identities
         || gate.minimum_yes_identities > gate.minimum_participating_identities
     {
@@ -2388,16 +2675,52 @@ mod tests {
 
     #[test]
     fn experimental_parameter_set_has_the_locked_cid() {
-        let package = package_dag_cbor(EpochGovernanceParameterSetV1::experimental_defaults())
-            .expect("default Governance Day parameters must package");
+        let parameters = EpochGovernanceParameterSetV1::experimental_defaults();
+        assert_eq!(parameters.normal.minimum_ai_attestations, 3);
+        assert_eq!(parameters.normal.minimum_ai_independence_groups, 2);
+        assert_eq!(parameters.normal.minimum_ai_families, 2);
+        assert_eq!(parameters.normal.minimum_ai_owner_identities, 2);
+        assert_eq!(parameters.critical.minimum_ai_attestations, 5);
+        assert_eq!(parameters.critical.minimum_ai_independence_groups, 3);
+        assert_eq!(parameters.critical.minimum_ai_families, 3);
+        assert_eq!(parameters.critical.minimum_ai_owner_identities, 3);
+        let package =
+            package_dag_cbor(parameters).expect("default Governance Day parameters must package");
         assert_eq!(
             package.root_cid.to_string(),
-            "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq"
+            "bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei"
         );
         assert_eq!(
             package.root_sha256,
-            "788782538cbcb9137d4b9e9feb6b5ed368a7017067dda158c4383e68da73a02c"
+            "7541f5d1dfc2652c8db1e99a13b172056330cd4bf1d47c5adecc333933e42622"
         );
+    }
+
+    #[test]
+    fn initialization_binds_parameters_to_the_declared_cid() {
+        let parameters = EpochGovernanceParameterSetV1::experimental_defaults();
+        let actual_cid = package_dag_cbor(&parameters)
+            .expect("parameters must package")
+            .root_cid
+            .to_string();
+        assert!(EpochGovernanceEngine::initialize(
+            "idena-governance-local-v1",
+            CONTRACT,
+            CID_A,
+            &actual_cid,
+            parameters.clone(),
+        )
+        .is_ok());
+        assert!(matches!(
+            EpochGovernanceEngine::initialize(
+                "idena-governance-local-v1",
+                CONTRACT,
+                CID_A,
+                CID_A,
+                parameters,
+            ),
+            Err(EpochGovernanceError::InvalidParameters)
+        ));
     }
 
     fn parameters() -> EpochGovernanceParameterSetV1 {
@@ -2411,12 +2734,20 @@ mod tests {
         value
     }
 
+    fn parameter_set_cid() -> String {
+        package_dag_cbor(parameters())
+            .expect("test parameters must package")
+            .root_cid
+            .to_string()
+    }
+
     fn engine() -> EpochGovernanceEngine {
+        let parameter_set_cid = parameter_set_cid();
         let mut engine = EpochGovernanceEngine::initialize(
             "idena-governance-local-v1",
             CONTRACT,
             CID_A,
-            CID_A,
+            &parameter_set_cid,
             parameters(),
         )
         .unwrap();
@@ -2473,10 +2804,12 @@ mod tests {
         EpochProposalContentV1 {
             schema_version: 1,
             title: title.to_string(),
+            review_round_id: "44".repeat(32),
             parent_canonical_ecosystem_cid: CID_A.to_string(),
             candidate_ecosystem_cid: CID_B.to_string(),
+            patch_cid: CID_B.to_string(),
             candidate_manifest_sha256: "22".repeat(32),
-            parameter_set_cid: CID_A.to_string(),
+            parameter_set_cid: parameter_set_cid(),
             affected_repositories: vec!["P2poolBTC".to_string()],
             changed_file_count: 1,
             patch_bytes: 100,
@@ -2488,6 +2821,7 @@ mod tests {
             test_plan_cid: RAW_CID.to_string(),
             rollback_manifest_cid: RAW_CID.to_string(),
             rollback_instructions_cid: RAW_CID.to_string(),
+            critical_finding_waiver_cid: None,
             social_discussion: Some(SocialDiscussionReferenceV1 {
                 post_id: Some("post-1".into()),
                 discussion_cid: Some(RAW_CID.into()),
@@ -2504,9 +2838,10 @@ mod tests {
                 proposal_id,
                 AiReviewEvidenceV1 {
                     root: "33".repeat(32),
-                    valid_attestations: 2,
+                    valid_attestations: 3,
                     independent_runtime_groups: 2,
-                    distinct_provider_families: 1,
+                    distinct_provider_families: 2,
+                    distinct_owner_identities: 2,
                     unresolved_critical_findings: 0,
                 },
                 EpochGovernanceClock {
@@ -2596,6 +2931,32 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(decision.state, EpochProposalState::AcceptedPendingGrace);
+    }
+
+    #[test]
+    fn ai_owner_diversity_is_an_independent_acceptance_gate() {
+        let mut engine = engine();
+        let proposal_id = engine
+            .create_proposal(
+                ADDRESS_A,
+                proposal("owner-diversity"),
+                10_000_000_000_000_000_000,
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_010,
+                },
+            )
+            .unwrap();
+        attach_evidence(&mut engine, &proposal_id);
+        let gate = engine.parameters.normal;
+        let proposal = engine.proposals.get_mut(&proposal_id).unwrap();
+        assert!(proposal_evidence_ready(proposal, gate, 1_780));
+        proposal
+            .ai_review
+            .as_mut()
+            .unwrap()
+            .distinct_owner_identities = 1;
+        assert!(!proposal_evidence_ready(proposal, gate, 1_780));
     }
 
     #[test]
@@ -2843,9 +3204,10 @@ mod tests {
             .unwrap();
         let ai = package_dag_cbor(AiReviewEvidenceV1 {
             root: "33".repeat(32),
-            valid_attestations: 2,
+            valid_attestations: 3,
             independent_runtime_groups: 2,
-            distinct_provider_families: 1,
+            distinct_provider_families: 2,
+            distinct_owner_identities: 2,
             unresolved_critical_findings: 0,
         })
         .unwrap();
@@ -3418,6 +3780,43 @@ mod tests {
                     valid_attestations: 2,
                     independent_runtime_groups: 3,
                     distinct_provider_families: 1,
+                    distinct_owner_identities: 1,
+                    unresolved_critical_findings: 0,
+                },
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            ),
+            Err(EpochGovernanceError::InvalidParameters)
+        );
+        assert_eq!(
+            engine.attach_ai_review_root(
+                &id,
+                AiReviewEvidenceV1 {
+                    root: "33".repeat(32),
+                    valid_attestations: 5,
+                    independent_runtime_groups: 2,
+                    distinct_provider_families: 2,
+                    distinct_owner_identities: 2,
+                    unresolved_critical_findings: 0,
+                },
+                EpochGovernanceClock {
+                    epoch: 421,
+                    block: 1_020,
+                },
+            ),
+            Err(EpochGovernanceError::InvalidParameters)
+        );
+        assert_eq!(
+            engine.attach_ai_review_root(
+                &id,
+                AiReviewEvidenceV1 {
+                    root: "33".repeat(32),
+                    valid_attestations: 3,
+                    independent_runtime_groups: 2,
+                    distinct_provider_families: 3,
+                    distinct_owner_identities: 2,
                     unresolved_critical_findings: 0,
                 },
                 EpochGovernanceClock {
@@ -3432,9 +3831,10 @@ mod tests {
                 &id,
                 AiReviewEvidenceV1 {
                     root: "33".repeat(32),
-                    valid_attestations: 2,
+                    valid_attestations: 3,
                     independent_runtime_groups: 2,
-                    distinct_provider_families: 1,
+                    distinct_provider_families: 2,
+                    distinct_owner_identities: 2,
                     unresolved_critical_findings: 0,
                 },
                 EpochGovernanceClock {

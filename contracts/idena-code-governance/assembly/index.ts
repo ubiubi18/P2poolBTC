@@ -1,5 +1,74 @@
 import { u128Safe as u128 } from "as-bignum/assembly";
 import {
+  GOVERNANCE_PARAMETER_PROFILE_JSON,
+  GOVERNANCE_PARAMETER_SET_CID,
+  GOV_CHALLENGE_PERIOD_BLOCKS,
+  GOV_CRITICAL_CRITICAL_FINDING_OWNER_THRESHOLD,
+  GOV_CRITICAL_MAX_AFFECTED_REPOSITORIES,
+  GOV_CRITICAL_MAX_CHANGED_FILES,
+  GOV_CRITICAL_MAX_DESCRIPTION_BYTES,
+  GOV_CRITICAL_MAX_MIGRATION_OPERATIONS,
+  GOV_CRITICAL_MAX_PATCH_BYTES,
+  GOV_CRITICAL_MAX_SOURCE_PACKAGE_BYTES,
+  GOV_CRITICAL_MIN_AI_ATTESTATIONS,
+  GOV_CRITICAL_MIN_AI_FAMILIES,
+  GOV_CRITICAL_MIN_AI_OWNER_IDENTITIES,
+  GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS,
+  GOV_CRITICAL_MIN_AVAILABILITY_PROVIDERS,
+  GOV_CRITICAL_MIN_BUILDERS,
+  GOV_CRITICAL_MIN_BUILDER_PLATFORMS,
+  GOV_CRITICAL_MIN_STRONG_YES,
+  GOV_CRITICAL_MIN_YES_IDENTITIES,
+  GOV_CRITICAL_PROPOSAL_BOND_ATOMS,
+  GOV_CRITICAL_TURNOUT_QUORUM_BPS,
+  GOV_CRITICAL_YES_THRESHOLD_BPS,
+  GOV_EXECUTION_WINDOW_BLOCKS,
+  GOV_EXPIRED_PROPOSAL_RETURN_BPS,
+  GOV_EXPIRED_REVIEW_RETURN_BPS,
+  GOV_FRAUDULENT_ACTOR_STAKE_SLASH_BPS,
+  GOV_MAX_ATTESTATIONS_PER_OWNER_PER_CLASS,
+  GOV_MAX_COMMITTED_ATTESTATIONS,
+  GOV_MAX_PORTABLE_ARTIFACT_SIZE,
+  GOV_MAX_REQUIRED_AVAILABILITY_CIDS,
+  GOV_MAX_SCOPE_FILES_PER_REPOSITORY,
+  GOV_MAX_SCOPE_PROOF_BYTES,
+  GOV_MAX_SCOPE_SOURCE_FILE_BYTES,
+  GOV_MAX_SCOPE_SOURCE_TREE_BYTES,
+  GOV_MAX_STAKE_HISTORY,
+  GOV_MIN_ACTIVE_STAKE_ATOMS,
+  GOV_MIN_AVAILABILITY_BOND_ATOMS,
+  GOV_MIN_BUILDER_BOND_ATOMS,
+  GOV_MIN_IDENTITY_METRICS_ATTESTATIONS,
+  GOV_MIN_REVIEWER_BOND_ATOMS,
+  GOV_NORMAL_CRITICAL_FINDING_OWNER_THRESHOLD,
+  GOV_NORMAL_MAX_AFFECTED_REPOSITORIES,
+  GOV_NORMAL_MAX_CHANGED_FILES,
+  GOV_NORMAL_MAX_DESCRIPTION_BYTES,
+  GOV_NORMAL_MAX_MIGRATION_OPERATIONS,
+  GOV_NORMAL_MAX_PATCH_BYTES,
+  GOV_NORMAL_MAX_SOURCE_PACKAGE_BYTES,
+  GOV_NORMAL_MIN_AI_ATTESTATIONS,
+  GOV_NORMAL_MIN_AI_FAMILIES,
+  GOV_NORMAL_MIN_AI_OWNER_IDENTITIES,
+  GOV_NORMAL_MIN_AI_RUNTIME_GROUPS,
+  GOV_NORMAL_MIN_AVAILABILITY_PROVIDERS,
+  GOV_NORMAL_MIN_BUILDERS,
+  GOV_NORMAL_MIN_BUILDER_PLATFORMS,
+  GOV_NORMAL_MIN_STRONG_YES,
+  GOV_NORMAL_MIN_YES_IDENTITIES,
+  GOV_NORMAL_PROPOSAL_BOND_ATOMS,
+  GOV_NORMAL_TURNOUT_QUORUM_BPS,
+  GOV_NORMAL_YES_THRESHOLD_BPS,
+  GOV_REJECTED_PROPOSAL_RETURN_BPS,
+  GOV_STALE_PROCESSING_FEE_ATOMS,
+  GOV_SUCCESSFUL_CHALLENGE_PROPOSER_RETURN_BPS,
+  GOV_TIMELOCK_BLOCKS,
+  GOV_UNAVAILABLE_ATTESTATION_SLASH_BPS,
+  GOV_UNBONDING_DELAY_EPOCHS,
+  GOV_VOTING_PERIOD_BLOCKS,
+  GOV_REVIEW_PERIOD_BLOCKS,
+} from "./generated_parameters";
+import {
   allocate,
   argumentString,
   attachedAmount,
@@ -130,42 +199,40 @@ export {
 export { allocate };
 
 const SCHEMA_VERSION = "1";
-const CONTRACT_VERSION = "0.1.0";
+const CONTRACT_VERSION = "0.2.0";
 const INITIALIZED_KEY = "governance:initialized";
 const CANONICAL_CID_KEY = "governance:canonical-cid";
 const PARAMETER_CID_KEY = "governance:parameter-cid";
 const METRICS_ROOT_KEY = "governance:metrics-root";
 const METRICS_EPOCH_KEY = "governance:metrics-epoch";
 
-const EXPECTED_PARAMETER_CID = "bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq";
-const REVIEW_BLOCKS: u64 = 40;
-const VOTING_BLOCKS: u64 = 120;
-const CHALLENGE_BLOCKS: u64 = 60;
-const TIMELOCK_BLOCKS: u64 = 60;
-const EXECUTION_WINDOW_BLOCKS: u64 = 600;
-const UNBONDING_EPOCHS: u16 = 4;
-const MAX_STAKE_HISTORY = 256;
+const EXPECTED_PARAMETER_CID = GOVERNANCE_PARAMETER_SET_CID;
+const REVIEW_BLOCKS: u64 = GOV_REVIEW_PERIOD_BLOCKS;
+const VOTING_BLOCKS: u64 = GOV_VOTING_PERIOD_BLOCKS;
+const CHALLENGE_BLOCKS: u64 = GOV_CHALLENGE_PERIOD_BLOCKS;
+const TIMELOCK_BLOCKS: u64 = GOV_TIMELOCK_BLOCKS;
+const EXECUTION_WINDOW_BLOCKS: u64 = GOV_EXECUTION_WINDOW_BLOCKS;
+const UNBONDING_EPOCHS: u16 = GOV_UNBONDING_DELAY_EPOCHS;
+const MAX_STAKE_HISTORY: i32 = <i32>GOV_MAX_STAKE_HISTORY;
 const CORE_ARTIFACT_SET_DOMAIN = "IDENA_GOV_CORE_ARTIFACT_SET_V1\0";
-const MAX_PORTABLE_ARTIFACT_SIZE: u64 = 9007199254740991;
-const MAX_COMMITTED_ATTESTATIONS: u32 = 256;
-const MAX_ATTESTATIONS_PER_OWNER_PER_CLASS: u32 = 2;
-const MAX_REQUIRED_AVAILABILITY_CIDS: u32 = 4096;
-const MIN_IDENTITY_METRICS_ATTESTATIONS: u32 = 3;
+const MAX_PORTABLE_ARTIFACT_SIZE: u64 = GOV_MAX_PORTABLE_ARTIFACT_SIZE;
+const MAX_COMMITTED_ATTESTATIONS: u32 = GOV_MAX_COMMITTED_ATTESTATIONS;
+const MAX_ATTESTATIONS_PER_OWNER_PER_CLASS: u32 = GOV_MAX_ATTESTATIONS_PER_OWNER_PER_CLASS;
+const MAX_REQUIRED_AVAILABILITY_CIDS: u32 = GOV_MAX_REQUIRED_AVAILABILITY_CIDS;
+const MIN_IDENTITY_METRICS_ATTESTATIONS: u32 = GOV_MIN_IDENTITY_METRICS_ATTESTATIONS;
 
-const MIN_ACTIVE_STAKE_ATOMS = "1000000000000000000";
-const MIN_PROPOSAL_BOND_ATOMS = "10000000000000000000";
-const CRITICAL_PROPOSAL_BOND_ATOMS = "25000000000000000000";
-const MIN_REVIEWER_BOND_ATOMS = "1000000000000000000";
-const MIN_BUILDER_BOND_ATOMS = "1000000000000000000";
-const MIN_AVAILABILITY_BOND_ATOMS = "1000000000000000000";
-const STALE_PROCESSING_FEE_ATOMS = "100000000000000000";
-const FRAUDULENT_ACTOR_STAKE_SLASH_PERCENT: u8 = 5;
-const UNAVAILABLE_BOND_SLASH_PERCENT: u8 = 50;
+const MIN_ACTIVE_STAKE_ATOMS = GOV_MIN_ACTIVE_STAKE_ATOMS;
+const MIN_PROPOSAL_BOND_ATOMS = GOV_NORMAL_PROPOSAL_BOND_ATOMS;
+const CRITICAL_PROPOSAL_BOND_ATOMS = GOV_CRITICAL_PROPOSAL_BOND_ATOMS;
+const MIN_REVIEWER_BOND_ATOMS = GOV_MIN_REVIEWER_BOND_ATOMS;
+const MIN_BUILDER_BOND_ATOMS = GOV_MIN_BUILDER_BOND_ATOMS;
+const MIN_AVAILABILITY_BOND_ATOMS = GOV_MIN_AVAILABILITY_BOND_ATOMS;
+const STALE_PROCESSING_FEE_ATOMS = GOV_STALE_PROCESSING_FEE_ATOMS;
 
-const NORMAL_QUORUM_BPS: u16 = 2000;
-const NORMAL_YES_BPS: u16 = 6667;
-const CRITICAL_QUORUM_BPS: u16 = 3000;
-const CRITICAL_YES_BPS: u16 = 7500;
+const NORMAL_QUORUM_BPS: u16 = GOV_NORMAL_TURNOUT_QUORUM_BPS;
+const NORMAL_YES_BPS: u16 = GOV_NORMAL_YES_THRESHOLD_BPS;
+const CRITICAL_QUORUM_BPS: u16 = GOV_CRITICAL_TURNOUT_QUORUM_BPS;
+const CRITICAL_YES_BPS: u16 = GOV_CRITICAL_YES_THRESHOLD_BPS;
 
 export function deploy(
   initialCanonicalCidPtr: usize,
@@ -480,7 +547,7 @@ export function openReviewRound(
     id, parent, candidate, patch, candidateBinding.sourceBinding, patchBinding.affectedSourceBinding,
     candidateBinding.toolchainBinding, pinsetCid, <u32>pinset.length,
     opener, REVIEW_ROUND_OPEN, opened, end,
-    claimDeadline, "", "", "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "",
+    claimDeadline, "", "", "", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "",
     bond.toString(), "0", false,
   );
   saveReviewRound(round);
@@ -543,6 +610,63 @@ export function freezeReviewRound(reviewRoundIdPtr: usize): usize {
   return reviewRoundStateJson(round);
 }
 
+export function registerCriticalFindingWaiver(
+  reviewRoundIdPtr: usize,
+  waiverCidPtr: usize,
+  waiverDagCborHexPtr: usize,
+): usize {
+  ensureInitialized();
+  requireNoPayment();
+  const round = loadReviewRound(validReviewRoundId(argumentString(reviewRoundIdPtr, 64)));
+  const author = callerHex();
+  assert(round.state == REVIEW_ROUND_AVAILABILITY_OPEN, "review evidence must be frozen before a waiver is registered");
+  assert(round.opener == author, "only the bonded review-round opener may register a waiver");
+  const risk = getString(reviewScopeRiskKey(round.id));
+  assert(risk != "normal", "normal proposals cannot waive corroborated critical findings");
+  assert(
+    hasBlockingCriticalFindings(round.unresolvedCriticalCount, risk),
+    "review round has no corroborated critical finding to waive",
+  );
+  assert(!hasKey(reviewCriticalWaiverKey(round.id)), "review round waiver is immutable");
+  const waiverCid = argumentString(waiverCidPtr, 128);
+  const payload = verifiedCanonicalDagCborMap(
+    waiverCid,
+    argumentString(waiverDagCborHexPtr, 131072),
+  );
+  payload.requireExactKeys(criticalFindingWaiverPayloadKeys());
+  assert(parseU16(payload.unsigned("schemaVersion")) == 1, "critical finding waiver schema version is unsupported");
+  assert(payload.string("reviewRoundId") == round.id, "waiver review round mismatch");
+  assert(payload.string("parentEcosystemCid") == round.parentCid, "waiver parent mismatch");
+  assert(payload.string("candidateEcosystemCid") == round.candidateCid, "waiver candidate mismatch");
+  assert(payload.string("patchCid") == round.patchCid, "waiver patch mismatch");
+  assert(payload.string("riskClass") == risk, "waiver risk class mismatch");
+  assert(payload.string("agentReviewRoot") == round.agentRoot, "waiver agent-review root mismatch");
+  assert(
+    parseU32(payload.unsigned("unresolvedCriticalOwnerCount")) == round.unresolvedCriticalCount,
+    "waiver unresolved critical owner count mismatch",
+  );
+  assert(
+    payload.string("scope") == "all-corroborated-unresolved-critical-findings-in-agent-review-root",
+    "waiver scope is unsupported",
+  );
+  const rationaleCid = payload.string("rationaleCid");
+  assert(isCanonicalContentCid(rationaleCid), "waiver rationale must be immutable content");
+  assert(canonicalPayloadAddress(payload.string("authorIdenaAddress")) == author, "waiver author mismatch");
+  const creationBlock = parseU64(payload.unsigned("creationBlock"));
+  assert(
+    creationBlock >= round.endBlock && creationBlock <= currentBlock(),
+    "waiver creation block is outside the frozen review interval",
+  );
+  setString(reviewCriticalWaiverKey(round.id), waiverCid);
+  addAvailabilityRequirement(round.id, waiverCid);
+  addAvailabilityRequirement(round.id, rationaleCid);
+  emitVersionedEvent(
+    "CriticalWaiverRegisteredV1",
+    [round.id, waiverCid, round.agentRoot, round.unresolvedCriticalCount.toString(), author],
+  );
+  return reviewRoundStateJson(round);
+}
+
 export function expireReviewRound(reviewRoundIdPtr: usize): usize {
   ensureInitialized();
   requireNoPayment();
@@ -555,11 +679,16 @@ export function expireReviewRound(reviewRoundIdPtr: usize): usize {
   );
   const stale = round.parentCid != getString(CANONICAL_CID_KEY);
   assert(stale || currentBlock() > round.claimDeadline, "review round claim deadline has not elapsed");
-  let refund = percentage(round.bondAmount(), 75);
+  if (round.agentLeafCount > 0) recomputeAgentAggregates(round);
+  let refund = basisPoints(round.bondAmount(), GOV_EXPIRED_REVIEW_RETURN_BPS);
   if (stale) {
     const feeLimit = parseAmount(STALE_PROCESSING_FEE_ATOMS);
     const fee = round.bondAmount() < feeLimit ? round.bondAmount() : feeLimit;
     refund = round.bondAmount() - fee;
+  } else if (hasBlockingCriticalFindings(round.unresolvedCriticalCount, getString(reviewScopeRiskKey(round.id)))) {
+    // Corroborated adverse review is not proposer misconduct. It blocks the
+    // proposal without turning review participation into a bond-burning veto.
+    refund = round.bondAmount();
   }
   const slash = round.bondAmount() - refund;
   round.state = REVIEW_ROUND_EXPIRED;
@@ -677,7 +806,13 @@ export function createProposal(
   assert(proposalDeclaredCounters(payload) == getString(reviewScopeCountersKey(round.id)), "proposal counters differ from verified scope evidence");
   validateProposalDeclaredLimits(payload, risk);
   assert(isCanonicalHash(agentRoot) && isCanonicalHash(buildRoot) && isCanonicalHash(availabilityRoot), "attestation roots must be lowercase SHA-256");
+  const registeredWaiverCid = getString(reviewCriticalWaiverKey(round.id));
+  assert(waiverCid == registeredWaiverCid, "proposal waiver does not match the verified review-round waiver");
   assert(waiverCid.length == 0 || (risk != "normal" && isCanonicalManifestCid(waiverCid)), "critical waiver must be an immutable CID on a critical proposal");
+  assert(
+    !hasBlockingCriticalFindings(round.unresolvedCriticalCount, risk) || waiverCid.length > 0,
+    "corroborated critical findings require a typed critical-risk waiver",
+  );
   assert(releaseManifestCid.length == 0 || isCanonicalManifestCid(releaseManifestCid), "release manifest must use canonical DAG-CBOR CIDv1");
   assert(
     isCanonicalContentCid(rollbackManifestCid) && isCanonicalContentCid(rollbackInstructionsCid),
@@ -702,10 +837,6 @@ export function createProposal(
     hasKey(reviewPinsetMemberKey(round.id, rollbackManifestCid))
       && hasKey(reviewPinsetMemberKey(round.id, rollbackInstructionsCid)),
     "proposal rollback metadata must be committed by the opening pinset",
-  );
-  assert(
-    waiverCid.length == 0 || hasKey(reviewPinsetMemberKey(round.id, waiverCid)),
-    "critical finding waiver is not committed by the opening pinset",
   );
   assert(
     proposalAffectedBinding == getString(reviewSourceTransitionKey(round.id)),
@@ -763,7 +894,7 @@ export function createProposal(
     metricsEpoch, stakingEpoch, candidateMetricsRoot, candidateMetricsEpoch,
     creation, draftExpiry, votingStart, votingEnd, challengeEnd, executeAfter,
     getString(TOTAL_WEIGHT_KEY), "0", "0", "0", 0, 0,
-    round.agentCount, round.agentModelCount, round.agentOwnerCount,
+    round.agentCount, round.agentModelCount, round.agentRuntimeCount, round.agentOwnerCount,
     round.unresolvedCriticalCount, round.builderOwnerCount, round.builderPlatformCount,
     round.builderConflictCount, round.availabilityOwnerCount, round.artifactDigest,
     waiverCid, releaseManifestCid, "", "", "", bond.toString(), "0", false,
@@ -811,6 +942,7 @@ export function submitAgentAttestation(
   payload.requireExactKeys(agentAttestationPayloadKeys());
   assert(parseU16(payload.unsigned("schemaVersion")) == 1, "agent attestation schema version is unsupported");
   const modelFamily = payload.string("modelFamily");
+  const runtimeIdentifier = payload.string("providerOrRuntimeIdentifier");
   const unresolved = parseU32(payload.unsigned("unresolvedCriticalFindings"));
   const payloadOwner = canonicalPayloadAddress(payload.string("ownerIdenaAddress"));
   const testsPassed = payload.boolean("testsPassed");
@@ -829,6 +961,13 @@ export function submitAgentAttestation(
   const fields = cid + "|" + modelFamily + "|" + owner + "|" + unresolved.toString();
   const marker = attestationMarker("agent", round.id, cid);
   assert(!hasKey(marker), "duplicate agent attestation");
+  assert(verdict == "approve" || verdict == "reject" || verdict == "abstain", "invalid agent verdict");
+  const qualifying = verdict == "approve" && testsPassed;
+  const ownerFamilyKey = reviewOwnerModelFamilyKey(round.id, owner);
+  const ownerFamilyExists = hasKey(ownerFamilyKey);
+  if (qualifying && ownerFamilyExists) {
+    assert(getString(ownerFamilyKey) == modelFamily, "one review owner cannot claim multiple qualifying model families");
+  }
   const bond = attachedAmount();
   assert(
     bond == payloadBond && bond >= parseAmount(MIN_REVIEWER_BOND_ATOMS),
@@ -839,20 +978,25 @@ export function submitAgentAttestation(
   reserveStakeSlashSlot(owner);
   appendReviewEntry(round, "agent", fields);
   setString(marker, fields);
+  setString(agentRuntimeKey(round.id, cid), runtimeIdentifier);
   setString(attestationBondKey("agent", round.id, cid), new BondRecord(owner, bond.toString(), false, false).encode());
-  if (verdict == "approve" && testsPassed) {
-    setString(agentQualifyingKey(round.id, cid), "1");
-    if (markUnique("agent-instance", round.id, hashString(owner + "~" + modelFamily))) {
-      round.agentCount = checkedU32Add(round.agentCount, 1);
+  if (qualifying) {
+    if (!ownerFamilyExists) {
+      setString(ownerFamilyKey, modelFamily);
     }
+    setString(agentQualifyingKey(round.id, cid), "1");
+    round.agentCount = checkedU32Add(round.agentCount, 1);
     if (markUnique("agent-model", round.id, hashString(modelFamily))) {
       round.agentModelCount = checkedU32Add(round.agentModelCount, 1);
+    }
+    // Runtime independence is authenticated by distinct eligible owners.
+    // The self-declared runtime label remains audit metadata only.
+    if (markUnique("agent-runtime-owner", round.id, owner)) {
+      round.agentRuntimeCount = checkedU32Add(round.agentRuntimeCount, 1);
     }
     if (markUnique("agent-owner", round.id, owner)) {
       round.agentOwnerCount = checkedU32Add(round.agentOwnerCount, 1);
     }
-  } else {
-    assert(verdict == "approve" || verdict == "reject" || verdict == "abstain", "invalid agent verdict");
   }
   if (unresolved > 0 && markUnique("agent-critical-owner", round.id, owner)) {
     round.unresolvedCriticalCount = checkedU32Add(round.unresolvedCriticalCount, 1);
@@ -958,7 +1102,11 @@ export function submitDataAvailabilityAttestation(
   assert(payloadOwner == owner, "availability attestation owner does not match the caller");
   assert(payload.string("candidateEcosystemCid") == round.candidateCid, "availability attestation candidate mismatch");
   assert(payload.string("authentication") == "on-chain-submitter", "unsupported availability attestation authentication");
-  assert(parseU64(payload.unsigned("observedAtBlockOrTimestamp")) <= currentBlock(), "availability attestation is from the future");
+  const observedAtBlock = parseU64(payload.unsigned("observedAtBlockOrTimestamp"));
+  assert(
+    observedAtBlock >= round.endBlock && observedAtBlock <= currentBlock(),
+    "availability attestation must observe the frozen review requirements",
+  );
   assert(
     expiresAtBlock >= maxReviewExecutionExpiry(round),
     "availability expires before the latest possible execution deadline",
@@ -1053,7 +1201,7 @@ export function finalizeVoting(proposalIdPtr: usize): usize {
     saveProposal(proposal);
     emitVersionedEvent("ProposalChallengePendingV1", [proposal.id, proposal.challengeEnd.toString()]);
   } else {
-    settleRejected(proposal, 90);
+    settleRejected(proposal, GOV_REJECTED_PROPOSAL_RETURN_BPS);
   }
   return proposalStateJson(proposal);
 }
@@ -1164,7 +1312,7 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
   let targetSlash = targetBond;
   let targetRefund = u128.Zero;
   if (bondKind == "availability") {
-    targetSlash = percentage(targetBond, UNAVAILABLE_BOND_SLASH_PERCENT);
+    targetSlash = basisPoints(targetBond, GOV_UNAVAILABLE_ATTESTATION_SLASH_BPS);
     targetRefund = targetBond - targetSlash;
     record.amount = targetRefund.toString();
   } else {
@@ -1180,6 +1328,7 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
   saveReviewRound(round);
   proposal.agentCount = round.agentCount;
   proposal.agentModelCount = round.agentModelCount;
+  proposal.agentRuntimeCount = round.agentRuntimeCount;
   proposal.agentOwnerCount = round.agentOwnerCount;
   proposal.unresolvedCriticalCount = round.unresolvedCriticalCount;
   proposal.builderOwnerCount = round.builderOwnerCount;
@@ -1205,7 +1354,10 @@ export function resolveObjectiveChallenge(proposalIdPtr: usize): usize {
   let proposerStakeSlash = u128.Zero;
   let offenderStakeSlash = u128.Zero;
   if (proposerIsOffender) {
-    proposerRefund = percentage(proposal.bondAmount(), 50);
+    proposerRefund = basisPoints(
+      proposal.bondAmount(),
+      GOV_SUCCESSFUL_CHALLENGE_PROPOSER_RETURN_BPS,
+    );
     proposerSlash = proposal.bondAmount() - proposerRefund;
     proposal.refundableBond = proposerRefund.toString();
     proposal.state = STATE_REJECTED;
@@ -1274,7 +1426,9 @@ export function executeProposal(proposalIdPtr: usize): usize {
     parseU64(availabilityExpiry) >= currentBlock(),
     "proposal data-availability coverage has elapsed",
   );
-  const requiredAvailabilityProviders: u32 = proposal.isCritical() ? 3 : 2;
+  const requiredAvailabilityProviders: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AVAILABILITY_PROVIDERS
+    : GOV_NORMAL_MIN_AVAILABILITY_PROVIDERS;
   assert(
     proposal.availabilityOwnerCount >= requiredAvailabilityProviders,
     "proposal lacks independent data-availability providers",
@@ -1324,7 +1478,7 @@ export function expireProposal(proposalIdPtr: usize): usize {
   const expiredGrace = proposal.state == STATE_ACCEPTED_PENDING_GRACE
     && currentBlock() > checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
   assert(expiredDraft || expiredReview || expiredExecution || expiredGrace, "proposal is not expired");
-  const refund = percentage(proposal.bondAmount(), 75);
+  const refund = basisPoints(proposal.bondAmount(), GOV_EXPIRED_PROPOSAL_RETURN_BPS);
   const slash = proposal.bondAmount() - refund;
   proposal.state = STATE_EXPIRED;
   proposal.refundableBond = refund.toString();
@@ -1447,16 +1601,11 @@ export function governanceParameters(): usize {
   ensureInitialized();
   requireNoPayment();
   return returnString(
-    "{\"schemaVersion\":1,\"contractVersion\":\"" + CONTRACT_VERSION
+    "{\"schemaVersion\":2,\"contractVersion\":\"" + CONTRACT_VERSION
       + "\",\"parameterSetCid\":\"" + EXPECTED_PARAMETER_CID
-      + "\",\"stakeQuantumAtoms\":\"1000000000000\",\"minimumActiveStakeAtoms\":\""
-      + MIN_ACTIVE_STAKE_ATOMS + "\",\"statusBps\":{\"Human\":10000,\"Verified\":8500,\"Newbie\":7000}"
-      + ",\"normal\":{\"quorumBps\":2000,\"yesBps\":6667,\"yesIdentities\":7,\"strongIdentities\":3}"
-      + ",\"critical\":{\"quorumBps\":3000,\"yesBps\":7500,\"yesIdentities\":12,\"strongIdentities\":5}"
-      + ",\"periodBlocks\":{\"review\":40,\"voting\":120,\"challenge\":60,\"timelock\":60,\"execution\":600}"
-      + ",\"minimumIdentityMetricsAttestations\":3"
-      + ",\"objectiveSlashBps\":{\"proposal\":5000,\"reviewer\":10000,\"builder\":10000,\"availability\":5000,\"actorStake\":500}"
-      + ",\"unbondingEpochs\":4}",
+      + "\",\"mode\":\"immutable-epoch-governance-day\""
+      + ",\"chainId\":\"idena-code-governance-day-local-testnet-v3:10002\""
+      + ",\"parameterProfile\":" + GOVERNANCE_PARAMETER_PROFILE_JSON + "}",
   );
 }
 
@@ -1525,7 +1674,7 @@ function slashGovernanceStake(address: string): u128 {
   ensureCurrentGovernanceEpochAnchored();
   activateStakeFor(address);
   const oldStake = activeStake(address);
-  const slash = percentage(oldStake, FRAUDULENT_ACTOR_STAKE_SLASH_PERCENT);
+  const slash = basisPoints(oldStake, GOV_FRAUDULENT_ACTOR_STAKE_SLASH_BPS);
   if (slash.isZero()) {
     releaseStakeSlashSlot(address);
     return u128.Zero;
@@ -1782,8 +1931,9 @@ function loadReviewEntries(kind: string, reviewRoundId: string, count: u32): str
 }
 
 function recomputeAgentAggregates(round: ReviewRound): void {
-  const instances = new Array<string>();
+  let validAttestations: u32 = 0;
   const models = new Array<string>();
+  const runtimes = new Array<string>();
   const owners = new Array<string>();
   const criticalOwners = new Array<string>();
   for (let i: u32 = 0; i < round.agentLeafCount; i++) {
@@ -1792,17 +1942,21 @@ function recomputeAgentAggregates(round: ReviewRound): void {
     const cid = fields[0];
     if (hasKey(attestationInvalidKey("agent", round.id, cid))) continue;
     const model = fields[1];
+    const runtime = getString(agentRuntimeKey(round.id, cid));
+    assert(runtime.length > 0, "agent runtime identifier is missing");
     const owner = fields[2];
     const unresolved = parseU32(fields[3]);
     if (hasKey(agentQualifyingKey(round.id, cid))) {
-      pushUnique(instances, owner + "~" + model);
+      validAttestations = checkedU32Add(validAttestations, 1);
       pushUnique(models, model);
+      pushUnique(runtimes, owner);
       pushUnique(owners, owner);
     }
     if (unresolved > 0) pushUnique(criticalOwners, owner);
   }
-  round.agentCount = <u32>instances.length;
+  round.agentCount = validAttestations;
   round.agentModelCount = <u32>models.length;
+  round.agentRuntimeCount = <u32>runtimes.length;
   round.agentOwnerCount = <u32>owners.length;
   round.unresolvedCriticalCount = <u32>criticalOwners.length;
 }
@@ -1863,15 +2017,17 @@ function countPrefixed(values: string[], prefix: string): u32 {
 }
 
 function attestationGatesPass(proposal: Proposal): bool {
-  const agentMin: u32 = proposal.isCritical() ? 5 : 3;
-  const modelMin: u32 = proposal.isCritical() ? 3 : 2;
-  const ownerMin: u32 = proposal.isCritical() ? 3 : 2;
-  const builderMin: u32 = proposal.isCritical() ? 3 : 2;
-  const platformMin: u32 = proposal.isCritical() ? 2 : 1;
-  const availabilityMin: u32 = proposal.isCritical() ? 3 : 2;
-  const criticalFindingOwnerThreshold: u32 = proposal.isCritical() ? 3 : 2;
-  const criticalResolved = proposal.unresolvedCriticalCount < criticalFindingOwnerThreshold
-    || proposal.waiverCid.length > 0;
+  const agentMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_ATTESTATIONS : GOV_NORMAL_MIN_AI_ATTESTATIONS;
+  const modelMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_FAMILIES : GOV_NORMAL_MIN_AI_FAMILIES;
+  const runtimeMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS : GOV_NORMAL_MIN_AI_RUNTIME_GROUPS;
+  const ownerMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_OWNER_IDENTITIES : GOV_NORMAL_MIN_AI_OWNER_IDENTITIES;
+  const builderMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_BUILDERS : GOV_NORMAL_MIN_BUILDERS;
+  const platformMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_BUILDER_PLATFORMS : GOV_NORMAL_MIN_BUILDER_PLATFORMS;
+  const availabilityMin: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_AVAILABILITY_PROVIDERS
+    : GOV_NORMAL_MIN_AVAILABILITY_PROVIDERS;
+  const criticalResolved = !hasBlockingCriticalFindings(proposal.unresolvedCriticalCount, proposal.risk)
+    || (proposal.isCritical() && proposal.waiverCid.length > 0);
   const minimumExpiryValue = getString(reviewAvailabilityMinimumExpiryKey(proposal.reviewRoundId));
   const requiredAvailabilityUntil = checkedBlockAdd(proposal.executeAfter, EXECUTION_WINDOW_BLOCKS);
   return proposal.agentLeafCount > 0
@@ -1882,6 +2038,7 @@ function attestationGatesPass(proposal: Proposal): bool {
     && proposal.availabilitySubmittedCount == proposal.availabilityLeafCount
     && proposal.agentCount >= agentMin
     && proposal.agentModelCount >= modelMin
+    && proposal.agentRuntimeCount >= runtimeMin
     && proposal.agentOwnerCount >= ownerMin
     && criticalResolved
     && proposal.builderOwnerCount >= builderMin
@@ -1890,6 +2047,13 @@ function attestationGatesPass(proposal: Proposal): bool {
     && proposal.availabilityOwnerCount >= availabilityMin
     && minimumExpiryValue.length > 0
     && parseU64(minimumExpiryValue) >= requiredAvailabilityUntil;
+}
+
+function hasBlockingCriticalFindings(ownerCount: u32, risk: string): bool {
+  const threshold: u32 = risk == "normal"
+    ? GOV_NORMAL_CRITICAL_FINDING_OWNER_THRESHOLD
+    : GOV_CRITICAL_CRITICAL_FINDING_OWNER_THRESHOLD;
+  return ownerCount >= threshold;
 }
 
 function allGatesPass(proposal: Proposal): bool {
@@ -1903,8 +2067,12 @@ function allGatesPass(proposal: Proposal): bool {
   const yesThreshold = proposal.isCritical() ? CRITICAL_YES_BPS : NORMAL_YES_BPS;
   if (!ratioAtLeast(turnout, proposal.snapshotWeightAmount(), quorum)) return false;
   if (!ratioAtLeast(yes, decisive, yesThreshold)) return false;
-  const breadth: u32 = proposal.isCritical() ? 12 : 7;
-  const strongBreadth: u32 = proposal.isCritical() ? 5 : 3;
+  const breadth: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_YES_IDENTITIES
+    : GOV_NORMAL_MIN_YES_IDENTITIES;
+  const strongBreadth: u32 = proposal.isCritical()
+    ? GOV_CRITICAL_MIN_STRONG_YES
+    : GOV_NORMAL_MIN_STRONG_YES;
   return proposal.yesIdentities >= breadth && proposal.yesStrongIdentities >= strongBreadth;
 }
 
@@ -1943,8 +2111,8 @@ function removeVoteFromTotals(proposal: Proposal, receipt: string): void {
   }
 }
 
-function settleRejected(proposal: Proposal, refundPercent: u8): void {
-  const refund = percentage(proposal.bondAmount(), refundPercent);
+function settleRejected(proposal: Proposal, refundBps: u16): void {
+  const refund = basisPoints(proposal.bondAmount(), refundBps);
   const fee = proposal.bondAmount() - refund;
   proposal.state = STATE_REJECTED;
   proposal.refundableBond = refund.toString();
@@ -1965,12 +2133,12 @@ function settleStale(proposal: Proposal): void {
   emitVersionedEvent("ProposalStaleV1", [proposal.id, proposal.parentCid, getString(CANONICAL_CID_KEY), fee.toString()]);
 }
 
-function percentage(value: u128, percent: u8): u128 {
-  assert(percent <= 100, "invalid percentage");
-  const hundred = u128.fromU64(100);
-  const quotient = value / hundred;
-  const remainder = value % hundred;
-  return quotient * u128.fromU64(percent) + (remainder * u128.fromU64(percent)) / hundred;
+function basisPoints(value: u128, bps: u16): u128 {
+  assert(bps <= 10000, "invalid basis points");
+  const scale = u128.fromU64(10000);
+  const quotient = value / scale;
+  const remainder = value % scale;
+  return quotient * u128.fromU64(bps) + (remainder * u128.fromU64(bps)) / scale;
 }
 
 function metricsCertificationJson(root: string, epoch: u16): usize {
@@ -1993,7 +2161,7 @@ function metricsCertificationJson(root: string, epoch: u16): usize {
 
 function reviewRoundStateJson(round: ReviewRound): usize {
   return returnString(
-    "{\"schemaVersion\":1,\"reviewRoundId\":\"" + round.id + "\",\"state\":\"" + reviewRoundStateName(round.state)
+    "{\"schemaVersion\":2,\"reviewRoundId\":\"" + round.id + "\",\"state\":\"" + reviewRoundStateName(round.state)
       + "\",\"parentCid\":\"" + round.parentCid + "\",\"candidateCid\":\"" + round.candidateCid
       + "\",\"patchCid\":\"" + round.patchCid + "\",\"opener\":\"0x" + round.opener
       + "\",\"scopeEvidenceCid\":\"" + getString(reviewScopeEvidenceKey(round.id))
@@ -2009,8 +2177,12 @@ function reviewRoundStateJson(round: ReviewRound): usize {
       + ",\"availabilityAttestations\":" + round.availabilityLeafCount.toString()
       + ",\"validReviews\":" + round.agentCount.toString()
       + ",\"reviewModelFamilies\":" + round.agentModelCount.toString()
+      + ",\"reviewRuntimeGroups\":" + round.agentRuntimeCount.toString()
       + ",\"reviewOwners\":" + round.agentOwnerCount.toString()
       + ",\"unresolvedCriticalFindings\":" + round.unresolvedCriticalCount.toString()
+      + ",\"criticalFindingWaiverCid\":"
+      + (getString(reviewCriticalWaiverKey(round.id)).length > 0
+        ? "\"" + getString(reviewCriticalWaiverKey(round.id)) + "\"" : "null")
       + ",\"builders\":" + round.builderOwnerCount.toString()
       + ",\"builderPlatforms\":" + round.builderPlatformCount.toString()
       + ",\"builderConflicts\":" + round.builderConflictCount.toString()
@@ -2047,6 +2219,7 @@ function proposalStateJson(proposal: Proposal): usize {
       + "\"},\"pohw\":{\"yesIdentities\":" + proposal.yesIdentities.toString()
       + ",\"strongYesIdentities\":" + proposal.yesStrongIdentities.toString()
       + "},\"reviews\":" + proposal.agentCount.toString() + ",\"reviewModelFamilies\":" + proposal.agentModelCount.toString()
+      + ",\"reviewRuntimeGroups\":" + proposal.agentRuntimeCount.toString()
       + ",\"reviewOwners\":" + proposal.agentOwnerCount.toString() + ",\"unresolvedCriticalFindings\":" + proposal.unresolvedCriticalCount.toString()
       + ",\"reviewAttestationsSubmitted\":" + proposal.agentSubmittedCount.toString() + ",\"reviewAttestationsCommitted\":" + proposal.agentLeafCount.toString()
       + ",\"hasCriticalWaiver\":" + (proposal.waiverCid.length > 0 ? "true" : "false")
@@ -2140,10 +2313,10 @@ class ProposalScopeBinding {
   }
 }
 
-const MAX_SCOPE_PROOF_BYTES: u64 = 600000;
-const MAX_SCOPE_FILES_PER_REPOSITORY = 2048;
-const MAX_SCOPE_SOURCE_FILE_BYTES: u64 = 268435456;
-const MAX_SCOPE_SOURCE_TREE_BYTES: u64 = 2147483648;
+const MAX_SCOPE_PROOF_BYTES: u64 = GOV_MAX_SCOPE_PROOF_BYTES;
+const MAX_SCOPE_FILES_PER_REPOSITORY: i32 = <i32>GOV_MAX_SCOPE_FILES_PER_REPOSITORY;
+const MAX_SCOPE_SOURCE_FILE_BYTES: u64 = GOV_MAX_SCOPE_SOURCE_FILE_BYTES;
+const MAX_SCOPE_SOURCE_TREE_BYTES: u64 = GOV_MAX_SCOPE_SOURCE_TREE_BYTES;
 
 class SourceFileBinding {
   constructor(
@@ -2747,12 +2920,20 @@ function validateProposalNestedPayload(payload: CanonicalDagCborMap): string {
 
 function validateProposalDeclaredLimits(payload: CanonicalDagCborMap, risk: string): void {
   const critical = risk != "normal";
-  const maxRepositories: u32 = critical ? 16 : 4;
-  const maxChangedFiles: u32 = critical ? 1024 : 128;
-  const maxPatchBytes: u64 = critical ? 16 * 1024 * 1024 : 2 * 1024 * 1024;
-  const maxSourcePackageBytes: u64 = critical ? 1024 * 1024 * 1024 : 256 * 1024 * 1024;
-  const maxDescriptionBytes: u32 = critical ? 64 * 1024 : 16 * 1024;
-  const maxMigrationOperations: u32 = critical ? 64 : 8;
+  const maxRepositories: u32 = critical
+    ? GOV_CRITICAL_MAX_AFFECTED_REPOSITORIES
+    : GOV_NORMAL_MAX_AFFECTED_REPOSITORIES;
+  const maxChangedFiles: u32 = critical ? GOV_CRITICAL_MAX_CHANGED_FILES : GOV_NORMAL_MAX_CHANGED_FILES;
+  const maxPatchBytes: u64 = critical ? GOV_CRITICAL_MAX_PATCH_BYTES : GOV_NORMAL_MAX_PATCH_BYTES;
+  const maxSourcePackageBytes: u64 = critical
+    ? GOV_CRITICAL_MAX_SOURCE_PACKAGE_BYTES
+    : GOV_NORMAL_MAX_SOURCE_PACKAGE_BYTES;
+  const maxDescriptionBytes: u32 = critical
+    ? GOV_CRITICAL_MAX_DESCRIPTION_BYTES
+    : GOV_NORMAL_MAX_DESCRIPTION_BYTES;
+  const maxMigrationOperations: u32 = critical
+    ? GOV_CRITICAL_MAX_MIGRATION_OPERATIONS
+    : GOV_NORMAL_MAX_MIGRATION_OPERATIONS;
   const changedFiles = parseU32(payload.unsigned("changedFileCount"));
   const patchBytes = parseU64(payload.unsigned("patchBytes"));
   const sourcePackageBytes = parseU64(payload.unsigned("sourcePackageBytes"));
@@ -2807,7 +2988,10 @@ function validateAgentNestedPayload(
     if (!finding.isNull("evidenceCid")) {
       assert(isCanonicalContentCid(finding.string("evidenceCid")), "security finding evidence must be an immutable CID");
     }
-    if (severity == "critical" && !finding.boolean("resolved")) unresolved = checkedU32Add(unresolved, 1);
+    if (severity == "critical" && !finding.boolean("resolved")) {
+      assert(!finding.isNull("evidenceCid"), "unresolved critical findings require immutable evidence");
+      unresolved = checkedU32Add(unresolved, 1);
+    }
   }
   assert(unresolved == declaredUnresolved, "unresolved critical finding count does not match the finding list");
   return sourceBinding;
@@ -3186,6 +3370,14 @@ function agentAttestationPayloadKeys(): string[] {
   ];
 }
 
+function criticalFindingWaiverPayloadKeys(): string[] {
+  return [
+    "schemaVersion", "reviewRoundId", "parentEcosystemCid", "candidateEcosystemCid",
+    "patchCid", "riskClass", "agentReviewRoot", "unresolvedCriticalOwnerCount",
+    "scope", "rationaleCid", "authorIdenaAddress", "creationBlock",
+  ];
+}
+
 function identityMetricsAttestationPayloadKeys(): string[] {
   return [
     "schemaVersion", "metricsRoot", "snapshotCid", "snapshotSha256",
@@ -3362,6 +3554,10 @@ function reviewEntryKey(kind: string, reviewRoundId: string, index: u32): string
 function reviewOwnerEntryCountKey(kind: string, reviewRoundId: string, owner: string): string {
   return "review-owner-count:" + kind + ":" + reviewRoundId + ":" + owner;
 }
+
+function reviewOwnerModelFamilyKey(reviewRoundId: string, owner: string): string {
+  return "review-owner-model-family:" + reviewRoundId + ":" + owner;
+}
 function candidateArtifactKey(reviewRoundId: string, artifactKey: string): string {
   return "candidate-artifact:" + reviewRoundId + ":" + artifactKey;
 }
@@ -3376,6 +3572,9 @@ function reviewScopeRiskKey(reviewRoundId: string): string { return "review-scop
 function reviewScopeCountersKey(reviewRoundId: string): string { return "review-scope-counters:" + reviewRoundId; }
 function reviewPinsetMemberKey(reviewRoundId: string, cid: string): string {
   return "review-pinset:" + reviewRoundId + ":" + cid;
+}
+function reviewCriticalWaiverKey(reviewRoundId: string): string {
+  return "review-critical-waiver:" + reviewRoundId;
 }
 function availabilityRequirementCountKey(reviewRoundId: string): string {
   return "availability-requirement-count:" + reviewRoundId;
@@ -3397,6 +3596,9 @@ function availabilityExpiryKey(reviewRoundId: string, attestationCid: string): s
 }
 function agentQualifyingKey(reviewRoundId: string, attestationCid: string): string {
   return "agent-qualifying:" + reviewRoundId + ":" + attestationCid;
+}
+function agentRuntimeKey(reviewRoundId: string, attestationCid: string): string {
+  return "agent-runtime:" + reviewRoundId + ":" + attestationCid;
 }
 function buildPassingKey(reviewRoundId: string, attestationCid: string): string {
   return "build-passing:" + reviewRoundId + ":" + attestationCid;

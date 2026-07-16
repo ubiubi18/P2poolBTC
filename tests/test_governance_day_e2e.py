@@ -30,12 +30,39 @@ class GovernanceDayE2ETests(unittest.TestCase):
         self.assertFalse(lock["authorizedForDeployment"])
         self.assertEqual(lock["sourceSha256"], hashlib.sha256(parameter_bytes).hexdigest())
         cid = lock["parameterSetCid"]
-        for path in [
-            ROOT / "contracts" / "idena-code-governance" / "assembly" / "index.ts",
-            ROOT / "contracts" / "idena-code-governance" / "scripts" / "emulator-test.mjs",
-            ROOT / "crates" / "p2pool-node" / "src" / "governance_api.rs",
-        ]:
-            self.assertIn(cid, path.read_text(encoding="utf-8"))
+        generated = (
+            ROOT
+            / "contracts"
+            / "idena-code-governance"
+            / "assembly"
+            / "generated_parameters.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'GOVERNANCE_PARAMETER_SET_CID: string = "{cid}"', generated)
+        contract = (
+            ROOT / "contracts" / "idena-code-governance" / "assembly" / "index.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn("EXPECTED_PARAMETER_CID = GOVERNANCE_PARAMETER_SET_CID", contract)
+        emulator = (
+            ROOT
+            / "contracts"
+            / "idena-code-governance"
+            / "scripts"
+            / "emulator-test.mjs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("assert.deepEqual(deployedParameters.parameterProfile, lockedParameters)", emulator)
+        node_api = (
+            ROOT / "crates" / "p2pool-node" / "src" / "governance_api.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn(cid, node_api)
+
+        local_lock = json.loads(LOCAL_CANDIDATE_LOCK.read_text(encoding="utf-8"))
+        fork_lock = json.loads(FORK_CANDIDATE_LOCK.read_text(encoding="utf-8"))
+        lock_sha256 = hashlib.sha256(PARAMETER_LOCK.read_bytes()).hexdigest()
+        self.assertEqual(local_lock["parameterSet"]["cid"], cid)
+        self.assertEqual(local_lock["parameterSet"]["sha256"], lock["parameterSetSha256"])
+        self.assertEqual(fork_lock["parameterSet"]["cid"], cid)
+        self.assertEqual(fork_lock["parameterSet"]["sha256"], lock["parameterSetSha256"])
+        self.assertEqual(fork_lock["parameterSet"]["lockSha256"], lock_sha256)
 
     def test_idena_ai_integration_record_is_exact_and_inactive(self):
         record = json.loads(INTEGRATION.read_text(encoding="utf-8"))

@@ -46,6 +46,7 @@ const requiredExports = new Set([
   "identityMetricsCertification",
   "openReviewRound",
   "freezeReviewRound",
+  "registerCriticalFindingWaiver",
   "expireReviewRound",
   "withdrawExpiredReviewBond",
   "withdrawExpiredReviewAttestationBond",

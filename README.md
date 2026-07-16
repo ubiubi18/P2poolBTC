@@ -45,6 +45,11 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > authenticated scope, builder, availability, and audit attestations before any
 > Experiment 1 service starts; editable status flags or aggregate counts cannot
 > open public joining.
+> Community onboarding additionally requires the canonical ecosystem CID to be
+> read independently from Idena governance, then verifies the corresponding
+> DAG-CBOR ecosystem CAR, P2poolBTC source CAR, and runtime artifact digests
+> before any repository verifier is executed. A Git branch, launch-policy file,
+> gateway response, or executable cannot select or authenticate itself.
 > The public `vibe/experiment-1-release-readiness` branch is a review candidate,
 > not a canonical release or permission to connect a miner. Its head may move
 > during review. A live join must use the later exact release commit and the
@@ -110,41 +115,47 @@ SD-only Pi remained observer-only throughout the check.
 
 ## Start Here
 
+Newcomers should begin with the
+[five-minute Experiment 1 quick start](COMMUNITY-QUICKSTART.md). It provides a
+single read-only command, role-specific host checks, a five-stage local report,
+and a pre-redacted issue template. It cannot register an identity, connect a
+peer, start a service, or mine while the public-join interlock is blocked.
+After the interlock opens, the same state machine accepts only a DAO-selected
+ecosystem CID plus matching CAR/source/runtime artifacts and can produce a
+participant-specific live proof. Historical global sharechain activity does
+not count as newcomer success.
+
 Choose the path that matches what you are trying to do:
 
 | Goal | What is safe now | Stop condition |
 | --- | --- | --- |
 | Review or rehearse | Inspect the public candidate branch, verify the blocked policy and manifest, then build and test locally without credentials or live services | Do not connect Core, gossip, Stratum, an Idena identity, or mining hardware |
-| Join the live experiment | Wait for the policy verifier to print `ready-for-public-join`, then follow the exact source-first release procedure | Never override the interlock or substitute a moving branch for the exact release commit and CID |
+| Join the live experiment | Wait for the policy verifier to print `ready-for-public-join`, independently read the canonical ecosystem CID from Idena governance, then run the exact source/CAR/artifact and local live-proof procedure | Never override the interlock or substitute a moving branch, self-reported CID, or unattested executable |
 | Create a separate experiment | Use the operator runbook and generate a new manifest and activation ID intentionally | Never advertise a separately generated network as the existing Experiment 1 |
 
 ### Review And Rehearse Now
 
 This path requires no identity signature, API key, wallet, peer endpoint, or
-root installation. The expected policy result is currently
-`blocked-release-readiness`; that is success for a review rehearsal, not a live
-join:
+root installation. The guarded command verifies the manifest and policy,
+checks the host, optionally runs the focused locked tests, and writes a private
+local HTML report plus redacted issue template:
 
 ```sh
 git clone https://github.com/ubiubi18/P2poolBTC.git
 cd P2poolBTC
 git switch --detach origin/vibe/experiment-1-release-readiness
 test -z "$(git status --short)"
-git rev-parse HEAD
-
-STATUS=$(python3 scripts/pohw-experiment-1-launch-policy.py \
-  compatibility/experiment-1-launch-policy.json | \
-  sed -n 's/^launch policy verified: //p')
-test "$STATUS" = blocked-release-readiness
-
-python3 scripts/pohw-experiment-1-manifest.py verify \
-  compatibility/experiment-1-full-consensus.json
-cargo test --locked -p p2pool-node -p pohw-core
+./scripts/pohw-community-onboard.sh --role observer
 ```
 
-Do not start systemd units or copy credentials during this lane. Record the
-commit printed by `git rev-parse HEAD` when reporting a review result because
-the candidate branch is not a release identifier.
+The expected journey result for a clean observer checkout is `review-ready`,
+while the verified release policy remains `blocked-release-readiness`. Do not
+start systemd units or copy credentials during this lane. Record the exact
+commit from `git rev-parse HEAD` when reporting a review result because the
+candidate branch is not a release identifier. See
+[COMMUNITY-QUICKSTART.md](COMMUNITY-QUICKSTART.md) for every result state and
+safe issue-reporting rules, including the explicit locked dependency-fetch and
+offline test step for deeper reviewers.
 
 ### Five-Step Live Journey After The Interlock Opens
 
@@ -246,10 +257,10 @@ The current candidate implements:
   AI findings.
 
 The locked local parameter-set CID is
-`bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`. The locally
-built WASM candidate is 289,677 bytes with CID
-`bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq` and SHA-256
-`eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc`.
+`bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei`. The locally
+built WASM candidate is 302,419 bytes with CID
+`bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili` and SHA-256
+`976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a`.
 These values identify test artifacts; they are not deployment authorization.
 The contract derives normal/critical risk and scope counters from exact,
 bounded base-to-candidate source transitions; proposer labels cannot downgrade

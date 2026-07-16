@@ -4,11 +4,15 @@
   "title": "EpochGovernanceParameterSetV1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "stakeQuantumAtoms", "minimumActiveStakeAtoms", "normalProposalBondAtoms", "criticalProposalBondAtoms", "rejectedBondBurnBps", "rejectedBondTreasuryBps", "noQuorumFeeAtoms", "cancellationFeeAtoms", "maximumProposalsPerEpoch", "schedule", "normalLimits", "criticalLimits", "normal", "critical"],
+  "required": ["schemaVersion", "stakeQuantumAtoms", "minimumActiveStakeAtoms", "identityMath", "lifecycle", "contractBondPolicy", "contractResourceLimits", "normalProposalBondAtoms", "criticalProposalBondAtoms", "rejectedBondBurnBps", "rejectedBondTreasuryBps", "noQuorumFeeAtoms", "cancellationFeeAtoms", "maximumProposalsPerEpoch", "schedule", "normalLimits", "criticalLimits", "normal", "critical"],
   "properties": {
     "schemaVersion": {"const": 1},
     "stakeQuantumAtoms": {"const": "1000000000000"},
     "minimumActiveStakeAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
+    "identityMath": {"$ref": "#/$defs/identityMath"},
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "contractBondPolicy": {"$ref": "#/$defs/contractBondPolicy"},
+    "contractResourceLimits": {"$ref": "#/$defs/contractResourceLimits"},
     "normalProposalBondAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
     "criticalProposalBondAtoms": {"$ref": "common.schema.json#/$defs/AtomicAmount"},
     "rejectedBondBurnBps": {"type": "integer", "minimum": 0, "maximum": 10000},
@@ -23,6 +27,53 @@
     "critical": {"$ref": "#/$defs/gates"}
   },
   "$defs": {
+    "identityMath": {
+      "type": "object", "additionalProperties": false,
+      "required": ["idnaAtomsPerUnit", "statusBps", "flipPriorReported", "flipPriorTotal", "flipTrustFloorBps", "flipTrustCeilingBps", "flipPenaltyScale"],
+      "properties": {
+        "idnaAtomsPerUnit": {"const": "1000000000000000000"},
+        "statusBps": {"type": "object", "additionalProperties": false, "required": ["Human", "Verified", "Newbie"], "properties": {"Human": {"const": 10000}, "Verified": {"const": 8500}, "Newbie": {"const": 7000}}},
+        "flipPriorReported": {"const": 1},
+        "flipPriorTotal": {"const": 20},
+        "flipTrustFloorBps": {"const": 4000},
+        "flipTrustCeilingBps": {"const": 10000},
+        "flipPenaltyScale": {"const": 15000}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewPeriodBlocks", "votingPeriodBlocks", "challengePeriodBlocks", "timelockBlocks", "executionWindowBlocks", "unbondingDelayEpochs", "minimumIdentityMetricsAttestations"],
+      "properties": {
+        "reviewPeriodBlocks": {"const": 40}, "votingPeriodBlocks": {"const": 120},
+        "challengePeriodBlocks": {"const": 60}, "timelockBlocks": {"const": 60},
+        "executionWindowBlocks": {"const": 600}, "unbondingDelayEpochs": {"const": 4},
+        "minimumIdentityMetricsAttestations": {"const": 3}
+      }
+    },
+    "contractBondPolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimumReviewerBondAtoms", "minimumBuilderBondAtoms", "minimumDataAvailabilityBondAtoms", "staleProcessingFeeAtoms", "rejectedProposalReturnBps", "expiredReviewRoundReturnBps", "expiredProposalReturnBps", "successfulChallengeProposerReturnBps", "unavailableAttestationSlashBps", "fraudulentActorStakeSlashBps"],
+      "properties": {
+        "minimumReviewerBondAtoms": {"const": "1000000000000000000"},
+        "minimumBuilderBondAtoms": {"const": "1000000000000000000"},
+        "minimumDataAvailabilityBondAtoms": {"const": "1000000000000000000"},
+        "staleProcessingFeeAtoms": {"const": "100000000000000000"},
+        "rejectedProposalReturnBps": {"const": 9000}, "expiredReviewRoundReturnBps": {"const": 7500},
+        "expiredProposalReturnBps": {"const": 7500}, "successfulChallengeProposerReturnBps": {"const": 5000},
+        "unavailableAttestationSlashBps": {"const": 5000}, "fraudulentActorStakeSlashBps": {"const": 500}
+      }
+    },
+    "contractResourceLimits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maxStakeHistory", "maxPortableArtifactSize", "maxCommittedAttestations", "maxAttestationsPerOwnerPerClass", "maxRequiredAvailabilityCids", "maxScopeProofBytes", "maxScopeFilesPerRepository", "maxScopeSourceFileBytes", "maxScopeSourceTreeBytes"],
+      "properties": {
+        "maxStakeHistory": {"const": 256}, "maxPortableArtifactSize": {"const": 9007199254740991},
+        "maxCommittedAttestations": {"const": 256}, "maxAttestationsPerOwnerPerClass": {"const": 2},
+        "maxRequiredAvailabilityCids": {"const": 4096}, "maxScopeProofBytes": {"const": 600000},
+        "maxScopeFilesPerRepository": {"const": 2048}, "maxScopeSourceFileBytes": {"const": 268435456},
+        "maxScopeSourceTreeBytes": {"const": 2147483648}
+      }
+    },
     "schedule": {
       "type": "object", "additionalProperties": false,
       "required": ["proposalCutoff", "commitStart", "commitEnd", "revealEnd", "normalGraceBlocks", "criticalGraceBlocks", "executionWindowBlocks", "observationWindowBlocks"],
@@ -51,7 +102,7 @@
     },
     "gates": {
       "type": "object", "additionalProperties": false,
-      "required": ["turnoutQuorumBps", "yesThresholdBps", "minimumParticipatingIdentities", "minimumYesIdentities", "minimumVerifiedOrHumanYes", "minimumAiAttestations", "minimumAiIndependenceGroups", "minimumAiFamilies", "minimumBuilders", "minimumBuilderPlatforms", "minimumDataAvailabilityProviders", "requireMatchingBuildDigests"],
+      "required": ["turnoutQuorumBps", "yesThresholdBps", "minimumParticipatingIdentities", "minimumYesIdentities", "minimumVerifiedOrHumanYes", "minimumAiAttestations", "minimumAiIndependenceGroups", "minimumAiFamilies", "minimumAiOwnerIdentities", "criticalFindingOwnerThreshold", "minimumBuilders", "minimumBuilderPlatforms", "minimumDataAvailabilityProviders", "requireMatchingBuildDigests"],
       "properties": {
         "turnoutQuorumBps": {"type": "integer", "minimum": 1, "maximum": 10000},
         "yesThresholdBps": {"type": "integer", "minimum": 1, "maximum": 10000},
@@ -61,6 +112,8 @@
         "minimumAiAttestations": {"type": "integer", "minimum": 1},
         "minimumAiIndependenceGroups": {"type": "integer", "minimum": 1},
         "minimumAiFamilies": {"type": "integer", "minimum": 1},
+        "minimumAiOwnerIdentities": {"type": "integer", "minimum": 1},
+        "criticalFindingOwnerThreshold": {"type": "integer", "minimum": 2},
         "minimumBuilders": {"type": "integer", "minimum": 1},
         "minimumBuilderPlatforms": {"type": "integer", "minimum": 1},
         "minimumDataAvailabilityProviders": {"type": "integer", "minimum": 1},

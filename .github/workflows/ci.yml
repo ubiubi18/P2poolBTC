@@ -58,12 +58,16 @@ jobs:
             EXPERIMENT-1.md
             SECURITY.md
             compatibility/experiment-1-full-consensus.json
+            compatibility/experiment-1-onboarding-profile.json
             compatibility/experiment-1-miner-registry-candidate.json
             compatibility/governance-build-plan-v1.json
             compatibility/governance-fork-lock.json
             compatibility/governance-fork-runtime-tests/idena-go/governance_contract_integration_test.go
             vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch
             scripts/pohw-experiment-1-manifest.py
+            scripts/pohw-community-onboarding.py
+            scripts/pohw-community-onboard.sh
+            scripts/pohw-community-onboard.ps1
             scripts/pohw-bootstrap-bitcoin-core-fork.sh
             scripts/pohw-install-experiment-1-adapter.sh
             scripts/pohw-activate-experiment-1-profile.py
@@ -74,6 +78,9 @@ jobs:
             contracts/idena-pohw-miner-registry/pnpm-lock.yaml
             compatibility/experiment-1-runtime-tests/idena-go/miner_registry_contract_integration_test.go
             COMMUNITY-EXPERIMENT-1.md
+            COMMUNITY-QUICKSTART.md
+            schemas/pohw-community-onboarding-profile-v1.schema.json
+            schemas/pohw-community-onboarding-receipt-v1.schema.json
             deploy/bitcoin/bitcoin-pohw-experiment-1.conf.example
             deploy/pohw-experiment-1.env.example
             deploy/systemd/bitcoind-pohw-experiment-1.service
@@ -82,6 +89,7 @@ jobs:
             deploy/systemd/pohw-host-firewall.service
             deploy/nftables/pohw-host-firewall.json.example
             tests/test_pohw_experiment_1.py
+            tests/test_pohw_community_onboarding.py
             tests/test_pohw_install_experiment_1_adapter.py
             tests/test_pohw_experiment_1_profile.py
             tests/test_pohw_bootstrap_ci_security.py

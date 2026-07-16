@@ -321,10 +321,12 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
             ROOT / "compatibility" / "governance-fork-lock.json"
         )["governancePrototype"]["contractArtifact"]
 
-        self.assertEqual(current["sha256"], "eba64f49bcc4ff55c13fe03fd694d6da7aebfca79b325f6283f7e1dbf282afcc")
-        self.assertEqual(current["size"], 289677)
-        self.assertEqual(current["cid"], "bafkreihluzhutpge75k4cp7ah7ljjvw2plv7zj43gjpwfa7x4hn7favpzq")
-        self.assertEqual(current["abiExports"], 63)
+        self.assertEqual(current["sha256"], "976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a")
+        self.assertEqual(current["size"], 302419)
+        self.assertEqual(current["cid"], "bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili")
+        self.assertEqual(current["abiExports"], 64)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"{current['size']:,} bytes", readme)
         self.assertEqual(
             {key: fork_candidate[key] for key in ("sha256", "size", "cid")},
             {key: current[key] for key in ("sha256", "size", "cid")},
@@ -342,6 +344,18 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
         candidate["activation"]["activationHeight"] = 1
         with self.assertRaisesRegex(MODULE.GateError, "invents an activation height"):
             MODULE.validate_candidate_safety_profile(candidate)
+
+    def test_ballot_replay_domain_matches_the_locked_fork_profile(self):
+        candidate = MODULE.load_json(
+            ROOT / "compatibility" / "governance-day-fork-candidate-lock.json"
+        )
+        profile = candidate["forkProfile"]
+        expected = f'{profile["forkIdentifier"]}:{profile["networkId"]}'
+        self.assertEqual(profile["ballotReplayDomain"], expected)
+        contract_source = (
+            ROOT / "contracts" / "idena-code-governance" / "assembly" / "epoch_governance.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'const CHAIN_ID = "{expected}";', contract_source)
 
     def test_artifact_only_default_mode_uses_its_historical_lock(self):
         historical = MODULE.load_json(

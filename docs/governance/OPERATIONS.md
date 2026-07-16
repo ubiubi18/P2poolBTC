@@ -78,7 +78,7 @@ cargo run -p governance-cli -- epoch-parameters-inspect \
 ```
 
 The expected CID is
-`bafyreidyq6bfhdf4xejx2s46t7vwwxwtnctqc4dh3wqvrrbyhzunu45afq`.
+`bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei`.
 Treat any other CID as a different governance experiment. The local candidate
 artifact inventory is
 `compatibility/governance-day-local-candidate-lock.json`; it is explicitly

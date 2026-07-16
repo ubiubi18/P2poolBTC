@@ -74,15 +74,17 @@ This implementation is safe only for local, no-value testing.
   bonded identities. That materially raises the cost but does not eliminate a
   coordinated identity-farming or censorship attack, so public-testnet
   parameters still require adversarial capacity testing.
-- Model family, runtime family, architecture, provider, and pin-operator labels
-  are bound to an Idena identity by a verified detached signature before
-  deployment readiness counts them, but remain self-asserted. Receipt-shaped
-  JSON is deliberately rejected until an authenticated Idena chain-proof
-  verifier exists.
-  Diversity counts therefore resist duplicate identities, not coordinated
-  operators lying about infrastructure. External attestation or measured
-  execution is still required before these labels can be treated as strong
-  independence evidence.
+- Runtime-group diversity in the contract, Rust lifecycle, epoch simulator,
+  and dashboard is derived from authenticated eligible owner identities, not
+  from self-declared runtime labels. Each owner is capped at two agent
+  attestations and one qualifying model-family claim per round, so changing a
+  label cannot inflate family or runtime diversity. Model family, runtime
+  family, architecture, provider, and pin-operator labels nevertheless remain
+  self-asserted metadata. Receipt-shaped JSON is deliberately rejected until
+  an authenticated provider or Idena chain-proof verifier exists. These gates
+  resist duplicate identities, not coordinated owners sharing infrastructure
+  or lying about providers; external attestation or measured execution is
+  still required before the labels establish operational independence.
 - Signed pinning attestations reduce availability risk but cannot guarantee
   permanent retrieval. The opening pinset covers candidate and proposal
   content, and the final gate additionally requires every accepted agent/build
@@ -182,11 +184,14 @@ This implementation is safe only for local, no-value testing.
   mark; semantic-version downgrade checks and exact contract authorization
   still apply, but durable rollback resistance ultimately needs a contract-
   committed release sequence or equivalent authenticated monotonic state.
-- Dashboard proposal counters are cross-checked against read-only contract
-  state before rendering, and the node now recomputes every displayed gate
-  from bounded vote and attestation evidence. Diff summaries and affected-
-  repository labels remain local index metadata until the desktop also decodes
-  the full proposal CID.
+- The dashboard currently consumes a bounded, non-symlink, operator-supplied
+  local snapshot. The node recomputes displayed gate arithmetic and verifies
+  content-addressed policy and typed critical-waiver objects, including their
+  proposal/review bindings, before rendering. It does not yet query or
+  cross-check production contract state, so this display cannot authorize a
+  deployment or release. Diff summaries and affected-repository labels remain
+  local index metadata until a read-only contract/indexer adapter decodes the
+  full proposal CID.
 - Canonical history is append-only and paginated at 64 entries per contract
   query. The dashboard snapshot itself remains capped at 1,024 history entries;
   archival consumers must page and persist older entries independently.
@@ -196,10 +201,12 @@ This implementation is safe only for local, no-value testing.
   review-round size; it is not the production contract storage engine.
 - Concave square-root stake weight does not eliminate stake splitting, identity
   farming, whale coordination, bribery, collusion, or low participation.
-- AI diversity labels cannot prove independent ownership. AI agents are not
-  correctness oracles and cannot execute proposals. Prompt injection,
-  provider compromise, and collusion remain residual risks even when the
-  content-addressed review record is structurally valid.
+- Authenticated Idena owners establish bounded reviewer diversity, but cannot
+  prove that different owners use independent providers, models, organizations,
+  or infrastructure. AI agents are not correctness oracles and cannot execute
+  proposals. Prompt injection, provider compromise, identity coordination, and
+  collusion remain residual risks even when the content-addressed review record
+  is structurally valid.
 - The lifecycle E2E uses a deterministic local content-addressed store, and the
   opt-in Docker smoke test imports the same verified CAR into two disposable
   Kubo 0.42.0 sidecars, fetches through their gateway path, re-verifies the CAR,

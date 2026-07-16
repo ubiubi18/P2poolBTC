@@ -537,6 +537,12 @@ fn validate_agent_review(value: &AgentReviewAttestationV1) -> Result<(), Attesta
     }
     for finding in &value.security_findings {
         validate_text(&finding.summary, 1, 4_096, "finding summary")?;
+        if finding.severity == FindingSeverity::Critical
+            && !finding.resolved
+            && finding.evidence_cid.is_none()
+        {
+            return invalid("unresolved critical findings require immutable evidence");
+        }
         if let Some(cid) = &finding.evidence_cid {
             validate_content_cid(cid)?;
         }
@@ -1219,6 +1225,26 @@ mod tests {
             package_agent_review_attestation(value),
             Err(AttestationError::Invalid(message)) if message.contains("secret")
         ));
+    }
+
+    #[test]
+    fn unresolved_critical_review_requires_immutable_evidence() {
+        let mut value = agent_attestation();
+        value.unresolved_critical_findings = 1;
+        value.security_findings = vec![SecurityFindingV1 {
+            severity: FindingSeverity::Critical,
+            summary: "reproducible critical finding".to_string(),
+            evidence_cid: None,
+            resolved: false,
+        }];
+        assert!(matches!(
+            package_agent_review_attestation(value.clone()),
+            Err(AttestationError::Invalid(message))
+                if message.contains("immutable evidence")
+        ));
+
+        value.security_findings[0].evidence_cid = Some(raw_cid("critical-evidence"));
+        assert!(package_agent_review_attestation(value).is_ok());
     }
 
     #[test]

@@ -30,8 +30,10 @@
     "minimumYesIdentities": 7,
     "minimumVerifiedOrHumanYes": 3,
     "minimumAgentAttestations": 3,
+    "minimumAgentRuntimeGroups": 2,
     "minimumAgentFamilies": 2,
     "minimumAgentOwners": 2,
+    "criticalFindingOwnerThreshold": 2,
     "minimumBuilders": 2,
     "minimumBuilderPlatforms": 1,
     "minimumDataAvailabilityProviders": 2
@@ -42,8 +44,10 @@
     "minimumYesIdentities": 12,
     "minimumVerifiedOrHumanYes": 5,
     "minimumAgentAttestations": 5,
+    "minimumAgentRuntimeGroups": 3,
     "minimumAgentFamilies": 3,
     "minimumAgentOwners": 3,
+    "criticalFindingOwnerThreshold": 3,
     "minimumBuilders": 3,
     "minimumBuilderPlatforms": 2,
     "minimumDataAvailabilityProviders": 3

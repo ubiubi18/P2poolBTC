@@ -556,12 +556,12 @@ def validate_candidate_safety_profile(candidate: dict[str, Any]) -> None:
     )
     require(host_abi.get("extensionPlacement") == "after-legacy-go-api-prefix", "fork candidate ABI extension is not append-only")
     require(host_abi.get("contractImportCount") == 13, "governance contract import count changed")
-    require(host_abi.get("contractExportCount") == 63, "governance contract export count changed")
+    require(host_abi.get("contractExportCount") == 64, "governance contract export count changed")
 
     artifact = candidate.get("contractArtifact")
     require(isinstance(artifact, dict), "fork candidate contract artifact is missing")
     require(artifact.get("abiImports") == 13, "governance artifact import count changed")
-    require(artifact.get("abiExports") == 63, "governance artifact export count changed")
+    require(artifact.get("abiExports") == 64, "governance artifact export count changed")
 
 
 def validate_candidate_source_descriptor(component: dict[str, Any]) -> None:

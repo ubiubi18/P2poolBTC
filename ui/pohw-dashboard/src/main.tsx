@@ -253,7 +253,10 @@ interface GovernanceProposal {
   proposalCid: string;
   scopeEvidenceCid: string;
   scopeEvidenceVerified: boolean;
+  parentCanonicalEcosystemCid?: string | null;
   candidateEcosystemCid: string;
+  patchCid?: string | null;
+  proposerAddress?: string | null;
   parameterSetCid: string;
   reviewRoundId: string;
   reviewRoundState: "Open" | "Frozen" | "Claimed" | "Expired";
@@ -272,9 +275,27 @@ interface GovernanceProposal {
   agentReviewRoot: string;
   buildAttestationRoot: string;
   dataAvailabilityRoot: string;
+  criticalFindingWaiverCid?: string | null;
+  reviewRoundCriticalFindingWaiverCid?: string | null;
+  criticalFindingWaiver?: {
+    schemaVersion: number;
+    reviewRoundId: string;
+    parentEcosystemCid: string;
+    candidateEcosystemCid: string;
+    patchCid: string;
+    riskClass: "critical" | "consensus" | "migration";
+    agentReviewRoot: string;
+    unresolvedCriticalOwnerCount: number;
+    scope: string;
+    rationaleCid: string;
+    authorIdenaAddress: string;
+    creationBlock: number;
+  } | null;
   aiReviews: {
     validAttestations: number;
     requiredAttestations: number;
+    distinctRuntimeGroups: number;
+    requiredRuntimeGroups: number;
     distinctModelFamilies: number;
     requiredModelFamilies: number;
     distinctOwnerIdentities: number;
@@ -1342,13 +1363,17 @@ function GovernanceWorkspace({
       </header>
 
       {loadState === "loading" ? (
-        <div className="governance-empty"><RefreshCw className="spin" size={18} /><span>Loading verified snapshot</span></div>
+        <div className="governance-empty"><RefreshCw className="spin" size={18} /><span>Loading local governance snapshot</span></div>
       ) : unavailable || !data ? (
         <div className="governance-empty warning"><AlertTriangle size={18} /><span>Governance snapshot unavailable</span></div>
       ) : !configured ? (
         <div className="governance-empty"><Database size={18} /><span>No governance contract snapshot configured</span></div>
       ) : (
         <>
+          <div className="governance-empty warning">
+            <AlertTriangle size={18} />
+            <span>Operator-local snapshot: content bindings and gate arithmetic are checked locally, but contract state is not queried yet</span>
+          </div>
           <section className="governance-canonical">
             <div>
               <span>Canonical ecosystem CID</span>
@@ -1603,7 +1628,9 @@ function GovernanceProposalCard({ proposal }: { proposal: GovernanceProposal }) 
       value: proposal.pohw.distinctYesIdentities + "/" + proposal.pohw.requiredYesIdentities + " identities"
     },
     {
-      detail: proposal.aiReviews.distinctModelFamilies + "/" + proposal.aiReviews.requiredModelFamilies + " model families",
+      detail: proposal.aiReviews.distinctRuntimeGroups + "/" + proposal.aiReviews.requiredRuntimeGroups + " owner-bound runtime groups; "
+        + proposal.aiReviews.distinctModelFamilies + "/" + proposal.aiReviews.requiredModelFamilies + " model families; "
+        + proposal.aiReviews.distinctOwnerIdentities + "/" + proposal.aiReviews.requiredOwnerIdentities + " owners",
       label: "PoAW",
       passed: proposal.aiReviews.passed,
       value: proposal.aiReviews.validAttestations + "/" + proposal.aiReviews.requiredAttestations + " reviews"
@@ -3118,18 +3145,18 @@ function TopBar({
   ];
   const governanceStatuses: ServiceStatus[] = [
     {
-      label: "Governance",
-      state: governance?.status === "operator-validated-local-snapshot" ? "connected" : governanceState === "loading" ? "syncing" : "pending",
-      detail: governance?.status ?? governanceState
+      label: "Governance snapshot",
+      state: governance?.status === "operator-validated-local-snapshot" ? "warning" : governanceState === "loading" ? "syncing" : "pending",
+      detail: governance?.status === "operator-validated-local-snapshot" ? "operator-local / structurally checked" : governanceState
     },
     {
       label: "Canonical CID",
-      state: governance?.currentCanonicalEcosystemCid ? "connected" : "pending",
+      state: governance?.currentCanonicalEcosystemCid ? "warning" : "pending",
       detail: shortHash(governance?.currentCanonicalEcosystemCid)
     },
     {
       label: "Proposals",
-      state: governance ? "connected" : "pending",
+      state: governance ? "warning" : "pending",
       detail: governance ? governance.proposals.length + " tracked" : "unavailable"
     },
     {

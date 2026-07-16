@@ -60,7 +60,6 @@ pub fn run_local_governance_day_protocol_demo(
     let canonical_before = dag_cbor_cid("canonical-before");
     let canonical_after = dag_cbor_cid("canonical-after");
     let rejected_candidate = dag_cbor_cid("rejected-candidate");
-    let parameter_set_cid = dag_cbor_cid("parameter-set");
     let support_cid = raw_cid("supporting-evidence");
     let mut parameters = EpochGovernanceParameterSetV1::experimental_defaults();
     parameters.normal.minimum_participating_identities = 1;
@@ -69,6 +68,10 @@ pub fn run_local_governance_day_protocol_demo(
     parameters.critical.minimum_participating_identities = 1;
     parameters.critical.minimum_yes_identities = 1;
     parameters.critical.minimum_verified_or_human_yes = 1;
+    let parameter_set_cid = crate::package_dag_cbor(&parameters)
+        .map_err(|_| EpochGovernanceError::InvalidParameters)?
+        .root_cid
+        .to_string();
 
     let mut engine = EpochGovernanceEngine::initialize(
         LOCAL_CHAIN_ID,
@@ -356,8 +359,10 @@ fn change_proposal(
     EpochProposalContentV1 {
         schema_version: 1,
         title: title.to_string(),
+        review_round_id: "44".repeat(32),
         parent_canonical_ecosystem_cid: parent.to_string(),
         candidate_ecosystem_cid: candidate.to_string(),
+        patch_cid: dag_cbor_cid(&format!("{title}-patch")),
         candidate_manifest_sha256: "22".repeat(32),
         parameter_set_cid: parameters.to_string(),
         affected_repositories: vec!["P2poolBTC".to_string()],
@@ -371,6 +376,7 @@ fn change_proposal(
         test_plan_cid: support_cid.to_string(),
         rollback_manifest_cid: support_cid.to_string(),
         rollback_instructions_cid: support_cid.to_string(),
+        critical_finding_waiver_cid: None,
         social_discussion: Some(SocialDiscussionReferenceV1 {
             post_id: Some("LOCAL-TEST-DISCUSSION".to_string()),
             discussion_cid: Some(support_cid.to_string()),
@@ -419,9 +425,10 @@ fn attach_local_evidence(
         proposal_id,
         AiReviewEvidenceV1 {
             root: "33".repeat(32),
-            valid_attestations: 2,
+            valid_attestations: 3,
             independent_runtime_groups: 2,
-            distinct_provider_families: 1,
+            distinct_provider_families: 2,
+            distinct_owner_identities: 2,
             unresolved_critical_findings: 0,
         },
         EpochGovernanceClock {

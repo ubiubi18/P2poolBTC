@@ -430,6 +430,17 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
                     self.assertEqual(
                         stat.S_IMODE(installed.stat().st_mode), expected_mode
                     )
+            governance_digest = (
+                install_root / self.RUNTIME_DIR / "pohw-governance.sha256"
+            )
+            expected_governance_digest = hashlib.sha256(
+                (source_root / "target" / "release" / "pohw-governance").read_bytes()
+            ).hexdigest()
+            self.assertEqual(
+                governance_digest.read_text(encoding="ascii"),
+                expected_governance_digest + "\n",
+            )
+            self.assertEqual(stat.S_IMODE(governance_digest.stat().st_mode), 0o444)
             self.assertIn("# old", Path(f"{destination}.previous").read_text())
             service_checks = log.read_text(encoding="utf-8")
             self.assertIn("bitcoind-pohw-experiment-1.service", service_checks)
@@ -449,6 +460,7 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             installed = {
                 install_root / self.RUNTIME_DIR / "p2pool-node": 0o700,
                 install_root / self.RUNTIME_DIR / "pohw-governance": 0o700,
+                install_root / self.RUNTIME_DIR / "pohw-governance.sha256": 0o400,
                 install_root
                 / self.RUNTIME_DIR
                 / "pohw-run-mining-adapter.sh": 0o700,

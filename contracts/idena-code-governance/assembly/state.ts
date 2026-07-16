@@ -87,6 +87,7 @@ export class ReviewRound {
     public availabilityLeafCount: u32,
     public agentCount: u32,
     public agentModelCount: u32,
+    public agentRuntimeCount: u32,
     public agentOwnerCount: u32,
     public unresolvedCriticalCount: u32,
     public builderOwnerCount: u32,
@@ -108,7 +109,8 @@ export class ReviewRound {
       this.claimDeadline.toString(), this.proposalId, this.agentRoot, this.buildRoot,
       this.availabilityRoot, this.agentLeafCount.toString(), this.buildLeafCount.toString(),
       this.availabilityLeafCount.toString(), this.agentCount.toString(),
-      this.agentModelCount.toString(), this.agentOwnerCount.toString(),
+      this.agentModelCount.toString(), this.agentRuntimeCount.toString(),
+      this.agentOwnerCount.toString(),
       this.unresolvedCriticalCount.toString(), this.builderOwnerCount.toString(),
       this.builderPlatformCount.toString(), this.builderConflictCount.toString(),
       this.availabilityOwnerCount.toString(), this.artifactDigest, this.bond,
@@ -118,7 +120,7 @@ export class ReviewRound {
 
   static decode(value: string): ReviewRound {
     const f = value.split("~");
-    assert(f.length == 33, "corrupt review round record");
+    assert(f.length == 34, "corrupt review round record");
     return new ReviewRound(
       f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], parseU32(f[8]),
       f[9], parseReviewRoundState(f[10]), parseU64(f[11]), parseU64(f[12]),
@@ -126,8 +128,8 @@ export class ReviewRound {
       parseU32(f[18]), parseU32(f[19]), parseU32(f[20]),
       parseU32(f[21]), parseU32(f[22]), parseU32(f[23]),
       parseU32(f[24]), parseU32(f[25]), parseU32(f[26]),
-      parseU32(f[27]), parseU32(f[28]), f[29],
-      parseAmount(f[30]).toString(), parseAmount(f[31]).toString(), parseBoolean(f[32]),
+      parseU32(f[27]), parseU32(f[28]), parseU32(f[29]), f[30],
+      parseAmount(f[31]).toString(), parseAmount(f[32]).toString(), parseBoolean(f[33]),
     );
   }
 
@@ -175,6 +177,7 @@ export class Proposal {
     public yesStrongIdentities: u32,
     public agentCount: u32,
     public agentModelCount: u32,
+    public agentRuntimeCount: u32,
     public agentOwnerCount: u32,
     public unresolvedCriticalCount: u32,
     public builderOwnerCount: u32,
@@ -232,6 +235,7 @@ export class Proposal {
     values.push(this.yesStrongIdentities.toString());
     values.push(this.agentCount.toString());
     values.push(this.agentModelCount.toString());
+    values.push(this.agentRuntimeCount.toString());
     values.push(this.agentOwnerCount.toString());
     values.push(this.unresolvedCriticalCount.toString());
     values.push(this.builderOwnerCount.toString());
@@ -252,7 +256,7 @@ export class Proposal {
 
   static decode(value: string): Proposal {
     const f = value.split("~");
-    assert(f.length == 53, "corrupt proposal record");
+    assert(f.length == 54, "corrupt proposal record");
     return new Proposal(
       f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], parseProposalState(f[8]),
       f[9], f[10], f[11],
@@ -264,7 +268,8 @@ export class Proposal {
       parseU32(f[34]), parseU32(f[35]), parseU32(f[36]),
       parseU32(f[37]), parseU32(f[38]), parseU32(f[39]),
       parseU32(f[40]), parseU32(f[41]), parseU32(f[42]),
-      parseU32(f[43]), f[44], f[45], f[46], f[47], f[48], f[49], f[50], f[51], parseBoolean(f[52]),
+      parseU32(f[43]), parseU32(f[44]), f[45], f[46], f[47], f[48],
+      f[49], f[50], f[51], f[52], parseBoolean(f[53]),
     );
   }
 
