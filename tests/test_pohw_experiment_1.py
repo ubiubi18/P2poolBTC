@@ -338,6 +338,32 @@ class Experiment1ManifestTests(unittest.TestCase):
             self.assertNotIn("private_key", text)
             self.assertNotRegex(text, r"(?m)^[a-z0-9_]*api_key\s*=\s*[^#\s]")
 
+    def test_environment_paths_match_current_activation(self):
+        values = {}
+        env_path = ROOT / "deploy" / "pohw-experiment-1.env.example"
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            self.assertNotIn(key, values, f"duplicate environment key: {key}")
+            values[key] = value
+
+        activation_id = self.manifest["activation_id"]
+        datadir = (
+            f"/srv/sharechain/{self.manifest['network']['data_subdirectory']}-"
+            f"{activation_id[:8]}"
+        )
+        self.assertEqual(values["POHW_GOSSIP_NETWORK_ID"], activation_id)
+        self.assertEqual(values["POHW_DATADIR"], datadir)
+        self.assertEqual(
+            values["POHW_STRATUM_BLOCK_CANDIDATE_DIR"],
+            f"{datadir}/block-candidates",
+        )
+        self.assertEqual(
+            values["POHW_PAYOUT_CANDIDATE_DIR"],
+            f"{datadir}/payout-candidates",
+        )
+
     def test_public_runbooks_disclose_both_live_value_boundaries(self):
         for relative in (
             "README.md",
