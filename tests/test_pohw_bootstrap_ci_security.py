@@ -204,6 +204,14 @@ class CiProvenanceTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        candidate = json.loads(
+            (
+                ROOT
+                / "compatibility"
+                / "governance-day-fork-candidate-lock.json"
+            ).read_text(encoding="utf-8")
+        )
+        generated_contract = candidate["contractArtifact"]
         checked = 0
         for target in plan["targets"]:
             for lock in target["dependencyLocks"]:
@@ -231,7 +239,26 @@ class CiProvenanceTests(unittest.TestCase):
                 self.assertNotIn("..", path.parts)
                 resolved = ROOT / path
                 self.assertFalse(resolved.is_symlink(), f"{target['id']}:{path}")
-                self.assertTrue(resolved.is_file(), f"{target['id']}:{path}")
+                if not resolved.is_file():
+                    self.assertEqual(target["id"], "governance-contract")
+                    self.assertEqual(path.as_posix(), generated_contract["path"])
+                    self.assertEqual(
+                        artifact["expectedSize"], generated_contract["size"]
+                    )
+                    self.assertEqual(
+                        artifact["expectedSha256"], generated_contract["sha256"]
+                    )
+                    self.assertEqual(
+                        artifact["expectedCid"], generated_contract["cid"]
+                    )
+                    ignored = subprocess.run(
+                        ["git", "check-ignore", "--quiet", "--", str(path)],
+                        cwd=ROOT,
+                        check=False,
+                    )
+                    self.assertEqual(ignored.returncode, 0, path)
+                    checked += 1
+                    continue
                 raw = resolved.read_bytes()
                 digest = hashlib.sha256(raw).digest()
                 raw_cid = "b" + base64.b32encode(
