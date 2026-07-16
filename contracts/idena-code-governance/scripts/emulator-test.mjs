@@ -115,9 +115,18 @@ assert.deepEqual(
     deployedParameters.parameterProfile.critical.minimumAiOwnerIdentities],
   [5, 3, 3, 3],
 );
+const diversityCapability = JSON.parse(call("attestationDiversityCapability", [], {
+  caller: addresses[7], block: 1n, epoch: 10,
+}));
+assert.deepEqual(diversityCapability, {
+  schemaVersion: 1,
+  criticalExecutionEnabled: false,
+  mode: "blocked-unverified-v1",
+});
 // Legacy regression cases below deliberately bypass the production deployment
-// invariant through direct emulator storage access. No contract method can do this.
+// invariants through direct emulator storage access. No contract method can do this.
 storage.delete("epoch-governance:enabled");
+storage.set("governance:attestation-diversity-capability", Buffer.from("verified-receipts-v1"));
 
 for (let index = 0; index < addresses.length; index++) {
   const leaf = metricLeaves[index];

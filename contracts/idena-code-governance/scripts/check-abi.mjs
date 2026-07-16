@@ -75,6 +75,7 @@ const requiredExports = new Set([
   "voterReceipt",
   "governanceStakeState",
   "governanceParameters",
+  "attestationDiversityCapability",
   "anchorGovernanceEpoch",
   "attachAiReviewRoot",
   "attachBuildRoot",

@@ -31,11 +31,11 @@
   "contractArtifact": {
     "contractVersion": "0.2.0",
     "path": "contracts/idena-code-governance/build/idena-code-governance.wasm",
-    "cid": "bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili",
-    "sha256": "976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a",
-    "size": 302419,
+    "cid": "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i",
+    "sha256": "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2",
+    "size": 303259,
     "abiImports": 13,
-    "abiExports": 64,
+    "abiExports": 65,
     "buildStatus": "local-non-attested"
   },
   "idenaAiIntegration": {

@@ -19,6 +19,10 @@ STATUS_SCRIPT = ROOT / "scripts" / "pohw-community-status.py"
 COMMUNITY_GUIDE = ROOT / "COMMUNITY-README.md"
 EXPERIMENT_RUNBOOK = ROOT / "EXPERIMENT-0.md"
 EXPERIMENT_1_COMMUNITY_GUIDE = ROOT / "COMMUNITY-EXPERIMENT-1.md"
+EXPERIMENT_1_QUICKSTART = ROOT / "COMMUNITY-QUICKSTART.md"
+EXPERIMENT_1_VERIFICATION_FORM = (
+    ROOT / ".github" / "ISSUE_TEMPLATE" / "experiment-1-independent-verification.yml"
+)
 ACTIVATION_ID = "0db86bcc630703bb2004116509f8bdd3e54f6dbadb0693b9e9644d2f6c52fd4e"
 
 
@@ -340,6 +344,25 @@ class Experiment1CommunityGuideTests(unittest.TestCase):
             "Do not invite people to connect miners to the live experiment yet.",
             self.guide_prose,
         )
+
+    def test_review_day_tracks_are_explicit_and_fail_closed(self) -> None:
+        quickstart = EXPERIMENT_1_QUICKSTART.read_text(encoding="utf-8")
+        verification_form = EXPERIMENT_1_VERIFICATION_FORM.read_text(
+            encoding="utf-8"
+        )
+        for role in (
+            "Observer or source reviewer",
+            "Independent miner-registry builder",
+            "Second-node host operator",
+        ):
+            self.assertIn(role, quickstart)
+            self.assertIn(role, verification_form)
+        self.assertIn("--role observer --run-tests", quickstart)
+        self.assertIn("--role pruned-miner", quickstart)
+        self.assertIn("blocked-public-join", quickstart)
+        self.assertIn("does not authorize identity registration", verification_form)
+        self.assertIn("I did not register an identity", verification_form)
+        self.assertIn("private vulnerability", quickstart)
 
     def test_evidence_install_and_preflight_precede_every_p2pool_start(self) -> None:
         step = self.step_five

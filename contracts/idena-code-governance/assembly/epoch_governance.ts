@@ -105,6 +105,13 @@ const MIN_ACTIVE_STAKE_ATOMS = GOV_MIN_ACTIVE_STAKE_ATOMS;
 const BALLOT_DOMAIN = "IDENA_CODE_DAO_EPOCH_BALLOT_V1";
 const PROPOSAL_SET_DOMAIN = "IDENA_CODE_DAO_PROPOSAL_SET_V1";
 const MAX_CANONICAL_HISTORY_PAGE: u32 = 64;
+export const ATTESTATION_DIVERSITY_CAPABILITY_KEY = "governance:attestation-diversity-capability";
+export const ATTESTATION_DIVERSITY_BLOCKED = "blocked-unverified-v1";
+export const ATTESTATION_DIVERSITY_VERIFIED = "verified-receipts-v1";
+
+export function verifiedAttestationDiversitySupported(): bool {
+  return getString(ATTESTATION_DIVERSITY_CAPABILITY_KEY) == ATTESTATION_DIVERSITY_VERIFIED;
+}
 
 export function isEpochGovernanceEnabled(): bool {
   return hasKey(PROFILE_KEY);
@@ -666,6 +673,7 @@ function addEpochVote(proposal: Proposal, choice: string, weight: u128, state: s
 }
 
 export function epochAttestationGatesPass(proposal: Proposal): bool {
+  if (proposal.isCritical() && !verifiedAttestationDiversitySupported()) return false;
   const minimumAgents: u32 = proposal.isCritical()
     ? GOV_CRITICAL_MIN_AI_ATTESTATIONS
     : GOV_NORMAL_MIN_AI_ATTESTATIONS;

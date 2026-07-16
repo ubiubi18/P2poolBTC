@@ -120,6 +120,9 @@ Newcomers should begin with the
 single read-only command, role-specific host checks, a five-stage local report,
 and a pre-redacted issue template. It cannot register an identity, connect a
 peer, start a service, or mine while the public-join interlock is blocked.
+Its Community Review Day section gives separate copy-pasteable tracks for an
+observer, an independent miner-registry builder, and a second-node host
+operator, with the expected fail-closed result for each track.
 After the interlock opens, the same state machine accepts only a DAO-selected
 ecosystem CID plus matching CAR/source/runtime artifacts and can produce a
 participant-specific live proof. Historical global sharechain activity does
@@ -238,6 +241,10 @@ The current candidate implements:
   trust; identity age, birthday, generation, and repository status are ignored,
 - independent stake, identity-breadth, AI-review, reproducible-build, and public
   data-availability gates,
+- a fail-closed critical-proposal interlock: model and platform labels remain
+  operator assertions, so this contract version cannot execute critical
+  proposals until a separately audited DAO migration adds objective receipt
+  verification,
 - grace-delayed, permissionless execution with objective challenges,
   append-only canonical history, decentralized revert proposals, and a local
   last-known-good recovery flow that never installs software automatically,
@@ -258,9 +265,9 @@ The current candidate implements:
 
 The locked local parameter-set CID is
 `bafyreidvih25dx6cmuwi3mpjtij3c4qfmmym2s7r2r6fvxwmgm4thzbgei`. The locally
-built WASM candidate is 302,419 bytes with CID
-`bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili` and SHA-256
-`976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a`.
+built WASM candidate is 303,259 bytes with CID
+`bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i` and SHA-256
+`66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2`.
 These values identify test artifacts; they are not deployment authorization.
 The contract derives normal/critical risk and scope counters from exact,
 bounded base-to-candidate source transitions; proposer labels cannot downgrade

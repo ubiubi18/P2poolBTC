@@ -10,6 +10,67 @@ promised value. Idena is a live chain with real identities and IDNA, so never
 share an Idena key, backup, password, or node API key. Never reuse a Bitcoin
 mainnet key in the experiment.
 
+## Community Review Day
+
+Until the public interlock opens, community onboarding has three independent
+preparation tracks. None imports an identity, contacts a peer, starts a service,
+or mines. Record the exact commit from `git rev-parse HEAD` for every result.
+
+### Observer or source reviewer
+
+```sh
+./scripts/pohw-community-onboard.sh --role observer --run-tests
+```
+
+The expected result is `review-ready`. Report reproducible defects with the
+generated `issue-report.md`; use private vulnerability reporting for a security
+finding.
+
+### Independent miner-registry builder
+
+Use a clean machine or clean-room VM that is not operated by the first builder.
+Use the exact locked Node.js and pnpm versions, then build from source:
+
+```sh
+test "$(node --version)" = "v24.18.0"
+test "$(corepack pnpm@11.11.0 --version)" = "11.11.0"
+corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry install --frozen-lockfile
+corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry test
+corepack pnpm@11.11.0 --dir contracts/idena-pohw-miner-registry build
+cargo run --locked -p governance-cli -- artifact-inspect \
+  --file contracts/idena-pohw-miner-registry/build/idena-pohw-miner-registry.wasm
+```
+
+For the current reviewed candidate, the final command must independently
+produce size `55875`, SHA-256
+`7f5cbf0daeded9bc3ca04ade914e37688edccaa0a8ad025bb74842ec788ad601`,
+and raw CID
+`bafkreid7ls7q3lw63g6dzick32iu4n3ir3omvifivubfxn2iilwhrcwwae`.
+A matching result is useful reproducibility evidence, but it is not an
+attestation until its exact source, toolchain, commands, and owner are
+authenticated through the governance evidence flow.
+
+### Second-node host operator
+
+On a Linux host with SSD storage, run only the read-only host and policy check:
+
+```sh
+./scripts/pohw-community-onboard.sh \
+  --role pruned-miner \
+  --storage-path /srv/sharechain
+```
+
+The expected result today is `blocked-public-join`. A suitable host may pass its
+system checks, but the command must not register an identity or start Core,
+gossip, Stratum, or mining. The end-to-end second-node rehearsal happens only
+after the independently verified registry deployment and release evidence are
+available.
+
+Use the dedicated
+[independent verification form](https://github.com/ubiubi18/P2poolBTC/issues/new?template=experiment-1-independent-verification.yml)
+for non-sensitive aggregate results. A public issue is coordination evidence,
+not by itself a builder, audit, availability, or deployment attestation.
+
 ## 1. Choose A Role
 
 | Role | Minimum checked by the tool | What it does now |

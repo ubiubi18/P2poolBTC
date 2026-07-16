@@ -6,14 +6,19 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
+import platform
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Sequence
 
 
 MAX_JSON_BYTES = 1024 * 1024
@@ -115,6 +120,14 @@ class CborCid:
         self.raw = raw
 
 
+class StagedExecutable:
+    __slots__ = ("command_path", "pass_fds")
+
+    def __init__(self, command_path: str, pass_fds: tuple[int, ...] = ()):
+        self.command_path = command_path
+        self.pass_fds = pass_fds
+
+
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -184,52 +197,209 @@ def read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     return value, raw
 
 
-def hash_regular_file(path: Path, label: str, maximum: int) -> str:
+def write_all(descriptor: int, value: bytes, label: str) -> None:
+    offset = 0
+    while offset < len(value):
+        written = os.write(descriptor, value[offset:])
+        if written <= 0:
+            raise LaunchPolicyError(f"cannot stage {label}")
+        offset += written
+
+
+def copy_attested_executable(
+    source: Path, target_descriptor: int, label: str, expected_sha256: str
+) -> None:
+    if (
+        len(expected_sha256) != SHA256_HEX_LENGTH
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise LaunchPolicyError(f"{label} expected SHA-256 is invalid")
     try:
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise LaunchPolicyError(f"{label} must be a regular non-symlink file")
-        if metadata.st_size <= 0 or metadata.st_size > maximum:
-            raise LaunchPolicyError(f"{label} size is outside its accepted range")
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        before = source.lstat()
+        if (
+            not source.is_absolute()
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o111 == 0
+            or before.st_size <= 0
+            or before.st_size > MAX_EXECUTABLE_BYTES
+        ):
+            raise LaunchPolicyError(
+                f"{label} must be an absolute executable regular non-symlink file"
+            )
+        source_descriptor = os.open(
+            source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
         digest = hashlib.sha256()
         try:
-            opened = os.fstat(descriptor)
+            opened = os.fstat(source_descriptor)
             if (
-                opened.st_dev != metadata.st_dev
-                or opened.st_ino != metadata.st_ino
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
                 or not stat.S_ISREG(opened.st_mode)
             ):
                 raise LaunchPolicyError(f"{label} changed before it was opened")
             total = 0
             while True:
-                chunk = os.read(descriptor, 1024 * 1024)
+                chunk = os.read(source_descriptor, 1024 * 1024)
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > maximum:
+                if total > MAX_EXECUTABLE_BYTES:
                     raise LaunchPolicyError(f"{label} exceeds its size limit")
                 digest.update(chunk)
-            closed = os.fstat(descriptor)
+                write_all(target_descriptor, chunk, label)
+            closed = os.fstat(source_descriptor)
         finally:
-            os.close(descriptor)
+            os.close(source_descriptor)
         if (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_size,
-            opened.st_mtime_ns,
-        ) != (
-            closed.st_dev,
-            closed.st_ino,
-            closed.st_size,
-            closed.st_mtime_ns,
-        ) or total != opened.st_size:
-            raise LaunchPolicyError(f"{label} changed while it was read")
-        return digest.hexdigest()
+            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns)
+            or total != opened.st_size
+        ):
+            raise LaunchPolicyError(f"{label} changed while it was staged")
+        if digest.hexdigest() != expected_sha256:
+            raise LaunchPolicyError(
+                "pohw-governance verifier does not match its independently selected SHA-256"
+            )
+        os.fchmod(target_descriptor, 0o500)
+        os.fsync(target_descriptor)
+        os.lseek(target_descriptor, 0, os.SEEK_SET)
     except LaunchPolicyError:
         raise
     except OSError as exc:
-        raise LaunchPolicyError(f"cannot hash {label}: {exc}") from exc
+        raise LaunchPolicyError(f"cannot stage {label}: {exc}") from exc
+
+
+@contextlib.contextmanager
+def stage_attested_executable(
+    source: Path, label: str, expected_sha256: str
+) -> Iterator[StagedExecutable]:
+    if platform.system() == "Linux":
+        if not hasattr(os, "memfd_create"):
+            raise LaunchPolicyError("Linux kernel cannot create an immutable executable snapshot")
+        try:
+            import fcntl
+
+            descriptor = os.memfd_create(
+                "pohw-attested-executable",
+                getattr(os, "MFD_CLOEXEC", 0x0001) | getattr(os, "MFD_ALLOW_SEALING", 0x0002),
+            )
+            try:
+                copy_attested_executable(source, descriptor, label, expected_sha256)
+                seals = (
+                    getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+                    | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+                    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+                    | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+                )
+                fcntl.fcntl(descriptor, getattr(fcntl, "F_ADD_SEALS", 1033), seals)
+                yield StagedExecutable(f"/proc/self/fd/{descriptor}", (descriptor,))
+            finally:
+                os.close(descriptor)
+        except LaunchPolicyError:
+            raise
+        except (ImportError, OSError) as exc:
+            raise LaunchPolicyError(
+                f"cannot create an immutable snapshot for {label}: {exc}"
+            ) from exc
+        return
+
+    with tempfile.TemporaryDirectory(prefix="pohw-attested-executable-") as directory:
+        staged = Path(directory) / "artifact"
+        descriptor = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            copy_attested_executable(source, descriptor, label, expected_sha256)
+        finally:
+            os.close(descriptor)
+        os.chmod(directory, 0o500)
+        yield StagedExecutable(str(staged))
+
+
+def run_bounded(
+    command: Sequence[str], *, pass_fds: Sequence[int] = (), timeout: int = 60
+) -> subprocess.CompletedProcess[bytes]:
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+    reader_errors: list[BaseException] = []
+
+    def terminate(process: subprocess.Popen[bytes]) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+    def read_bounded(
+        stream: Any, destination: bytearray, process: subprocess.Popen[bytes]
+    ) -> None:
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                remaining = MAX_JSON_BYTES + 1 - len(destination)
+                if remaining > 0:
+                    destination.extend(chunk[:remaining])
+                if len(destination) > MAX_JSON_BYTES or len(chunk) > remaining:
+                    overflow.set()
+                    terminate(process)
+                    return
+        except (OSError, ValueError) as exc:
+            reader_errors.append(exc)
+            terminate(process)
+
+    options: dict[str, Any] = {"start_new_session": os.name == "posix"}
+    if pass_fds:
+        if os.name != "posix":
+            raise LaunchPolicyError("inherited executable descriptors require POSIX")
+        options["pass_fds"] = tuple(pass_fds)
+    try:
+        process = subprocess.Popen(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            **options,
+        )
+        if process.stdout is None or process.stderr is None:
+            terminate(process)
+            raise LaunchPolicyError("pohw-governance output pipes are unavailable")
+        readers = (
+            threading.Thread(target=read_bounded, args=(process.stdout, stdout, process), daemon=True),
+            threading.Thread(target=read_bounded, args=(process.stderr, stderr, process), daemon=True),
+        )
+        for reader in readers:
+            reader.start()
+        timeout_error: subprocess.TimeoutExpired | None = None
+        try:
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            timeout_error = exc
+            terminate(process)
+            return_code = process.wait(timeout=10)
+        for reader in readers:
+            reader.join(timeout=10)
+        process.stdout.close()
+        process.stderr.close()
+        if timeout_error is not None:
+            raise LaunchPolicyError("pohw-governance readiness verifier timed out") from timeout_error
+        if any(reader.is_alive() for reader in readers):
+            terminate(process)
+            raise LaunchPolicyError("pohw-governance output reader did not stop")
+        if reader_errors:
+            raise LaunchPolicyError("pohw-governance output could not be read")
+        if overflow.is_set():
+            raise LaunchPolicyError("pohw-governance readiness output exceeds its size limit")
+        return subprocess.CompletedProcess(list(command), return_code, bytes(stdout), bytes(stderr))
+    except LaunchPolicyError:
+        raise
+    except OSError as exc:
+        raise LaunchPolicyError("pohw-governance readiness verifier could not run") from exc
 
 
 def expected_governance_cli_sha256(
@@ -642,53 +812,28 @@ def verify_readiness_evidence(
     if report["evidenceBundleCid"] != evidence_cid:
         raise LaunchPolicyError("deployment-readiness report does not bind the evidence CAR")
 
-    try:
-        metadata = governance_cli_path.lstat()
-    except OSError as exc:
-        raise LaunchPolicyError("pohw-governance verifier is unavailable") from exc
-    if (
-        not governance_cli_path.is_absolute()
-        or stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_mode & 0o111 == 0
-    ):
-        raise LaunchPolicyError(
-            "pohw-governance verifier must be an absolute executable regular non-symlink file"
-        )
     expected_cli_sha256 = expected_governance_cli_sha256(
         governance_cli_path, governance_cli_sha256
     )
-    if (
-        hash_regular_file(
-            governance_cli_path, "pohw-governance verifier", MAX_EXECUTABLE_BYTES
-        )
-        != expected_cli_sha256
-    ):
-        raise LaunchPolicyError(
-            "pohw-governance verifier does not match its independently selected SHA-256"
-        )
-    try:
-        result = subprocess.run(
+    with stage_attested_executable(
+        governance_cli_path, "pohw-governance verifier", expected_cli_sha256
+    ) as staged:
+        result = run_bounded(
             [
-                str(governance_cli_path),
+                staged.command_path,
                 "deployment-readiness-evidence-verify",
                 "--car",
                 str(readiness_evidence_car_path),
             ],
-            check=False,
-            capture_output=True,
-            text=True,
+            pass_fds=staged.pass_fds,
             timeout=60,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LaunchPolicyError("pohw-governance readiness verifier could not run") from exc
     if result.returncode != 0:
         raise LaunchPolicyError("pohw-governance rejected the readiness evidence")
-    if len(result.stdout.encode("utf-8")) > MAX_JSON_BYTES:
-        raise LaunchPolicyError("pohw-governance readiness output exceeds its size limit")
     try:
-        verification = json.loads(result.stdout, object_pairs_hook=reject_duplicate_keys)
+        verification = json.loads(
+            result.stdout.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise LaunchPolicyError("pohw-governance returned invalid readiness JSON") from exc
     if not isinstance(verification, dict):

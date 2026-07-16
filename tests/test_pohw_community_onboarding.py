@@ -1,5 +1,6 @@
 import argparse
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -590,13 +591,21 @@ class CommunityOnboardingTests(unittest.TestCase):
                 1234,
                 5678,
             )
+            @contextlib.contextmanager
+            def staged(path, *_args):
+                yield ONBOARDING.StagedExecutable(str(path))
+
             with mock.patch.object(
-                ONBOARDING, "_verify_attested_artifact", side_effect=lambda path, *_args: path
+                ONBOARDING, "_stage_attested_executable", side_effect=staged
             ), mock.patch.object(
                 ONBOARDING,
                 "_running_systemd_process",
                 return_value=bitcoind_process,
             ) as running_process, mock.patch.object(
+                ONBOARDING, "_verify_running_executable"
+            ) as running_verifier, mock.patch.object(
+                ONBOARDING, "_verify_local_rpc_listener"
+            ) as listener_verifier, mock.patch.object(
                 ONBOARDING, "run_command", side_effect=command_result
             ):
                 live = ONBOARDING.probe_live(
@@ -607,13 +616,19 @@ class CommunityOnboardingTests(unittest.TestCase):
                     verified_release(ready=True),
                 )
             self.assertEqual(running_process.call_count, 2)
+            self.assertEqual(running_verifier.call_count, 2)
+            self.assertEqual(listener_verifier.call_count, 2)
             changed_process = (*bitcoind_process[:2], 1235, 5679)
             with mock.patch.object(
-                ONBOARDING, "_verify_attested_artifact", side_effect=lambda path, *_args: path
+                ONBOARDING, "_stage_attested_executable", side_effect=staged
             ), mock.patch.object(
                 ONBOARDING,
                 "_running_systemd_process",
                 side_effect=(bitcoind_process, changed_process),
+            ), mock.patch.object(
+                ONBOARDING, "_verify_running_executable"
+            ), mock.patch.object(
+                ONBOARDING, "_verify_local_rpc_listener"
             ), mock.patch.object(
                 ONBOARDING, "run_command", side_effect=command_result
             ), self.assertRaisesRegex(ONBOARDING.OnboardingError, "changed during"):
@@ -631,6 +646,81 @@ class CommunityOnboardingTests(unittest.TestCase):
         encoded = json.dumps(live)
         for forbidden in ("private-miner", "203.0.113", "/secret", "0x1111"):
             self.assertNotIn(forbidden, encoded)
+
+    def test_bitcoin_core_profile_rejects_conflicting_or_extra_arguments(self):
+        datadir = pathlib.Path("/srv/bitcoin/pohw")
+        reviewed = (
+            "/usr/local/bin/bitcoind",
+            f"-datadir={datadir}",
+            "-chain=pohw",
+            "-daemon=0",
+            "-rpcbind=127.0.0.1",
+            "-rpcallowip=127.0.0.1",
+        )
+        ONBOARDING._validate_bitcoind_arguments(reviewed, datadir)
+        for extra in (
+            "-rpcbind=0.0.0.0",
+            "-rpcallowip=0.0.0.0/0",
+            "-datadir=/tmp/substituted",
+            "-conf=/tmp/substituted.conf",
+        ):
+            with self.subTest(extra=extra), self.assertRaisesRegex(
+                ONBOARDING.OnboardingError, "exact reviewed profile"
+            ):
+                ONBOARDING._validate_bitcoind_arguments((*reviewed, extra), datadir)
+
+    def test_bitcoin_rpc_listener_proof_requires_loopback_on_the_configured_port(self):
+        descriptor = pathlib.Path("/proc/123/fd/7")
+
+        def verify_with(entries):
+            with mock.patch.object(
+                pathlib.Path, "iterdir", return_value=iter((descriptor,))
+            ), mock.patch.object(
+                ONBOARDING.os, "readlink", return_value="socket:[42]"
+            ), mock.patch.object(
+                ONBOARDING,
+                "_read_proc_network_table",
+                side_effect=(entries, []),
+            ):
+                ONBOARDING._verify_local_rpc_listener(123, 18443)
+
+        verify_with([("0100007F", 18443, "42")])
+        verify_with([("00000000000000000000000001000000", 18443, "42")])
+        self.assertTrue(
+            ONBOARDING._proc_address(
+                "00000000000000000000000001000000"
+            ).is_loopback
+        )
+        for entries in (
+            [("00000000", 18443, "42")],
+            [("0100007F", 18444, "42")],
+            [("0100007F", 18443, "99")],
+        ):
+            with self.subTest(entries=entries), self.assertRaisesRegex(
+                ONBOARDING.OnboardingError, "exclusively to loopback"
+            ):
+                verify_with(entries)
+
+    def test_attested_execution_uses_a_snapshot_when_source_path_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = pathlib.Path(temporary) / "reviewed-tool"
+            original = b"#!/bin/sh\nprintf 'reviewed\\n'\n"
+            source.write_bytes(original)
+            source.chmod(0o700)
+            expected = {
+                "sha256": hashlib.sha256(original).hexdigest(),
+                "size": len(original),
+            }
+            with ONBOARDING._stage_attested_executable(
+                source, "reviewed tool", expected
+            ) as staged:
+                source.write_text("#!/bin/sh\nprintf 'substituted\\n'\n", encoding="ascii")
+                source.chmod(0o700)
+                result = ONBOARDING.run_command(
+                    (staged.command_path,), cwd=ROOT, pass_fds=staged.pass_fds
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, b"reviewed\n")
 
     def test_html_escapes_report_content(self):
         profile = json.loads(PROFILE.read_text(encoding="utf-8"))

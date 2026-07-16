@@ -321,10 +321,10 @@ class GovernanceRuntimeGateTests(unittest.TestCase):
             ROOT / "compatibility" / "governance-fork-lock.json"
         )["governancePrototype"]["contractArtifact"]
 
-        self.assertEqual(current["sha256"], "976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a")
-        self.assertEqual(current["size"], 302419)
-        self.assertEqual(current["cid"], "bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili")
-        self.assertEqual(current["abiExports"], 64)
+        self.assertEqual(current["sha256"], "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2")
+        self.assertEqual(current["size"], 303259)
+        self.assertEqual(current["cid"], "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i")
+        self.assertEqual(current["abiExports"], 65)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"{current['size']:,} bytes", readme)
         self.assertEqual(

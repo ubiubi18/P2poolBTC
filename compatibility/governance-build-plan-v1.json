@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreihqqf3icvuxbapiqltjanxcvdeifvkabmux2j6lusxb4bvdmiexvq",
-          "expectedSha256": "f08176815697081e882e69036e2a8c882d5400b297d27cba4ae1e06a362097ac",
-          "expectedSize": 42656
+          "expectedCid": "bafkreidomnwe3m6xysdh3oimvwqz44tfbmah3vnl54z3rloysevlmikaam",
+          "expectedSha256": "6e636c4db3d7c4867db90cada19e72650b007dd5abef33b8add8912ab6214003",
+          "expectedSize": 48313
         },
         {
           "name": "experiment-1-full-consensus.json",
@@ -271,7 +271,7 @@
         {
           "repository": "P2poolBTC",
           "path": "compatibility/governance-day-fork-candidate-lock.json",
-          "sha256": "abdb32f8415d037f627e623c851951f26a971c7e62497257324ab6fe108dab20",
+          "sha256": "1274951a28f18fcd120745aada38c8f56dadc9d7fb336fd87eedf0ffa17b58cb",
           "format": "digest-only"
         },
         {
@@ -283,7 +283,7 @@
         {
           "repository": "P2poolBTC",
           "path": "scripts/pohw-governance-runtime-gate.py",
-          "sha256": "d75b9a301497ca67d81452d33d24da088ab419cd452b4ed6ba097f6cc34cc43b",
+          "sha256": "cca48edcdad3442fa36a76399b46ad3a7d639e1705414c03420ad23ea076d43e",
           "format": "digest-only"
         },
         {
@@ -346,9 +346,9 @@
           "platform": "wasm",
           "architecture": "wasm32",
           "deterministic": true,
-          "expectedCid": "bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili",
-          "expectedSha256": "976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a",
-          "expectedSize": 302419
+          "expectedCid": "bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i",
+          "expectedSha256": "66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2",
+          "expectedSize": 303259
         }
       ],
       "reproducibility": "deterministic-core",

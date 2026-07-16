@@ -171,6 +171,14 @@ detached Idena signature over the exact attestation CID,
 content digest, candidate, and builder identity. A self-declared builder
 address or `on-chain-submitter` string does not count.
 
+Runtime-family and architecture strings remain operator assertions. The
+current contract records them for audit but reports
+`criticalExecutionEnabled: false` from `attestationDiversityCapability()` and
+cannot accept a critical proposal. A successor contract may enable critical
+execution only after a separate DAO migration adds objective verification for
+authenticated build/provider receipts. There is intentionally no deployer,
+administrator, or proposal method that flips this capability in place.
+
 Rust binaries, Go binaries, renderer output, and contract WASM should be made
 deterministic first. Desktop installers may still contain platform timestamps,
 signing envelopes, notarization tickets, or tool-specific ordering. Those

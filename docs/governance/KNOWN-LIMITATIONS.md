@@ -84,7 +84,14 @@ This implementation is safe only for local, no-value testing.
   an authenticated provider or Idena chain-proof verifier exists. These gates
   resist duplicate identities, not coordinated owners sharing infrastructure
   or lying about providers; external attestation or measured execution is
-  still required before the labels establish operational independence.
+  still required before the labels establish operational independence. This
+  contract version therefore writes the immutable
+  `blocked-unverified-v1` attestation-diversity capability at deployment and
+  refuses to accept critical proposals. There is no contract method that can
+  enable the reserved `verified-receipts-v1` capability. Enabling critical
+  execution requires a separately reviewed DAO contract migration that
+  verifies authenticated provider/build receipts; changing labels or storage
+  through a proposal cannot bypass the interlock.
 - Signed pinning attestations reduce availability risk but cannot guarantee
   permanent retrieval. The opening pinset covers candidate and proposal
   content, and the final gate additionally requires every accepted agent/build

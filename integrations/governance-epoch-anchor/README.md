@@ -6,10 +6,10 @@ legacy-compatible Idena profile or deployed to mainnet.
 
 The enabled import returns `State.EpochBlock()`, charges the existing
 `ReadGlobalStateGas`, and has no side effects. The post-audit contract artifact
-is exactly 302419 bytes, SHA-256
-`976000dfc3a1e309550d77ace079e19d9547544f7e6029b58e0a48493535285a`, raw
-CID `bafkreiexmaan7q5b4mevkdlxvtqhtym5svdvit36mau3ldqkjbetknjili`, with 13
-imports and 64 exports. The historical governance-fork lock and its d894
+is exactly 303259 bytes, SHA-256
+`66c50999511720436fcfae135ad7ed87053b5ed9e2a22c35aa8e0307de1069e2`, raw
+CID `bafkreidgyuezsuixebbw7t5ocnnnp3mhau5v5wpcuiwdlkuoamd54edj4i`, with 13
+imports and 65 exports. The historical governance-fork lock and its d894
 artifact remain unchanged.
 
 ## Feature and ABI contract

@@ -10,20 +10,23 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import platform
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 
 PROFILE_SCHEMA = "pohw-community-onboarding-profile/v1"
@@ -235,6 +238,14 @@ class CborCid:
         self.raw = raw
 
 
+class StagedExecutable:
+    __slots__ = ("command_path", "pass_fds")
+
+    def __init__(self, command_path: str, pass_fds: tuple[int, ...] = ()):
+        self.command_path = command_path
+        self.pass_fds = pass_fds
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -337,6 +348,123 @@ def _hash_regular_file(path: Path, label: str, maximum: int = MAX_ARTIFACT_BYTES
         raise
     except OSError as exc:
         raise OnboardingError(f"cannot hash {label}: {exc}") from exc
+
+
+def _write_all(descriptor: int, value: bytes, label: str) -> None:
+    offset = 0
+    while offset < len(value):
+        written = os.write(descriptor, value[offset:])
+        if written <= 0:
+            raise OnboardingError(f"cannot stage {label}")
+        offset += written
+
+
+def _copy_attested_executable(
+    source: Path, target_descriptor: int, label: str, expected: Mapping[str, Any]
+) -> None:
+    expected_digest = expected.get("sha256")
+    expected_size = expected.get("size")
+    if (
+        not isinstance(expected_digest, str)
+        or len(expected_digest) != SHA256_HEX_LENGTH
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or not _is_positive_int(expected_size)
+        or expected_size > MAX_ARTIFACT_BYTES
+    ):
+        raise OnboardingError(f"{label} has an invalid candidate ecosystem binding")
+    try:
+        before = source.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o111 == 0
+        ):
+            raise OnboardingError(f"{label} must be an executable regular non-symlink file")
+        if before.st_size != expected_size:
+            raise OnboardingError(f"{label} does not match the candidate ecosystem artifact")
+        source_descriptor = os.open(
+            source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
+        digest = hashlib.sha256()
+        try:
+            opened = os.fstat(source_descriptor)
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or not stat.S_ISREG(opened.st_mode)
+            ):
+                raise OnboardingError(f"{label} changed before it was opened")
+            total = 0
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_ARTIFACT_BYTES:
+                    raise OnboardingError(f"{label} exceeds its size limit")
+                digest.update(chunk)
+                _write_all(target_descriptor, chunk, label)
+            closed = os.fstat(source_descriptor)
+        finally:
+            os.close(source_descriptor)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns)
+            or total != opened.st_size
+        ):
+            raise OnboardingError(f"{label} changed while it was staged")
+        if digest.hexdigest() != expected_digest or total != expected_size:
+            raise OnboardingError(f"{label} does not match the candidate ecosystem artifact")
+        os.fchmod(target_descriptor, 0o500)
+        os.fsync(target_descriptor)
+        os.lseek(target_descriptor, 0, os.SEEK_SET)
+    except OnboardingError:
+        raise
+    except OSError as exc:
+        raise OnboardingError(f"cannot stage {label}: {exc}") from exc
+
+
+@contextlib.contextmanager
+def _stage_attested_executable(
+    source: Path, label: str, expected: Mapping[str, Any]
+) -> Iterator[StagedExecutable]:
+    if platform.system() == "Linux":
+        if not hasattr(os, "memfd_create"):
+            raise OnboardingError("Linux kernel cannot create an immutable executable snapshot")
+        try:
+            import fcntl
+
+            descriptor = os.memfd_create(
+                "pohw-attested-executable",
+                getattr(os, "MFD_CLOEXEC", 0x0001) | getattr(os, "MFD_ALLOW_SEALING", 0x0002),
+            )
+            try:
+                _copy_attested_executable(source, descriptor, label, expected)
+                seals = (
+                    getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+                    | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+                    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+                    | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+                )
+                fcntl.fcntl(descriptor, getattr(fcntl, "F_ADD_SEALS", 1033), seals)
+                yield StagedExecutable(f"/proc/self/fd/{descriptor}", (descriptor,))
+            finally:
+                os.close(descriptor)
+        except OnboardingError:
+            raise
+        except (ImportError, OSError) as exc:
+            raise OnboardingError(f"cannot create an immutable snapshot for {label}: {exc}") from exc
+        return
+
+    with tempfile.TemporaryDirectory(prefix="pohw-attested-executable-") as directory:
+        staged = Path(directory) / "artifact"
+        descriptor = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            _copy_attested_executable(source, descriptor, label, expected)
+        finally:
+            os.close(descriptor)
+        os.chmod(directory, 0o500)
+        yield StagedExecutable(str(staged))
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -874,6 +1002,7 @@ def run_command(
     *,
     cwd: Path,
     timeout: int = COMMAND_TIMEOUT_SECONDS,
+    pass_fds: Sequence[int] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     if not command or any(not isinstance(item, str) or "\x00" in item for item in command):
         raise OnboardingError("invalid command invocation")
@@ -881,6 +1010,15 @@ def run_command(
     stderr = bytearray()
     overflow = threading.Event()
     reader_errors: list[BaseException] = []
+
+    def terminate(process: subprocess.Popen[bytes]) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
 
     def read_bounded(stream: Any, destination: bytearray, process: subprocess.Popen[bytes]) -> None:
         try:
@@ -893,20 +1031,21 @@ def run_command(
                     destination.extend(chunk[:remaining])
                 if len(destination) > MAX_COMMAND_OUTPUT_BYTES or len(chunk) > remaining:
                     overflow.set()
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+                    terminate(process)
                     return
         except (OSError, ValueError) as exc:
             reader_errors.append(exc)
-            try:
-                process.kill()
-            except OSError:
-                pass
+            terminate(process)
 
     try:
         with tempfile.TemporaryDirectory(prefix="pohw-onboarding-home-") as private_home:
+            popen_options: dict[str, Any] = {"start_new_session": os.name == "posix"}
+            if pass_fds:
+                if os.name != "posix" or any(
+                    not isinstance(descriptor, int) or descriptor < 0 for descriptor in pass_fds
+                ):
+                    raise OnboardingError("invalid inherited executable descriptor")
+                popen_options["pass_fds"] = tuple(pass_fds)
             process = subprocess.Popen(
                 list(command),
                 cwd=cwd,
@@ -914,9 +1053,10 @@ def run_command(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **popen_options,
             )
             if process.stdout is None or process.stderr is None:
-                process.kill()
+                terminate(process)
                 raise OnboardingError("required command output pipes are unavailable")
             readers = (
                 threading.Thread(
@@ -933,7 +1073,7 @@ def run_command(
                 return_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 timeout_error = exc
-                process.kill()
+                terminate(process)
                 return_code = process.wait(timeout=10)
             for reader in readers:
                 reader.join(timeout=10)
@@ -942,6 +1082,7 @@ def run_command(
             if timeout_error is not None:
                 raise OnboardingError(f"required command timed out: {command[0]}") from timeout_error
             if any(reader.is_alive() for reader in readers):
+                terminate(process)
                 raise OnboardingError(f"required command output reader did not stop: {command[0]}")
             if reader_errors:
                 raise OnboardingError(f"required command output could not be read: {command[0]}")
@@ -960,8 +1101,14 @@ def _command_succeeded(command: Sequence[str], repo_root: Path) -> bool:
         return False
 
 
-def _command_json(command: Sequence[str], repo_root: Path, label: str) -> dict[str, Any]:
-    result = run_command(command, cwd=repo_root)
+def _command_json(
+    command: Sequence[str],
+    repo_root: Path,
+    label: str,
+    *,
+    pass_fds: Sequence[int] = (),
+) -> dict[str, Any]:
+    result = run_command(command, cwd=repo_root, pass_fds=pass_fds)
     if result.returncode != 0:
         raise OnboardingError(f"{label} failed")
     try:
@@ -971,6 +1118,41 @@ def _command_json(command: Sequence[str], repo_root: Path, label: str) -> dict[s
     if not isinstance(value, dict):
         raise OnboardingError(f"{label} JSON root must be an object")
     return value
+
+
+def _run_attested_command(
+    executable: Path,
+    label: str,
+    expected: Mapping[str, Any],
+    arguments: Sequence[str],
+    repo_root: Path,
+    *,
+    timeout: int = COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[bytes]:
+    with _stage_attested_executable(executable, label, expected) as staged:
+        return run_command(
+            (staged.command_path, *arguments),
+            cwd=repo_root,
+            timeout=timeout,
+            pass_fds=staged.pass_fds,
+        )
+
+
+def _attested_command_json(
+    executable: Path,
+    label: str,
+    expected: Mapping[str, Any],
+    arguments: Sequence[str],
+    repo_root: Path,
+    output_label: str,
+) -> dict[str, Any]:
+    with _stage_attested_executable(executable, label, expected) as staged:
+        return _command_json(
+            (staged.command_path, *arguments),
+            repo_root,
+            output_label,
+            pass_fds=staged.pass_fds,
+        )
 
 
 def _platform_class() -> str:
@@ -1310,16 +1492,6 @@ def _static_policy_bindings_verified(
         return False
 
 
-def _verify_attested_artifact(
-    path: Path, label: str, expected: Mapping[str, Any], *, executable: bool = True
-) -> Path:
-    resolved = _require_local_executable(path, label) if executable else path.resolve(strict=True)
-    digest, size = _hash_regular_file(resolved, label)
-    if digest != expected.get("sha256") or size != expected.get("size"):
-        raise OnboardingError(f"{label} does not match the candidate ecosystem artifact")
-    return resolved
-
-
 def _verify_canonical_source(
     repo_root: Path,
     policy: Mapping[str, Any],
@@ -1344,14 +1516,11 @@ def _verify_canonical_source(
             "launch policy candidate differs from the independently selected ecosystem CID"
         )
     bindings = _extract_ecosystem_bindings(candidate_ecosystem_car, expected_ecosystem)
-    verified_governance = _verify_attested_artifact(
+    ecosystem_verification = _attested_command_json(
         governance_cli,
         "pohw-governance",
         bindings["artifacts"]["pohw-governance"],
-    )
-    ecosystem_verification = _command_json(
         (
-            str(verified_governance),
             "ecosystem-inspect",
             "--car",
             str(candidate_ecosystem_car),
@@ -1418,9 +1587,11 @@ def _verify_canonical_source(
             **binding,
         }:
             raise OnboardingError(f"verified ecosystem artifact differs for {name}")
-    verification = _command_json(
+    verification = _attested_command_json(
+        governance_cli,
+        "pohw-governance",
+        bindings["artifacts"]["pohw-governance"],
         (
-            str(verified_governance),
             "verify",
             "--car",
             str(source_car),
@@ -1611,16 +1782,143 @@ def verify_release(
     }
 
 
-def _require_local_executable(path: Path, label: str) -> Path:
+def _verify_running_executable(
+    executable: Path,
+    pid: int,
+    start_time: int,
+    label: str,
+    expected: Mapping[str, Any],
+) -> None:
+    expected_digest = expected.get("sha256")
+    expected_size = expected.get("size")
+    if (
+        not isinstance(expected_digest, str)
+        or len(expected_digest) != SHA256_HEX_LENGTH
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or not _is_positive_int(expected_size)
+    ):
+        raise OnboardingError(f"{label} has an invalid candidate ecosystem binding")
+    if _read_proc_start_time(pid) != start_time:
+        raise OnboardingError(f"{label} process changed before verification")
     try:
-        metadata = path.lstat()
+        descriptor = os.open(executable, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        digest = hashlib.sha256()
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size != expected_size:
+                raise OnboardingError(f"{label} does not match the candidate ecosystem artifact")
+            total = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_ARTIFACT_BYTES:
+                    raise OnboardingError(f"{label} exceeds its size limit")
+                digest.update(chunk)
+            closed = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OnboardingError:
+        raise
     except OSError as exc:
-        raise OnboardingError(f"{label} is unavailable") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise OnboardingError(f"{label} must be a regular non-symlink file")
-    if not os.access(path, os.X_OK):
-        raise OnboardingError(f"{label} is not executable")
-    return path.resolve(strict=True)
+        raise OnboardingError(f"cannot verify {label}: {exc}") from exc
+    if (
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        != (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns)
+        or total != expected_size
+        or digest.hexdigest() != expected_digest
+        or _read_proc_start_time(pid) != start_time
+    ):
+        raise OnboardingError(f"{label} does not match its running attested process image")
+
+
+def _validate_bitcoind_arguments(arguments: Sequence[str], bitcoin_datadir: Path) -> None:
+    expected = (
+        f"-datadir={bitcoin_datadir}",
+        "-chain=pohw",
+        "-daemon=0",
+        "-rpcbind=127.0.0.1",
+        "-rpcallowip=127.0.0.1",
+    )
+    if tuple(arguments[1:]) != expected:
+        raise OnboardingError("Bitcoin Core service arguments do not match the exact reviewed profile")
+
+
+def _read_proc_network_table(path: Path) -> list[tuple[str, int, str]]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            value = bytearray()
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                value.extend(chunk)
+                if len(value) > MAX_JSON_BYTES:
+                    raise OnboardingError("Bitcoin Core socket table exceeds its size limit")
+        finally:
+            os.close(descriptor)
+        lines = value.decode("ascii").splitlines()
+    except OnboardingError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise OnboardingError("Bitcoin Core socket table is unavailable") from exc
+    entries: list[tuple[str, int, str]] = []
+    for line in lines[1:]:
+        fields = line.split()
+        if len(fields) < 10 or ":" not in fields[1]:
+            raise OnboardingError("Bitcoin Core socket table is invalid")
+        if fields[3] != "0A":
+            continue
+        address, port_hex = fields[1].rsplit(":", 1)
+        try:
+            port = int(port_hex, 16)
+        except ValueError as exc:
+            raise OnboardingError("Bitcoin Core socket table is invalid") from exc
+        entries.append((address, port, fields[9]))
+    return entries
+
+
+def _proc_address(address: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    try:
+        raw = bytes.fromhex(address)
+    except ValueError as exc:
+        raise OnboardingError("Bitcoin Core socket address is invalid") from exc
+    if len(raw) == 4:
+        return ipaddress.IPv4Address(raw[::-1])
+    if len(raw) == 16:
+        network_order = b"".join(raw[index : index + 4][::-1] for index in range(0, 16, 4))
+        return ipaddress.IPv6Address(network_order)
+    raise OnboardingError("Bitcoin Core socket address is invalid")
+
+
+def _verify_local_rpc_listener(pid: int, rpc_port: int) -> None:
+    if not isinstance(rpc_port, int) or isinstance(rpc_port, bool) or not 1 <= rpc_port <= 65535:
+        raise OnboardingError("Bitcoin Core RPC port is invalid")
+    descriptor_root = Path(f"/proc/{pid}/fd")
+    try:
+        descriptors = list(descriptor_root.iterdir())
+        if len(descriptors) > 65_536:
+            raise OnboardingError("Bitcoin Core has too many open descriptors")
+        socket_inodes = set()
+        for descriptor in descriptors:
+            target = os.readlink(descriptor)
+            if target.startswith("socket:[") and target.endswith("]"):
+                inode = target[8:-1]
+                if inode.isdigit():
+                    socket_inodes.add(inode)
+    except OnboardingError:
+        raise
+    except OSError as exc:
+        raise OnboardingError("Bitcoin Core socket descriptors are unavailable") from exc
+    listeners = []
+    for table in (Path(f"/proc/{pid}/net/tcp"), Path(f"/proc/{pid}/net/tcp6")):
+        for address, port, inode in _read_proc_network_table(table):
+            if inode in socket_inodes and port == rpc_port:
+                listeners.append(_proc_address(address))
+    if not listeners or any(not address.is_loopback for address in listeners):
+        raise OnboardingError("Bitcoin Core RPC is not bound exclusively to loopback")
 
 
 def _require_directory_within(root: Path, path: Path, label: str) -> Path:
@@ -1738,11 +2036,14 @@ def _running_systemd_process(
         if not pid_text.isdigit() or int(pid_text) <= 1:
             raise ValueError
         pid = int(pid_text)
-        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        executable = Path(f"/proc/{pid}/exe")
+        executable_metadata = executable.stat()
+        if not stat.S_ISREG(executable_metadata.st_mode):
+            raise ValueError
     except (UnicodeError, ValueError, OSError) as exc:
         raise OnboardingError("Bitcoin Core systemd service has no verifiable running process") from exc
     return (
-        _require_local_executable(executable, "running bitcoind"),
+        executable,
         _read_proc_cmdline(pid),
         pid,
         _read_proc_start_time(pid),
@@ -1791,28 +2092,23 @@ def probe_live(
         not isinstance(artifacts.get(name), dict) for name in REQUIRED_RUNTIME_ARTIFACTS
     ):
         raise OnboardingError("live probe has no verified runtime artifact bindings")
-    node_binary = _verify_attested_artifact(
-        Path(args.p2pool_node), "p2pool-node", artifacts["p2pool-node"]
-    )
-    bitcoin_cli = _verify_attested_artifact(
-        Path(args.bitcoin_cli), "bitcoin-cli", artifacts["bitcoin-cli"]
-    )
     running_bitcoind, bitcoind_arguments, bitcoind_pid, bitcoind_start_time = _running_systemd_process(
         "bitcoind-pohw-experiment-1.service", repo_root
     )
-    _verify_attested_artifact(running_bitcoind, "running bitcoind", artifacts["bitcoind"])
-    required_bitcoind_arguments = {
-        f"-datadir={bitcoin_datadir}",
-        "-chain=pohw",
-        "-daemon=0",
-        "-rpcbind=127.0.0.1",
-        "-rpcallowip=127.0.0.1",
-    }
-    if not required_bitcoind_arguments.issubset(set(bitcoind_arguments[1:])):
-        raise OnboardingError("Bitcoin Core service arguments do not match the reviewed profile")
-    preflight = _command_json(
+    _verify_running_executable(
+        running_bitcoind,
+        bitcoind_pid,
+        bitcoind_start_time,
+        "running bitcoind",
+        artifacts["bitcoind"],
+    )
+    _validate_bitcoind_arguments(bitcoind_arguments, bitcoin_datadir)
+    _verify_local_rpc_listener(bitcoind_pid, live_policy["rpc_port"])
+    preflight = _attested_command_json(
+        Path(args.p2pool_node),
+        "p2pool-node",
+        artifacts["p2pool-node"],
         (
-            str(node_binary),
             "multinode-preflight",
             "--datadir",
             str(p2pool_datadir),
@@ -1852,9 +2148,11 @@ def probe_live(
         if miner_share_time <= now + live_policy["maximum_future_clock_skew_seconds"]:
             miner_share_age = max(0, now - miner_share_time)
 
-    snapshot = _command_json(
+    snapshot = _attested_command_json(
+        Path(args.p2pool_node),
+        "p2pool-node",
+        artifacts["p2pool-node"],
         (
-            str(node_binary),
             "mining-snapshot-evidence",
             "--datadir",
             str(p2pool_datadir),
@@ -1877,14 +2175,20 @@ def probe_live(
     )
 
     bitcoin_base = [
-        str(bitcoin_cli),
         f"-datadir={bitcoin_datadir}",
         "-chain=pohw",
         "-rpcconnect=127.0.0.1",
         f"-rpcport={live_policy['rpc_port']}",
         f"-rpccookiefile={bitcoin_cookie_file}",
     ]
-    chain_info = _command_json(tuple(bitcoin_base + ["getblockchaininfo"]), repo_root, "Bitcoin Core probe")
+    chain_info = _attested_command_json(
+        Path(args.bitcoin_cli),
+        "bitcoin-cli",
+        artifacts["bitcoin-cli"],
+        tuple(bitcoin_base + ["getblockchaininfo"]),
+        repo_root,
+        "Bitcoin Core probe",
+    )
     blocks = chain_info.get("blocks")
     headers = chain_info.get("headers")
     progress = chain_info.get("verificationprogress")
@@ -1898,15 +2202,23 @@ def probe_live(
         and not isinstance(progress, bool)
         and 0.999999 <= progress <= 1.0
     )
-    network_info = _command_json(
-        tuple(bitcoin_base + ["getnetworkinfo"]), repo_root, "Bitcoin Core network probe"
+    network_info = _attested_command_json(
+        Path(args.bitcoin_cli),
+        "bitcoin-cli",
+        artifacts["bitcoin-cli"],
+        tuple(bitcoin_base + ["getnetworkinfo"]),
+        repo_root,
+        "Bitcoin Core network probe",
     )
     bitcoin_peers = network_info.get("connections")
     if not _is_nonnegative_int(bitcoin_peers):
         raise OnboardingError("Bitcoin Core returned an invalid peer count")
     if not isinstance(best_block_hash, str) or len(best_block_hash) != 64:
         raise OnboardingError("Bitcoin Core returned an invalid best block hash")
-    tip_header = _command_json(
+    tip_header = _attested_command_json(
+        Path(args.bitcoin_cli),
+        "bitcoin-cli",
+        artifacts["bitcoin-cli"],
         tuple(bitcoin_base + ["getblockheader", best_block_hash]),
         repo_root,
         "Bitcoin Core tip header probe",
@@ -1929,8 +2241,13 @@ def probe_live(
         and bitcoin_peers >= live_policy["minimum_bitcoin_peers"]
     )
     checkpoint_height = live_policy["checkpoint_height"]
-    checkpoint = run_command(
-        tuple(bitcoin_base + ["getblockhash", str(checkpoint_height)]), cwd=repo_root, timeout=30
+    checkpoint = _run_attested_command(
+        Path(args.bitcoin_cli),
+        "bitcoin-cli",
+        artifacts["bitcoin-cli"],
+        tuple(bitcoin_base + ["getblockhash", str(checkpoint_height)]),
+        repo_root,
+        timeout=30,
     )
     checkpoint_verified = False
     if checkpoint.returncode == 0:
@@ -1948,6 +2265,14 @@ def probe_live(
         bitcoind_start_time,
     ):
         raise OnboardingError("Bitcoin Core service changed during the live proof")
+    _verify_running_executable(
+        final_process[0],
+        final_process[2],
+        final_process[3],
+        "running bitcoind",
+        artifacts["bitcoind"],
+    )
+    _verify_local_rpc_listener(final_process[2], live_policy["rpc_port"])
     return {
         "core_ready": core_ready,
         "core_profile_verified": profile_verified,

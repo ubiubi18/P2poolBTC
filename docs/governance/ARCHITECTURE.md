@@ -73,6 +73,11 @@ proposal after all gates, challenge period, and timelock pass.
   static/dependency analysis, and matching core artifact digests.
 
 Every required gate must pass. No component is collapsed into an opaque score.
+Because the current Idena WASM ABI cannot establish that claimed model and
+builder platforms are operationally independent, the deployed contract state
+is initialized with `blocked-unverified-v1` and critical proposals fail the
+attestation gate. No current entry point enables that capability; a successor
+requires a separate DAO migration and objective receipt verifier.
 
 ## Public IPFS Boundary
 

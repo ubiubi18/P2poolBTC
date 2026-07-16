@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -496,6 +497,44 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                 governance_cli_path=verifier_path,
                 idena_anchor_policy_path=anchor_path,
             )
+
+    def test_readiness_verifier_executes_the_attested_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            verifier = Path(temp_dir) / "pohw-governance"
+            original = b"#!/bin/sh\nprintf 'reviewed\\n'\n"
+            verifier.write_bytes(original)
+            verifier.chmod(0o700)
+            with MODULE.stage_attested_executable(
+                verifier,
+                "pohw-governance verifier",
+                hashlib.sha256(original).hexdigest(),
+            ) as staged:
+                verifier.write_text("#!/bin/sh\nprintf 'substituted\\n'\n", encoding="ascii")
+                verifier.chmod(0o700)
+                result = MODULE.run_bounded(
+                    [staged.command_path], pass_fds=staged.pass_fds
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, b"reviewed\n")
+
+    def test_readiness_verifier_output_is_bounded_before_capture(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream), self.assertRaisesRegex(
+                MODULE.LaunchPolicyError, "exceeds its size limit"
+            ):
+                MODULE.run_bounded(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import sys; sys."
+                            + stream
+                            + ".buffer.write(b'x' * "
+                            + str(MODULE.MAX_JSON_BYTES + 1)
+                            + ")"
+                        ),
+                    ]
+                )
 
     def test_duplicate_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

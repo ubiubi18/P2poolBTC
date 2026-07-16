@@ -408,9 +408,14 @@ caller.
 Each packaging command writes a `*.dag-cbor.hex` file next to its CAR. Submit
 the exact CID and canonical bytes together with the Merkle proof. The contract
 recomputes the CID, checks the caller and attached bond against the payload,
-and derives all gate claims from those verified bytes. A caller-supplied model
-family, digest, platform, verdict, test result, availability result, or owner
-is not authoritative.
+and derives content, caller, bond, result, and artifact-digest claims from
+those verified bytes. Model-family, runtime-family, architecture, provider,
+and pin-operator labels are still assertions by that authenticated caller; a
+canonical CID does not make those labels independently true. For this reason,
+`attestationDiversityCapability()` is fixed to `blocked-unverified-v1` in this
+contract version and critical proposals fail closed. No contract method can
+enable the reserved capability; doing so requires an audited DAO migration to
+a contract that verifies authenticated receipts objectively.
 
 Deployment readiness additionally requires a detached authentication envelope
 for every build, availability, and external-audit CAR. Relative paths resolve

@@ -91,6 +91,8 @@ import {
   transfer,
 } from "./host";
 import {
+  ATTESTATION_DIVERSITY_BLOCKED,
+  ATTESTATION_DIVERSITY_CAPABILITY_KEY,
   epochAttestationGatesPass,
   ensureCurrentGovernanceEpochAnchored,
   initializeEpochGovernanceProfile,
@@ -98,6 +100,7 @@ import {
   isBoundRevertProposal,
   recordEpochExecution,
   registerEpochProposal,
+  verifiedAttestationDiversitySupported,
 } from "./epoch_governance";
 import {
   effectiveVoteWeight,
@@ -258,6 +261,7 @@ export function deploy(
   setString(TOTAL_WEIGHT_KEY, "0");
   setString(WEIGHT_LAST_CHANGED_BLOCK_KEY, currentBlock().toString());
   setString(WEIGHT_EPOCH_KEY, currentEpoch().toString());
+  setString(ATTESTATION_DIVERSITY_CAPABILITY_KEY, ATTESTATION_DIVERSITY_BLOCKED);
   initializeEpochGovernanceProfile();
   emitVersionedEvent("GovernanceInitializedV1", [canonicalCid, parameterCid, metricsRoot, metricsEpoch.toString()]);
 }
@@ -2017,6 +2021,7 @@ function countPrefixed(values: string[], prefix: string): u32 {
 }
 
 function attestationGatesPass(proposal: Proposal): bool {
+  if (proposal.isCritical() && !verifiedAttestationDiversitySupported()) return false;
   const agentMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_ATTESTATIONS : GOV_NORMAL_MIN_AI_ATTESTATIONS;
   const modelMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_FAMILIES : GOV_NORMAL_MIN_AI_FAMILIES;
   const runtimeMin: u32 = proposal.isCritical() ? GOV_CRITICAL_MIN_AI_RUNTIME_GROUPS : GOV_NORMAL_MIN_AI_RUNTIME_GROUPS;
@@ -2047,6 +2052,18 @@ function attestationGatesPass(proposal: Proposal): bool {
     && proposal.availabilityOwnerCount >= availabilityMin
     && minimumExpiryValue.length > 0
     && parseU64(minimumExpiryValue) >= requiredAvailabilityUntil;
+}
+
+export function attestationDiversityCapability(): usize {
+  ensureInitialized();
+  requireNoPayment();
+  return returnString(
+    "{\"schemaVersion\":1,\"criticalExecutionEnabled\":"
+      + (verifiedAttestationDiversitySupported() ? "true" : "false")
+      + ",\"mode\":\""
+      + getString(ATTESTATION_DIVERSITY_CAPABILITY_KEY)
+      + "\"}",
+  );
 }
 
 function hasBlockingCriticalFindings(ownerCount: u32, risk: string): bool {
