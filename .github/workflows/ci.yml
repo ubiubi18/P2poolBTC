@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - master
   pull_request:
   schedule:
     - cron: "17 4 * * 1"
@@ -220,7 +222,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate locked component revisions
+      - name: Validate current locked component revisions
         id: governance_lock
         shell: bash
         run: |
@@ -231,7 +233,10 @@ jobs:
           import sys
           from pathlib import Path
 
-          lock = json.loads(Path("compatibility/governance-fork-lock.json").read_text())
+          lock = json.loads(Path("compatibility/stack-lock.json").read_text())
+          candidate = json.loads(
+              Path("compatibility/governance-day-fork-candidate-lock.json").read_text()
+          )
           commit = re.compile(r"^[0-9a-f]{40}$")
           components = lock.get("components")
           if not isinstance(components, list) or not components:
@@ -258,12 +263,17 @@ jobs:
               seen.add(name)
               lines.append(f"{name}\t{repository}\t{revision}\n")
           Path(sys.argv[1]).write_text("".join(lines), encoding="utf-8")
-          go_version = lock.get("toolchains", {}).get("go")
+          stack_toolchains = lock.get("toolchains", {})
+          candidate_toolchains = candidate.get("toolchains", {})
+          for name in ("go", "rust", "node", "npm"):
+              if stack_toolchains.get(name) != candidate_toolchains.get(name):
+                  raise SystemExit(f"governance candidate {name} toolchain drift")
+          go_version = candidate_toolchains.get("go")
           if not isinstance(go_version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", go_version):
               raise SystemExit("governance lock has no exact Go toolchain")
-          rust_version = lock.get("toolchains", {}).get("rust")
-          node_version = lock.get("toolchains", {}).get("node")
-          pnpm_version = lock.get("toolchains", {}).get("pnpm")
+          rust_version = candidate_toolchains.get("rust")
+          node_version = candidate_toolchains.get("node")
+          pnpm_version = candidate_toolchains.get("pnpm")
           for name, version in (
               ("rust", rust_version),
               ("node", node_version),

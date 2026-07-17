@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v5",
+  "releaseId": "idena-code-governance-day-fork-candidate-2026.07.17-v6",
   "status": "experimental-uncommitted-candidate",
   "authorizedForDeployment": false,
   "authorizedForRelease": false,
@@ -14,8 +14,8 @@
     "consensusDeltaActive": false,
     "consensusDelta": "Add a read-only epoch_block WASM host import backed by State.EpochBlock().",
     "legacyCompatibleBeforeActivation": true,
-    "legacyCompatibilityReleaseId": "idena-mainnet-legacy-compat-2026.07.12-rc3",
-    "legacyCompatibilityLockSha256": "e83f01033b1f2d5be1d404ef4c340fc9fd5736bf6ffd6c16c754167632807b98",
+    "legacyCompatibilityReleaseId": "idena-mainnet-legacy-compat-2026.07.17-rc7",
+    "legacyCompatibilityLockSha256": "525e6f8376f1aab44f526b7d0f0fa1b4b4631720a2cd9e2341b9a74baff03450",
     "historicalGovernanceForkLockSha256": "e60053f5ccb649d9f73ab7cf697ccfb8604afc25d89d3b4d00bdde8d9ce12d4e"
   },
   "activation": {
@@ -34,16 +34,16 @@
     {
       "name": "idena-go",
       "repository": "https://github.com/ubiubi18/idena-go.git",
-      "baseCommit": "aafb254786ac3c82308550a7a82642019f077d6b",
-      "baseSourceCid": "bafyreih3yhu25jmihmtwtwimyav4f4nyxk6haqs3va4jlxqvwdaylqmfeq",
-      "baseSourceSha256": "fbc1e9aea5883b2769d90cc02bc2f1b8babc70425ba83895de15b0c185c18524",
+      "baseCommit": "eeb73fbaf80493e3bcbc4a661fa3a7e2f07ec2bd",
+      "baseSourceCid": "bafyreie6cvk3iq3dyvornvdc2tj3hyjuqhdqusxgj3b4ztx3ilgjmqlchy",
+      "baseSourceSha256": "9e1555b44363c55d16d462d4d3b3e13481c70a4ae64ec3cccefb42cc9641623e",
       "candidateCommit": null,
       "candidateSourceStatus": "deterministic-patched-source-uncommitted",
-      "candidateSourceCid": "bafyreie44rcvg4zmmff772fnd76xcpctjwsjbjjslssuwploquhrdzejbq",
-      "candidateSourceSha256": "9ce44553732c614bffe8ad1ffd713c534da490a5325ca54b3d6e850f11e4890c",
-      "candidateSourceCarSha256": "18c7261088931dd28ba875e2218143b7cf8a406b062fb21da14e6eff21888cb6",
-      "candidateSourceFileCount": 549,
-      "candidateSourceTotalBytes": 7086742,
+      "candidateSourceCid": "bafyreihjb7oxc65v7zgyyxjku7o735pded4ljiw4bflrwh7lo5ns5kf76u",
+      "candidateSourceSha256": "e90fdd717bb5fe4d8c5d2aa7ddfdf5e320f8b4a2dc09571b1feb775b2ea8bff5",
+      "candidateSourceCarSha256": "dc49407c54f363c623a98018efc2323aba9514b99a9fb8e789bf80905361ca0e",
+      "candidateSourceFileCount": 559,
+      "candidateSourceTotalBytes": 7138526,
       "artifactExclusionsPath": "compatibility/governance-fork-artifact-exclusions/idena-go.json",
       "artifactExclusionsSha256": "36eb871349ab0a07e4e7244a401cfdbd1200c6458acc796fdf471dc856243519",
       "patch": {

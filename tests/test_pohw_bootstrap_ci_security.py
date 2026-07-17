@@ -281,6 +281,24 @@ class CiProvenanceTests(unittest.TestCase):
         runtime = workflow.split("governance-production-runtime:", 1)[1].split(
             "\n  secrets:", 1
         )[0]
+        current_runtime = runtime.split(
+            "- name: Confirm governance release eligibility or inactive interlock", 1
+        )[0]
+        historical_release_gate = runtime.split(
+            "- name: Confirm governance release eligibility or inactive interlock", 1
+        )[1]
+        self.assertIn('Path("compatibility/stack-lock.json")', current_runtime)
+        self.assertIn(
+            'Path("compatibility/governance-day-fork-candidate-lock.json")',
+            current_runtime,
+        )
+        self.assertIn("governance candidate {name} toolchain drift", current_runtime)
+        self.assertNotIn(
+            'Path("compatibility/governance-fork-lock.json")', current_runtime
+        )
+        self.assertIn(
+            'Path("compatibility/governance-fork-lock.json")', historical_release_gate
+        )
         self.assertIn("governance-fork-lock.json", runtime)
         self.assertIn("governance-day-fork-candidate-lock.json", runtime)
         self.assertIn("Apply exact inactive Governance Day runtime candidate", runtime)

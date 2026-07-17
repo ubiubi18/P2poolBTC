@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "planId": "ubiubi18-governance-build-v1",
   "status": "experimental-local-only",
-  "forkReleaseId": "idena-code-governance-day-fork-candidate-2026.07.16-v5",
+  "forkReleaseId": "idena-code-governance-day-fork-candidate-2026.07.17-v6",
   "sourceDateEpoch": 1783963545,
   "toolchains": {
     "go": "1.26.5",
@@ -138,8 +138,8 @@
           "platform": "all",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiep2pf2dmzogac3q6r64npwe2zge2u23tuberrzkhvijy3pfbl5aq",
-          "expectedSha256": "8fd3cba1b32e3005b87a3ee35f626b2626a9adce812463951ea84e36f2857d04",
+          "expectedCid": "bafkreih2dzcfsje5ik5r7nwaoeonhn4hxijobbsgu6ll5hvyze5myww5zi",
+          "expectedSha256": "fa1e4459249d42bb1fb6c0711cd3b787ba12e08646a796be9eb8c93acc5addca",
           "expectedSize": 3961
         },
         {
@@ -150,8 +150,8 @@
           "platform": "all",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiejuipguiie3o6dugdxvcl2wace6at5gqeps5bv3begi47xvozc6i",
-          "expectedSha256": "89a21e6a2104dbbc3a1877a897ab0044f027d3408f97435d8486473f7abb22f2",
+          "expectedCid": "bafkreidrlke7t5x7wmxkkzfqsnwrijezf6ymmtvpelbiuv4veou37n56vq",
+          "expectedSha256": "715a89f9f6ffb32ea564b0936d1424992fb0c64eaf22c28a579523a9bfb7beac",
           "expectedSize": 2902
         },
         {
@@ -271,7 +271,7 @@
         {
           "repository": "P2poolBTC",
           "path": "compatibility/governance-day-fork-candidate-lock.json",
-          "sha256": "cbf668d936e570108b8328fd05ca0928d00511361e904f4b2e6ca379abf6233c",
+          "sha256": "2b2319295d81a4058862500979c067cb4f0afb36b1357e8bb9fe29de26616d82",
           "format": "digest-only"
         },
         {
