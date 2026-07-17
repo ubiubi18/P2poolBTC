@@ -34,7 +34,7 @@ artifact remain unchanged.
 
 | Repository | Base commit | Patch |
 | --- | --- | --- |
-| `ubiubi18/idena-go` | `aafb254786ac3c82308550a7a82642019f077d6b` | `idena-go.patch` |
+| `ubiubi18/idena-go` | `eeb73fbaf80493e3bcbc4a661fa3a7e2f07ec2bd` | `idena-go.patch` |
 | `ubiubi18/idena-wasm-binding` | `67ba065fdb02aa07cced2a43a261e481ca5b39d9` | `idena-wasm-binding.patch` |
 | `ubiubi18/idena-wasm` | `7e1138959f9f96f59d20efa11f2c27b134067541` | `idena-wasm.patch` |
 | `ubiubi18/wasmer` | `1637dea03c0110f7dd800f2d9781193caf820074` | unchanged |

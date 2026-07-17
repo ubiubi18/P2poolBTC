@@ -58,7 +58,7 @@
     "cid": "bafkreiatpjucepvnc4gmuhphewazwc66x63zbzwxmqrex6glal5wksr7fy"
   },
   "runtime_binding": {
-    "idena_go_commit": "aafb254786ac3c82308550a7a82642019f077d6b",
+    "idena_go_commit": "eeb73fbaf80493e3bcbc4a661fa3a7e2f07ec2bd",
     "idena_wasm_binding_commit": "67ba065fdb02aa07cced2a43a261e481ca5b39d9",
     "go": "1.26.5",
     "node": "24.18.0",

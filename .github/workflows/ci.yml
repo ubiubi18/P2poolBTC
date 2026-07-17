@@ -220,7 +220,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate locked component revisions
+      - name: Validate current locked component revisions
         id: governance_lock
         shell: bash
         run: |
@@ -231,7 +231,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          lock = json.loads(Path("compatibility/governance-fork-lock.json").read_text())
+          lock = json.loads(Path("compatibility/stack-lock.json").read_text())
           commit = re.compile(r"^[0-9a-f]{40}$")
           components = lock.get("components")
           if not isinstance(components, list) or not components:

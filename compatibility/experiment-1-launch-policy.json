@@ -25,7 +25,7 @@
   },
   "registry_source_candidate": {
     "path": "compatibility/experiment-1-miner-registry-candidate.json",
-    "sha256": "89a21e6a2104dbbc3a1877a897ab0044f027d3408f97435d8486473f7abb22f2",
+    "sha256": "715a89f9f6ffb32ea564b0936d1424992fb0c64eaf22c28a579523a9bfb7beac",
     "contract_schema_version": 3,
     "contract_version": "0.3.0",
     "wasm_sha256": "7f5cbf0daeded9bc3ca04ade914e37688edccaa0a8ad025bb74842ec788ad601",
