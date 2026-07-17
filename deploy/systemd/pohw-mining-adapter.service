@@ -3,6 +3,8 @@ Description=PoHW P2Pool local Stratum mining adapter
 Wants=network-online.target pohw-gossip-mesh.service
 After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service
 RequiresMountsFor=/mnt/ssd
+StartLimitIntervalSec=5min
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -13,7 +15,7 @@ EnvironmentFile=-/etc/pohw/p2pool.env
 Environment=POHW_P2POOL_NODE_BIN=/usr/local/libexec/p2pool-experiment-1/p2pool-node
 Environment=POHW_HEALTH_SCRIPT=/usr/local/libexec/p2pool-experiment-1/pohw-health-status.py
 ExecStart=/usr/local/libexec/p2pool-experiment-1/pohw-run-mining-adapter.sh
-Restart=always
+Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true

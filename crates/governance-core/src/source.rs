@@ -13,10 +13,10 @@ use unicode_normalization::UnicodeNormalization;
 
 const RAW_CODEC: u64 = 0x55;
 const DAG_CBOR_CODEC: u64 = 0x71;
-const MAX_SOURCE_FILE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_SOURCE_TREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_SOURCE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_SOURCE_TREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_CAR_SECTION_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_SOURCE_FILES: usize = 100_000;
+pub const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_CAR_BLOCKS: usize = MAX_SOURCE_FILES + 1;
 const MAX_SOURCE_PATH_BYTES: usize = 4_096;
 const MAX_SOURCE_PATH_DEPTH: usize = 64;
@@ -54,6 +54,28 @@ pub struct SourceTreeManifestV1 {
     pub kind: String,
     pub repository: String,
     pub files: Vec<SourceFileEntryV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInputFile {
+    pub path: String,
+    pub mode: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceCommitReceiptV1 {
+    pub schema_version: u16,
+    pub repository: String,
+    pub git_object_format: String,
+    pub git_commit: String,
+    pub git_tree: String,
+    pub source_tree_cid: String,
+    pub source_tree_sha256: String,
+    pub car_sha256: String,
+    pub tracked_file_count: u32,
+    pub packaged_file_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,8 +257,95 @@ pub fn package_source_tree_with_artifact_exclusions(
             "declared artifact exclusion was not found: {missing}"
         )));
     }
-    collected.sort_by(|left, right| left.0.cmp(&right.0));
+    build_source_package(repository, collected)
+}
 
+pub fn package_source_files_with_artifact_exclusions(
+    repository: &str,
+    files: Vec<SourceInputFile>,
+    artifact_exclusions: &BTreeMap<String, String>,
+) -> Result<SourcePackage, SourceError> {
+    validate_repository(repository)?;
+    validate_artifact_exclusions(artifact_exclusions)?;
+    if files.len() > MAX_SOURCE_FILES {
+        return Err(SourceError::InvalidManifest(format!(
+            "source tree exceeds the {MAX_SOURCE_FILES}-file limit"
+        )));
+    }
+
+    let mut collected = Vec::with_capacity(files.len());
+    let mut total_bytes = 0u64;
+    let mut seen_exclusions = BTreeSet::new();
+    for file in files {
+        let relative = validated_relative_path(&file.path)?;
+        if should_skip_committed_path(&relative, &file.path)? {
+            continue;
+        }
+        let name = relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if let Some(expected_sha256) = artifact_exclusions.get(&file.path) {
+            if !is_excludable_binary_artifact(name) {
+                return Err(SourceError::InvalidManifest(format!(
+                    "artifact exclusion is not an approved binary/archive type: {}",
+                    file.path
+                )));
+            }
+            if sha256_hex(&file.bytes) != *expected_sha256 {
+                return Err(SourceError::CidMismatch(file.path));
+            }
+            seen_exclusions.insert(file.path);
+            continue;
+        }
+        if file.mode != 0o644 && file.mode != 0o755 {
+            return Err(SourceError::UnsafeFileType(file.path));
+        }
+        if file.bytes.len() as u64 > MAX_SOURCE_FILE_BYTES {
+            return Err(SourceError::FileTooLarge(file.path));
+        }
+        reject_forbidden_file(&file.path, name)?;
+        total_bytes = total_bytes
+            .checked_add(file.bytes.len() as u64)
+            .ok_or(SourceError::TreeTooLarge)?;
+        if total_bytes > MAX_SOURCE_TREE_BYTES {
+            return Err(SourceError::TreeTooLarge);
+        }
+        scan_secret_content(&file.path, &file.bytes)?;
+        push_source_file(&mut collected, (file.path, file.mode, file.bytes))?;
+    }
+    if seen_exclusions.len() != artifact_exclusions.len() {
+        let missing = artifact_exclusions
+            .keys()
+            .find(|path| !seen_exclusions.contains(*path))
+            .expect("exclusion cardinality mismatch implies a missing path");
+        return Err(SourceError::InvalidManifest(format!(
+            "declared artifact exclusion was not found: {missing}"
+        )));
+    }
+    build_source_package(repository, collected)
+}
+
+pub fn package_source_commit_receipt(
+    receipt: SourceCommitReceiptV1,
+) -> Result<DagCborPackage<SourceCommitReceiptV1>, SourceError> {
+    validate_source_commit_receipt(&receipt)?;
+    package_dag_cbor(receipt)
+}
+
+pub fn verify_source_commit_receipt_car(
+    bytes: &[u8],
+) -> Result<DagCborPackage<SourceCommitReceiptV1>, SourceError> {
+    let package: DagCborPackage<SourceCommitReceiptV1> = verify_dag_cbor_car(bytes)?;
+    validate_source_commit_receipt(&package.value)?;
+    Ok(package)
+}
+
+fn build_source_package(
+    repository: &str,
+    mut collected: Vec<(String, u32, Vec<u8>)>,
+) -> Result<SourcePackage, SourceError> {
+    collected.sort_by(|left, right| left.0.cmp(&right.0));
     let mut files = Vec::with_capacity(collected.len());
     let mut raw_blocks = BTreeMap::<String, Vec<u8>>::new();
     for (path, mode, bytes) in collected {
@@ -785,6 +894,37 @@ fn push_source_file(
     Ok(())
 }
 
+fn should_skip_committed_path(relative: &Path, display: &str) -> Result<bool, SourceError> {
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(SourceError::UnsafePath(display.to_string()));
+    }
+    let mut parent = PathBuf::new();
+    for component in &components[..components.len() - 1] {
+        let Component::Normal(value) = component else {
+            return Err(SourceError::UnsafePath(display.to_string()));
+        };
+        let name = value
+            .to_str()
+            .ok_or_else(|| SourceError::UnsafePath(display.to_string()))?;
+        let child = parent.join(name);
+        let child_display = portable_path(&child)?;
+        if VCS_CONTROL_NAMES.contains(&name)
+            || should_skip_directory(&parent, name)
+            || should_skip_generated_component_checkout(&parent, name)
+            || should_skip_generated_output_directory(&child_display)
+        {
+            return Ok(true);
+        }
+        parent = child;
+    }
+    let name = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| SourceError::UnsafePath(display.to_string()))?;
+    Ok(should_skip_benign_file(name) || should_skip_generated_control_file(display))
+}
+
 fn read_stable_regular_file(
     path: &Path,
     expected: &fs::Metadata,
@@ -1290,6 +1430,68 @@ fn validate_repository(value: &str) -> Result<(), SourceError> {
     Ok(())
 }
 
+fn validate_source_commit_receipt(receipt: &SourceCommitReceiptV1) -> Result<(), SourceError> {
+    if receipt.schema_version != 1 {
+        return Err(SourceError::InvalidManifest(
+            "source commit receipt schemaVersion must be 1".to_string(),
+        ));
+    }
+    validate_repository(&receipt.repository)?;
+    let oid_length = match receipt.git_object_format.as_str() {
+        "sha1" => 40,
+        "sha256" => 64,
+        _ => {
+            return Err(SourceError::InvalidManifest(
+                "gitObjectFormat must be sha1 or sha256".to_string(),
+            ))
+        }
+    };
+    for (value, field) in [
+        (&receipt.git_commit, "gitCommit"),
+        (&receipt.git_tree, "gitTree"),
+    ] {
+        if value.len() != oid_length || !is_lower_hex(value) {
+            return Err(SourceError::InvalidManifest(format!(
+                "{field} is not an exact lowercase {} object id",
+                receipt.git_object_format
+            )));
+        }
+    }
+    for (value, field) in [
+        (&receipt.source_tree_sha256, "sourceTreeSha256"),
+        (&receipt.car_sha256, "carSha256"),
+    ] {
+        if value.len() != 64 || !is_lower_hex(value) {
+            return Err(SourceError::InvalidManifest(format!(
+                "{field} must be lowercase SHA-256"
+            )));
+        }
+    }
+    let source_cid = parse_cid(&receipt.source_tree_cid)?;
+    validate_cid_profile(&source_cid, DAG_CBOR_CODEC)?;
+    if source_cid.to_string() != receipt.source_tree_cid
+        || hex::encode(source_cid.hash().digest()) != receipt.source_tree_sha256
+    {
+        return Err(SourceError::InvalidManifest(
+            "sourceTreeCid and sourceTreeSha256 disagree".to_string(),
+        ));
+    }
+    if receipt.packaged_file_count > receipt.tracked_file_count
+        || receipt.tracked_file_count as usize > MAX_SOURCE_FILES
+    {
+        return Err(SourceError::InvalidManifest(
+            "source commit receipt file counts are invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn portable_path(path: &Path) -> Result<String, SourceError> {
     let mut parts = Vec::new();
     for component in path.components() {
@@ -1653,6 +1855,95 @@ mod tests {
 
         fs::remove_dir_all(first).unwrap();
         fs::remove_dir_all(second).unwrap();
+    }
+
+    #[test]
+    fn committed_file_packaging_is_deterministic_and_receipted() {
+        let files = vec![
+            SourceInputFile {
+                path: "src/lib.rs".to_string(),
+                mode: 0o644,
+                bytes: b"pub fn value() -> u8 { 1 }\n".to_vec(),
+            },
+            SourceInputFile {
+                path: "Cargo.toml".to_string(),
+                mode: 0o644,
+                bytes: b"[package]\nname='fixture'\n".to_vec(),
+            },
+            SourceInputFile {
+                path: "target/ignored".to_string(),
+                mode: 0o644,
+                bytes: b"generated".to_vec(),
+            },
+        ];
+        let first = package_source_files_with_artifact_exclusions(
+            "fixture",
+            files.clone(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let second = package_source_files_with_artifact_exclusions(
+            "fixture",
+            files.into_iter().rev().collect(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(first.car_bytes, second.car_bytes);
+        assert_eq!(first.manifest.files.len(), 2);
+
+        let receipt = package_source_commit_receipt(SourceCommitReceiptV1 {
+            schema_version: 1,
+            repository: "fixture".to_string(),
+            git_object_format: "sha1".to_string(),
+            git_commit: "11".repeat(20),
+            git_tree: "22".repeat(20),
+            source_tree_cid: first.root_cid.to_string(),
+            source_tree_sha256: first.source_tree_sha256.clone(),
+            car_sha256: sha256_hex(&first.car_bytes),
+            tracked_file_count: 3,
+            packaged_file_count: 2,
+        })
+        .unwrap();
+        let verified = verify_source_commit_receipt_car(&receipt.car_bytes).unwrap();
+        assert_eq!(verified.value.source_tree_cid, first.root_cid.to_string());
+
+        let mut invalid = verified.value;
+        invalid.git_commit = "11".repeat(19);
+        assert!(matches!(
+            package_source_commit_receipt(invalid),
+            Err(SourceError::InvalidManifest(message)) if message.contains("exact lowercase")
+        ));
+    }
+
+    #[test]
+    fn committed_file_packaging_rejects_non_regular_modes_and_secrets() {
+        let symlink = SourceInputFile {
+            path: "link".to_string(),
+            mode: 0o120000,
+            bytes: b"../outside".to_vec(),
+        };
+        assert!(matches!(
+            package_source_files_with_artifact_exclusions(
+                "fixture",
+                vec![symlink],
+                &BTreeMap::new(),
+            ),
+            Err(SourceError::UnsafeFileType(path)) if path == "link"
+        ));
+
+        let secret = SourceInputFile {
+            path: ".env".to_string(),
+            mode: 0o644,
+            bytes: b"TOKEN=not-public".to_vec(),
+        };
+        assert!(matches!(
+            package_source_files_with_artifact_exclusions(
+                "fixture",
+                vec![secret],
+                &BTreeMap::new(),
+            ),
+            Err(SourceError::ForbiddenPath(path)) if path == ".env"
+        ));
     }
 
     #[test]

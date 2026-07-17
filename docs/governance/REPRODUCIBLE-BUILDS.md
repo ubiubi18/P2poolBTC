@@ -5,15 +5,35 @@ versions, commands, test-result CIDs, SBOM CIDs, artifact CIDs, SHA-256 values,
 sizes, platform families, and builder identities. Builders use clean source
 checkout from verified CARs, not an unverified Git working tree.
 
+For every affected repository, independently reproduce the source CAR from an
+exact full commit before building:
+
+```sh
+COMMIT="$(git rev-parse HEAD)"
+cargo run --locked -p governance-cli -- package-commit \
+  --git-repository "$PWD" \
+  --commit "$COMMIT" \
+  --repository P2poolBTC \
+  --output-dir /tmp/exact-source
+```
+
+`package-commit` reads immutable Git objects, verifies each blob identifier,
+packages them twice, and emits both the canonical source CAR and a
+`SourceCommitReceiptV1`. Builders must compare the independently produced
+source CID and CAR SHA-256 before using the source. The receipt records that
+comparison input; it is not release authorization and does not make Git the
+canonical trust root.
+
 ## Required workflow
 
-1. Verify and check out every repository CAR.
-2. Restore dependencies only from the declared lockfiles.
-3. Record the fetch result, then disable network access.
-4. Build in a fresh container or equivalent clean environment.
-5. Run tests, static analysis, dependency analysis, and SBOM generation.
-6. Compute raw artifact CIDs, SHA-256 values, and sizes.
-7. Package and sign `BuildAttestationV1`.
+1. Independently package each full commit and verify its source receipt.
+2. Verify and check out every repository CAR.
+3. Restore dependencies only from the declared lockfiles.
+4. Record the fetch result, then disable network access.
+5. Build in a fresh container or equivalent clean environment.
+6. Run tests, static analysis, dependency analysis, and SBOM generation.
+7. Compute raw artifact CIDs, SHA-256 values, and sizes.
+8. Package and sign `BuildAttestationV1`.
 
 The pinned local-only plan is
 `compatibility/governance-build-plan-v1.json`. It covers the Rust workspace,
@@ -170,6 +190,12 @@ The deployment-readiness count also requires each builder's address-bound
 detached Idena signature over the exact attestation CID,
 content digest, candidate, and builder identity. A self-declared builder
 address or `on-chain-submitter` string does not count.
+
+Deployment readiness also requires one exact source-commit receipt matching
+each affected repository in the objective proposal scope. Every qualifying
+public availability operator must retrieve those receipt CIDs in addition to
+the source, artifacts, build evidence, and SBOMs. This prevents a favorable
+build claim from silently referring to a branch tip or a different source CAR.
 
 Runtime-family and architecture strings remain operator assertions. The
 current contract records them for audit but reports

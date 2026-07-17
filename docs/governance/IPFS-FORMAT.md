@@ -39,6 +39,16 @@ regardless of whether the checkout represents them as a directory or a control
 file. Imported CAR manifests containing those control-path components are
 rejected.
 
+Release packaging uses `package-commit` with a full lowercase Git object ID.
+The command reads immutable commit/tree/blob objects without checking out a
+worktree, verifies each blob against the repository object format, packages
+the source twice, and emits `SourceCommitReceiptV1`. The receipt is canonical
+DAG-CBOR and binds the full commit and tree IDs, source-tree CID and digest,
+source-CAR SHA-256, and file counts. It is audit evidence only: a source CID,
+not the Git ID or receipt, remains the canonical source identity. Ordinary
+`package --root` output remains valid for draft review but cannot satisfy the
+deployment source-receipt gate.
+
 The generated root file `ecosystem-lock.json` is deliberately absent from a
 repository source tree. That lock records the repository source CID and would
 otherwise make its own CID self-referential. This is a single exact-path rule:
@@ -165,12 +175,16 @@ evidence added later in the review window.
 Each accepted agent review dynamically adds its own attestation, policy,
 prompt-policy, test-result, static-analysis, dependency-finding, and finding-
 evidence CIDs to the final availability set. Each accepted build adds its
-attestation, exact toolchain, test-result, SBOM, and artifact CIDs. At review
+attestation, exact toolchain, test-result, SBOM, and artifact CIDs. Deployment
+readiness also adds every affected repository's source-commit receipt. For a
+migration or consensus scope, it adds each deployed rehearsal attestation and
+the referenced contract artifact, state snapshot, event log, redacted command
+log, legacy-compatibility report, and governance-disabled report. At review
 freeze, only availability attestations whose sorted verified-CID set covers
 that complete final set count toward the gate. Each provider must additionally
 include its own independently retrievable probe-result CID. Providers should
-therefore attest after the agent and build submission window has settled, or
-submit a new attestation covering the expanded set.
+therefore attest after the agent, build, source-receipt, and rehearsal evidence
+has settled, or submit a new attestation covering the expanded set.
 
 Multiple independently operated providers must retrieve and verify every
 required CID before submitting a signed availability attestation. An

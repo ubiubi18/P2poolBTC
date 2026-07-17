@@ -131,7 +131,17 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertTrue(gates["registry_registration_identity_callback_required"])
         self.assertTrue(gates["checkpoint_vote_identity_callback_required"])
         self.assertTrue(gates["production_idena_wasm_runtime_gate_required"])
+        self.assertTrue(gates["historical_replay_requires_finalized_checkpoint"])
+        self.assertTrue(gates["candidate_submission_identity_required"])
         self.assertFalse(gates["bound_policy_replacement_allowed"])
+        self.assertEqual(
+            policy["identity_admission_scope"],
+            {
+                "p2pool_runtime_enforced": True,
+                "bitcoin_block_consensus_enforced": False,
+                "successor_consensus_profile_required": True,
+            },
+        )
 
         readiness = policy["public_join_readiness"]
         self.assertFalse(readiness["exact_source_commit_published"])

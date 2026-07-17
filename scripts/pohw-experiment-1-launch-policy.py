@@ -42,6 +42,13 @@ READINESS_BOOLEAN_FIELDS = (
     "immutable_v2_anchor_policy_published",
     "independent_second_node_rehearsal_passed",
 )
+IDENTITY_ADMISSION_SCOPE_FIELDS = frozenset(
+    {
+        "p2pool_runtime_enforced",
+        "bitcoin_block_consensus_enforced",
+        "successor_consensus_profile_required",
+    }
+)
 SHA256_HEX_LENGTH = 64
 CID_BYTES_PREFIX = bytes((1, 0x71, 0x12, 32))
 READINESS_REPORT_FIELDS = frozenset(
@@ -52,6 +59,8 @@ READINESS_REPORT_FIELDS = frozenset(
         "scopeEvidenceCid",
         "riskClass",
         "ready",
+        "sourceCommitReceiptThreshold",
+        "verifiedSourceCommitReceiptCount",
         "builderThreshold",
         "matchingBuilderCount",
         "builderPlatformThreshold",
@@ -61,6 +70,11 @@ READINESS_REPORT_FIELDS = frozenset(
         "completeAvailabilityCount",
         "externalAuditThreshold",
         "passingExternalAuditCount",
+        "migrationRehearsalThreshold",
+        "matchingMigrationRehearsalCount",
+        "migrationRehearsalPlatformThreshold",
+        "matchingMigrationRehearsalPlatformCount",
+        "selectedMigrationRehearsalDigest",
         "requiredContentCidCount",
         "failureCodes",
     }
@@ -724,6 +738,7 @@ def validate_readiness_report(report: dict[str, Any], expected_candidate: str) -
         raise LaunchPolicyError("deployment-readiness report is not ready")
 
     thresholds = (
+        ("sourceCommitReceiptThreshold", "verifiedSourceCommitReceiptCount"),
         ("builderThreshold", "matchingBuilderCount"),
         ("builderPlatformThreshold", "matchingBuilderPlatformCount"),
         ("availabilityThreshold", "completeAvailabilityCount"),
@@ -736,6 +751,44 @@ def validate_readiness_report(report: dict[str, Any], expected_candidate: str) -
             raise LaunchPolicyError(
                 f"deployment-readiness report {count_key} is below {threshold_key}"
             )
+    migration_threshold = require_bounded_uint(
+        report, "migrationRehearsalThreshold", (1 << 32) - 1
+    )
+    migration_count = require_bounded_uint(
+        report, "matchingMigrationRehearsalCount", (1 << 32) - 1
+    )
+    migration_platform_threshold = require_bounded_uint(
+        report, "migrationRehearsalPlatformThreshold", (1 << 32) - 1
+    )
+    migration_platform_count = require_bounded_uint(
+        report, "matchingMigrationRehearsalPlatformCount", (1 << 32) - 1
+    )
+    migration_risk = report["riskClass"] in {"consensus", "migration"}
+    if migration_risk:
+        if migration_threshold < 2 or migration_platform_threshold < 2:
+            raise LaunchPolicyError(
+                "migration/consensus readiness requires two independent rehearsal operators and platforms"
+            )
+        require_sha256(
+            report.get("selectedMigrationRehearsalDigest"),
+            "deployment-readiness selected migration rehearsal digest",
+        )
+    elif migration_threshold != 0 or migration_platform_threshold != 0:
+        raise LaunchPolicyError(
+            "non-migration readiness has an unexpected migration rehearsal threshold"
+        )
+    elif report.get("selectedMigrationRehearsalDigest") is not None:
+        raise LaunchPolicyError(
+            "non-migration readiness has an unexpected migration rehearsal digest"
+        )
+    if migration_count < migration_threshold:
+        raise LaunchPolicyError(
+            "deployment-readiness report matchingMigrationRehearsalCount is below its threshold"
+        )
+    if migration_platform_count < migration_platform_threshold:
+        raise LaunchPolicyError(
+            "deployment-readiness report matchingMigrationRehearsalPlatformCount is below its threshold"
+        )
     require_bounded_uint(
         report, "requiredContentCidCount", (1 << 32) - 1, positive=True
     )
@@ -1048,11 +1101,30 @@ def validate(
         "registry_registration_identity_callback_required",
         "checkpoint_vote_identity_callback_required",
         "production_idena_wasm_runtime_gate_required",
+        "historical_replay_requires_finalized_checkpoint",
+        "candidate_submission_identity_required",
     ):
         if require_bool(runtime_gates, key) is not True:
             raise LaunchPolicyError(f"required runtime gate is disabled: {key}")
     if require_bool(runtime_gates, "bound_policy_replacement_allowed") is not False:
         raise LaunchPolicyError("bound policy replacement must remain disabled")
+
+    admission_scope = policy.get("identity_admission_scope")
+    if (
+        not isinstance(admission_scope, dict)
+        or frozenset(admission_scope) != IDENTITY_ADMISSION_SCOPE_FIELDS
+    ):
+        raise LaunchPolicyError("identity admission scope is missing or malformed")
+    if require_bool(admission_scope, "p2pool_runtime_enforced") is not True:
+        raise LaunchPolicyError("P2Pool runtime identity admission must remain enforced")
+    if require_bool(admission_scope, "bitcoin_block_consensus_enforced") is not False:
+        raise LaunchPolicyError(
+            "Experiment 1 must not claim Idena enforcement in Bitcoin block consensus"
+        )
+    if require_bool(admission_scope, "successor_consensus_profile_required") is not True:
+        raise LaunchPolicyError(
+            "strict Idena-gated Bitcoin consensus must require a successor profile"
+        )
 
     readiness = policy.get("public_join_readiness")
     if not isinstance(readiness, dict):

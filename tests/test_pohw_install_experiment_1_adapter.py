@@ -155,7 +155,10 @@ class Experiment1AdapterInstallerTests(unittest.TestCase):
             "resourceLimits": {"cpuCount": 1, "memoryBytes": 1, "processes": 1},
             "sourceVerification": self.reference(source_verification_raw),
             "sourceDateEpoch": plan["sourceDateEpoch"],
-            "toolchains": plan["toolchains"],
+            "toolchains": {
+                name: plan["toolchains"][name]
+                for name in target["requiredToolchains"]
+            },
         }
         environment_raw = self.canonical_json(environment)
         artifacts = []

@@ -419,7 +419,22 @@ require(
 )
 verify_reference(environment.get("plan"), canonical_json(plan), "build environment plan")
 require(environment.get("sourceVerification") == evidence.get("sourceVerification"), "build environment source verification mismatch")
-require(environment.get("toolchains") == plan.get("toolchains"), "build environment toolchain lock mismatch")
+required_toolchains = target.get("requiredToolchains")
+plan_toolchains = plan.get("toolchains")
+require(
+    isinstance(required_toolchains, list)
+    and required_toolchains
+    and all(isinstance(name, str) and name for name in required_toolchains)
+    and len(required_toolchains) == len(set(required_toolchains)),
+    "rust-workspace required toolchains are invalid",
+)
+require(
+    isinstance(plan_toolchains, dict)
+    and all(name in plan_toolchains for name in required_toolchains),
+    "build plan is missing a required rust-workspace toolchain",
+)
+expected_toolchains = {name: plan_toolchains[name] for name in required_toolchains}
+require(environment.get("toolchains") == expected_toolchains, "build environment toolchain lock mismatch")
 
 plan_locks = [item for item in target.get("dependencyLocks", []) if isinstance(item, dict) and item.get("repository") == "P2poolBTC"]
 require(plan_locks, "rust-workspace has no P2poolBTC dependency lock")

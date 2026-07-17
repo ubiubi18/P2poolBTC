@@ -127,24 +127,18 @@ cargo run -p governance-cli -- parameters-inspect \
 
 ## Package source and publish to a public sidecar
 
-Stage the exact candidate through an isolated Git index first. Git is used
-only to enumerate the candidate bytes; the resulting source CID, not the
-commit or branch, is the content identity. This includes tracked edits,
-deletions, and non-ignored new files while excluding `.git`, ignored build
-artifacts, caches, and local environment files.
+Release evidence must start from an exact full Git commit object. The command
+below reads Git objects directly, verifies every blob identifier, rejects
+moving refs, symlinks, submodules, unsafe paths, and secret-like files, then
+packages the same object set twice and requires byte-identical CAR output. It
+does not read the working tree, run hooks, or apply checkout filters. Git is
+only audit metadata; the resulting source CID remains the content identity.
 
 ```sh
-BASE_COMMIT="$(git rev-parse HEAD)"
-INDEX_DIR="$(mktemp -d /tmp/pohw-source-index.XXXXXX)"
-SOURCE_STAGE="$(mktemp -d /tmp/pohw-source-stage.XXXXXX)"
-
-GIT_INDEX_FILE="$INDEX_DIR/index" git read-tree "$BASE_COMMIT"
-GIT_INDEX_FILE="$INDEX_DIR/index" git add -A
-GIT_INDEX_FILE="$INDEX_DIR/index" git checkout-index \
-  --all --prefix="$SOURCE_STAGE/"
-
-cargo run -p governance-cli -- package \
-  --root "$SOURCE_STAGE" \
+COMMIT="$(git rev-parse HEAD)"
+cargo run --locked -p governance-cli -- package-commit \
+  --git-repository "$PWD" \
+  --commit "$COMMIT" \
   --repository P2poolBTC \
   --output-dir /tmp/p2pool-source
 
@@ -156,7 +150,24 @@ cargo run -p governance-cli -- pin \
   --car /tmp/p2pool-source/P2poolBTC.source.car \
   --store "$HOME/.local/share/pohw-governance/pins" \
   --kubo-api http://127.0.0.1:5001
+
+cargo run -p governance-cli -- pin \
+  --car /tmp/p2pool-source/P2poolBTC.source-commit-receipt.car \
+  --store "$HOME/.local/share/pohw-governance/pins" \
+  --kubo-api http://127.0.0.1:5001
 ```
+
+Repeat `package-commit` independently for every affected repository. The
+receipt binds the repository label, full commit and tree identifiers, source
+CID, source digest, source-CAR digest, and file counts. Deployment readiness
+requires one matching receipt per affected repository and requires all public
+availability operators to retrieve each receipt. A receipt does not authorize
+deployment and cannot replace independent builders reproducing the same source
+CID from the exact commit.
+
+For a draft that has not been committed, the ordinary `package --root ...`
+command remains useful for review. Draft packages are not acceptable as
+deployment-readiness source receipts.
 
 Do not add generated binaries to the source tree or bypass a packaging
 rejection. The IdenaAI local integration follows the same rule: its tracked
@@ -460,6 +471,11 @@ from the readiness input file:
 {
   "schemaVersion": 1,
   "scopeCar": "proposal-scope.car",
+  "sourceCommitReceipts": [
+    {
+      "car": "sources/P2poolBTC.source-commit-receipt.car"
+    }
+  ],
   "buildAttestations": [
     {
       "car": "builder-a/build-attestation.car",
@@ -486,6 +502,16 @@ from the readiness input file:
       "authentication": "audit-a/external-audit-attestation.authentication.json"
     }
   ],
+  "migrationRehearsalAttestations": [
+    {
+      "car": "rehearsal-a/migration-rehearsal-attestation.car",
+      "authentication": "rehearsal-a/migration-rehearsal-attestation.authentication.json"
+    },
+    {
+      "car": "rehearsal-b/migration-rehearsal-attestation.car",
+      "authentication": "rehearsal-b/migration-rehearsal-attestation.authentication.json"
+    }
+  ],
   "requiredAvailabilityThroughBlock": 123456
 }
 ```
@@ -503,6 +529,10 @@ The verifier reconstructs every canonical content CID and authentication
 binding offline. A self-declared identity, the legacy intent marker alone, or
 an envelope copied from another attestation contributes zero to independence
 thresholds; the builder, availability, and audit thresholds are unchanged.
+Every affected repository needs one exact source-commit receipt. Migration and
+consensus scopes additionally need two matching, Idena-authenticated deployed
+rehearsal attestations from distinct operators on two platform families. A
+normal or critical application proposal may omit `migrationRehearsalAttestations`.
 The output directory contains `deployment-readiness-report.car` and
 `deployment-readiness-evidence.car`, with CID and SHA-256 sidecars for each.
 The report commits to the evidence-bundle CID. The second command replays the
@@ -511,6 +541,30 @@ and recomputes the complete report; a report containing only favorable copied
 counts is therefore insufficient. A production launch policy must bind both
 CARs, and its service interlock must compare the recomputed report byte for byte
 with the policy-bound report.
+
+Create deployed rehearsal evidence only after actually exercising the exact
+candidate on the named isolated public testnet. Each operator must observe an
+accepted parent-to-candidate execution followed by a governed candidate-to-
+parent rollback, publish redacted state/event/command/compatibility evidence,
+and sign the generated public challenge independently:
+
+```sh
+cargo run --locked -p governance-cli -- migration-rehearsal-attestation \
+  --input /protected/rehearsal/operator-a.json \
+  --derive-rehearsal-digest \
+  --output-dir /verified/rehearsal-a
+
+cargo run --locked -p governance-cli -- attestation-authenticate \
+  --kind migration-rehearsal \
+  --car /verified/rehearsal-a/migration-rehearsal-attestation.car \
+  --signature-file /protected/rehearsal/operator-a.signature \
+  --output-dir /verified/rehearsal-a
+```
+
+The two attestations must agree on the deterministic transition digest while
+retaining their own operator identity, runtime, architecture, command-log CID,
+and compatibility-report CIDs. Signatures corroborate who made each claim;
+they do not by themselves prove independent infrastructure or chain truth.
 
 Three distinct eligible operator identities must submit matching canonical
 `IdentityMetricsAttestationV1` objects before a metrics root/epoch can be used.

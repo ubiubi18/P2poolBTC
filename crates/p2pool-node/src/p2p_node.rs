@@ -1263,15 +1263,34 @@ struct FetchAppendResult {
     failures: Vec<GossipSyncFailure>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoricalReplayAuthorization {
+    Uncheckpointed,
+    FinalizedCheckpoint,
+}
+
+impl HistoricalReplayAuthorization {
+    fn checkpoint_authorized(self) -> bool {
+        self == Self::FinalizedCheckpoint
+    }
+}
+
+fn historical_admission_flags(authorization: HistoricalReplayAuthorization) -> (bool, bool) {
+    let checkpoint_authorized = authorization.checkpoint_authorized();
+    (checkpoint_authorized, !checkpoint_authorized)
+}
+
 enum PendingEnvelope {
     Fetch {
         message_hash: String,
         depth: usize,
+        authorization: HistoricalReplayAuthorization,
     },
     AppendAfterParent {
         message_hash: String,
         envelope: Box<GossipEnvelope>,
         parent_hash: String,
+        authorization: HistoricalReplayAuthorization,
     },
 }
 
@@ -1283,7 +1302,7 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
     max_future_skew_seconds: i64,
     max_age_seconds: i64,
     known_hashes: &mut BTreeSet<String>,
-    attempted_hashes: &mut BTreeSet<String>,
+    attempted_hashes: &mut BTreeSet<(String, HistoricalReplayAuthorization)>,
     parent_fetch_budget: &mut ParentFetchBudget,
     registration_fetch_budget: &mut RegistrationFetchBudget,
     template_fetch_budget: &mut TemplateFetchBudget,
@@ -1293,13 +1312,15 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
     let mut pending = vec![PendingEnvelope::Fetch {
         message_hash,
         depth: 0,
+        authorization: HistoricalReplayAuthorization::Uncheckpointed,
     }];
 
     while let Some(item) = pending.pop() {
-        let (message_hash, envelope) = match item {
+        let (message_hash, envelope, authorization) = match item {
             PendingEnvelope::Fetch {
                 message_hash,
                 depth,
+                authorization,
             } => {
                 let already_available = if depth == 0 {
                     known_hashes.contains(&message_hash)
@@ -1317,7 +1338,9 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                         }
                     }
                 };
-                if already_available || !attempted_hashes.insert(message_hash.clone()) {
+                if already_available
+                    || !attempted_hashes.insert((message_hash.clone(), authorization))
+                {
                     continue;
                 }
                 if depth > MAX_SHARE_PARENT_FETCH_DEPTH {
@@ -1368,6 +1391,23 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                     continue;
                 }
 
+                let authorization = match checkpoint_replay_authorization(
+                    &envelope.message,
+                    authorization,
+                    work_template_admission,
+                )
+                .await
+                {
+                    Ok(authorization) => authorization,
+                    Err(err) => {
+                        result.failures.push(GossipSyncFailure {
+                            message_hash,
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                };
+
                 if let Err(err) = fetch_append_missing_miner_registrations(
                     datadir,
                     addr,
@@ -1377,6 +1417,7 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                     known_hashes,
                     registration_fetch_budget,
                     work_template_admission,
+                    authorization,
                     &mut result,
                 )
                 .await
@@ -1398,6 +1439,7 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                     registration_fetch_budget,
                     template_fetch_budget,
                     work_template_admission,
+                    authorization,
                     &mut result,
                 )
                 .await
@@ -1434,20 +1476,23 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                             message_hash: message_hash.clone(),
                             envelope: Box::new(envelope),
                             parent_hash: parent_hash.clone(),
+                            authorization,
                         });
                         pending.push(PendingEnvelope::Fetch {
                             message_hash: parent_hash,
                             depth: depth + 1,
+                            authorization,
                         });
                         continue;
                     }
                 }
-                (message_hash, envelope)
+                (message_hash, envelope, authorization)
             }
             PendingEnvelope::AppendAfterParent {
                 message_hash,
                 envelope,
                 parent_hash,
+                authorization,
             } => {
                 let parent_available = match local_share_available(datadir, &parent_hash) {
                     Ok(available) => available,
@@ -1468,16 +1513,17 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                     });
                     continue;
                 }
-                (message_hash, *envelope)
+                (message_hash, *envelope, authorization)
             }
         };
 
-        match append_gossip_envelope_after_template_admission(
+        match append_gossip_envelope_after_template_admission_with_authorization(
             datadir,
             envelope,
             max_future_skew_seconds,
             max_age_seconds,
             work_template_admission,
+            authorization,
         )
         .await
         {
@@ -1499,6 +1545,24 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
     result
 }
 
+async fn checkpoint_replay_authorization(
+    message: &SharechainMessage,
+    inherited: HistoricalReplayAuthorization,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+) -> Result<HistoricalReplayAuthorization> {
+    let SharechainMessage::SharechainCheckpoint(checkpoint) = message else {
+        return Ok(inherited);
+    };
+    let verifier = work_template_admission
+        .and_then(|admission| admission.idena_anchor_verifier.as_ref())
+        .context("active Idena anchor policy is required to authorize checkpoint replay")?;
+    verifier
+        .verify_checkpoint(checkpoint, false)
+        .await
+        .context("finalized Idena checkpoint did not authorize historical replay")?;
+    Ok(HistoricalReplayAuthorization::FinalizedCheckpoint)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_append_missing_miner_registrations(
     datadir: &Path,
@@ -1509,6 +1573,7 @@ async fn fetch_append_missing_miner_registrations(
     known_hashes: &mut BTreeSet<String>,
     registration_fetch_budget: &mut RegistrationFetchBudget,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+    authorization: HistoricalReplayAuthorization,
     result: &mut FetchAppendResult,
 ) -> Result<()> {
     let dependencies = miner_registration_dependencies(message)?;
@@ -1534,12 +1599,13 @@ async fn fetch_append_missing_miner_registrations(
         };
         result.fetched_count += 1;
         let registration_message_hash = registration_envelope.message.message_hash();
-        let append = append_gossip_envelope_after_template_admission(
+        let append = append_gossip_envelope_after_template_admission_with_authorization(
             datadir,
             registration_envelope,
             max_future_skew_seconds,
             max_age_seconds,
             work_template_admission,
+            authorization,
         )
         .await?;
         known_hashes.insert(append.message_result.message_hash);
@@ -1572,6 +1638,7 @@ async fn fetch_append_missing_bitcoin_work_template(
     registration_fetch_budget: &mut RegistrationFetchBudget,
     template_fetch_budget: &mut TemplateFetchBudget,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+    authorization: HistoricalReplayAuthorization,
     result: &mut FetchAppendResult,
 ) -> Result<()> {
     let Some(template_hash) = bitcoin_template_dependency(message) else {
@@ -1603,15 +1670,17 @@ async fn fetch_append_missing_bitcoin_work_template(
         known_hashes,
         registration_fetch_budget,
         work_template_admission,
+        authorization,
         result,
     )
     .await?;
-    let append = append_gossip_envelope_after_template_admission(
+    let append = append_gossip_envelope_after_template_admission_with_authorization(
         datadir,
         template_envelope,
         max_future_skew_seconds,
         max_age_seconds,
         work_template_admission,
+        authorization,
     )
     .await?;
     known_hashes.insert(append.message_result.message_hash);
@@ -1631,6 +1700,7 @@ async fn fetch_append_missing_bitcoin_work_template(
     Ok(())
 }
 
+#[cfg(test)]
 async fn append_gossip_envelope_after_template_admission(
     datadir: &Path,
     envelope: GossipEnvelope,
@@ -1638,15 +1708,35 @@ async fn append_gossip_envelope_after_template_admission(
     max_age_seconds: i64,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
+    append_gossip_envelope_after_template_admission_with_authorization(
+        datadir,
+        envelope,
+        max_future_skew_seconds,
+        max_age_seconds,
+        work_template_admission,
+        HistoricalReplayAuthorization::Uncheckpointed,
+    )
+    .await
+}
+
+async fn append_gossip_envelope_after_template_admission_with_authorization(
+    datadir: &Path,
+    envelope: GossipEnvelope,
+    max_future_skew_seconds: i64,
+    _max_age_seconds: i64,
+    work_template_admission: Option<&WorkTemplateAdmissionConfig>,
+    authorization: HistoricalReplayAuthorization,
+) -> Result<local_node::AppendGossipEnvelopeResult> {
     let now = current_unix_timestamp()?;
     envelope.verify_durable_at(now, max_future_skew_seconds)?;
-    let historical =
-        max_age_seconds > 0 && envelope.created_at_unix < now.saturating_sub(max_age_seconds);
+    let (historical_chain_material, require_current_idena_eligibility) =
+        historical_admission_flags(authorization);
     admit_gossip_bitcoin_material(
         datadir,
         &envelope.message,
         work_template_admission,
-        historical,
+        historical_chain_material,
+        require_current_idena_eligibility,
     )
     .await?;
     local_node::append_historical_gossip_envelope(datadir, envelope, max_future_skew_seconds)
@@ -1661,8 +1751,14 @@ async fn append_live_gossip_envelope_after_template_admission(
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
     let now = current_unix_timestamp()?;
     envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
-    admit_gossip_bitcoin_material(datadir, &envelope.message, work_template_admission, false)
-        .await?;
+    admit_gossip_bitcoin_material(
+        datadir,
+        &envelope.message,
+        work_template_admission,
+        false,
+        true,
+    )
+    .await?;
     local_node::append_gossip_envelope(datadir, envelope, max_future_skew_seconds, max_age_seconds)
 }
 
@@ -1670,23 +1766,24 @@ async fn admit_gossip_bitcoin_material(
     datadir: &Path,
     message: &SharechainMessage,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
-    historical: bool,
+    historical_chain_material: bool,
+    require_current_idena_eligibility: bool,
 ) -> Result<()> {
     match message {
         SharechainMessage::MinerRegistration(registration) => {
             if let Some(verifier) = work_template_admission
                 .and_then(|admission| admission.idena_anchor_verifier.as_ref())
             {
-                if historical {
-                    verifier
-                        .verify_historical_registration(registration)
-                        .await
-                        .context("local Idena miner registry rejected historical registration")?;
-                } else {
+                if require_current_idena_eligibility {
                     verifier
                         .verify_registration(registration)
                         .await
                         .context("local Idena miner registry rejected registration")?;
+                } else {
+                    verifier
+                        .verify_historical_registration(registration)
+                        .await
+                        .context("local Idena miner registry rejected historical registration")?;
                 }
                 local_node::replay_state(datadir)?
                     .validate_idena_anchor_policy(message, verifier.policy())
@@ -1696,17 +1793,31 @@ async fn admit_gossip_bitcoin_material(
         SharechainMessage::BitcoinWorkTemplate(template) => {
             let admission = work_template_admission
                 .context("Bitcoin work-template admission is required for peer templates")?;
-            admit_bitcoin_work_template(datadir, template, admission, historical).await?;
+            admit_bitcoin_work_template(
+                datadir,
+                template,
+                admission,
+                historical_chain_material,
+                require_current_idena_eligibility,
+            )
+            .await?;
         }
         SharechainMessage::Share(share) => {
             let admission = work_template_admission
                 .context("Bitcoin work-template admission is required for peer shares")?;
-            admit_bitcoin_share(datadir, share, admission, historical).await?;
+            admit_bitcoin_share(
+                datadir,
+                share,
+                admission,
+                historical_chain_material,
+                require_current_idena_eligibility,
+            )
+            .await?;
         }
         SharechainMessage::SharechainCheckpoint(checkpoint) => {
             let admission = work_template_admission
                 .context("Idena admission is required for sharechain checkpoints")?;
-            admit_sharechain_checkpoint(datadir, checkpoint, admission, historical).await?;
+            admit_sharechain_checkpoint(datadir, checkpoint, admission).await?;
         }
         _ => {}
     }
@@ -1717,14 +1828,13 @@ async fn admit_sharechain_checkpoint(
     datadir: &Path,
     checkpoint: &pohw_core::idena_anchor::SharechainCheckpointAnchorV1,
     admission: &WorkTemplateAdmissionConfig,
-    historical: bool,
 ) -> Result<()> {
     let verifier = admission
         .idena_anchor_verifier
         .as_ref()
         .context("active Idena anchor policy is required for sharechain checkpoints")?;
     verifier
-        .verify_checkpoint(checkpoint, !historical)
+        .verify_checkpoint(checkpoint, false)
         .await
         .context("local Idena RPC rejected sharechain checkpoint")?;
 
@@ -1740,20 +1850,6 @@ async fn admit_sharechain_checkpoint(
                 format!("checkpoint registered miner {miner_id} has no valid registry record")
             })?;
     }
-    if !historical {
-        for miner_id in &checkpoint.supporters {
-            let registration = state.registrations().get(miner_id).with_context(|| {
-                format!("checkpoint supporter {miner_id} is missing from local replay")
-            })?;
-            verifier
-                .verify_registration(registration)
-                .await
-                .with_context(|| {
-                    format!("checkpoint supporter {miner_id} is not currently eligible")
-                })?;
-        }
-    }
-
     let message = SharechainMessage::SharechainCheckpoint(checkpoint.clone());
     state
         .validate_idena_anchor_policy(&message, verifier.policy())
@@ -1769,7 +1865,8 @@ async fn admit_bitcoin_share(
     datadir: &Path,
     share: &pohw_core::sharechain::Share,
     admission: &WorkTemplateAdmissionConfig,
-    historical: bool,
+    _historical_chain_material: bool,
+    require_current_idena_eligibility: bool,
 ) -> Result<()> {
     let share = share.clone().normalized();
     let state = local_node::replay_state(datadir)?;
@@ -1793,7 +1890,7 @@ async fn admit_bitcoin_share(
             )
             .context("sharechain Idena anchor policy rejected share")?;
         verifier
-            .verify_template(registration, &template, !historical)
+            .verify_template(registration, &template, require_current_idena_eligibility)
             .await
             .context("local Idena anchor verification rejected share template")?;
     }
@@ -1826,7 +1923,8 @@ async fn admit_bitcoin_work_template(
     datadir: &Path,
     template: &pohw_core::sharechain::BitcoinWorkTemplate,
     admission: &WorkTemplateAdmissionConfig,
-    historical: bool,
+    historical_chain_material: bool,
+    require_current_idena_eligibility: bool,
 ) -> Result<()> {
     let template = template.clone().normalized();
     let miner_id = template.miner_id.to_ascii_lowercase();
@@ -1841,7 +1939,7 @@ async fn admit_bitcoin_work_template(
             .validate_work_template(&template)
             .await
             .context("fork-chain RPC rejected work template")?;
-    } else if historical {
+    } else if historical_chain_material {
         admission
             .bitcoin_rpc_client
             .as_ref()
@@ -1860,7 +1958,7 @@ async fn admit_bitcoin_work_template(
     }
     if let Some(verifier) = admission.idena_anchor_verifier.as_ref() {
         verifier
-            .verify_template(registration, &template, !historical)
+            .verify_template(registration, &template, require_current_idena_eligibility)
             .await
             .context("local Idena anchor verification rejected work template")?;
         state
@@ -3121,6 +3219,20 @@ mod tests {
 
         assert_eq!(appended.message_result.outcome, ApplyOutcome::Applied);
         fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn signer_timestamp_never_authorizes_historical_replay() {
+        assert_eq!(
+            historical_admission_flags(HistoricalReplayAuthorization::Uncheckpointed),
+            (false, true),
+            "uncheckpointed material must use current Bitcoin and Idena admission regardless of its timestamp"
+        );
+        assert_eq!(
+            historical_admission_flags(HistoricalReplayAuthorization::FinalizedCheckpoint),
+            (true, false),
+            "only a finalized checkpoint can authorize historical Bitcoin and identity replay"
+        );
     }
 
     #[tokio::test]

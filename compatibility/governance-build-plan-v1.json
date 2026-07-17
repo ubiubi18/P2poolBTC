@@ -21,7 +21,7 @@
         {
           "repository": "P2poolBTC",
           "path": "Cargo.lock",
-          "sha256": "6f21254e6b257f6757ef3d8fcdec48c2620e793bcc0cf777530e33ce88c4fee7",
+          "sha256": "b10548f7d3bc28f5b45d1a0997831ce0c47657f3c6a624a18c7a8671940c271f",
           "format": "cargo-lock"
         }
       ],
@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreihnlj5vjfqodjhxayzia3fqrul32ml5kmnoujexfpojwpnqd45sf4",
-          "expectedSha256": "ed5a7b54960e1a4f70632806cb08d17bd317d531aea24972bdc9b3db01f3b22f",
-          "expectedSize": 47974
+          "expectedCid": "bafkreiccrmx4vtshnlgwnlmip45ovturpqq22tzfmioo6ec62s6qlsciyu",
+          "expectedSha256": "428b2fcace476acd66ad887f3aeace917c21ad4f25621cef105ed4bd05c848c5",
+          "expectedSize": 51315
         },
         {
           "name": "experiment-1-full-consensus.json",
@@ -138,9 +138,9 @@
           "platform": "all",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiauk2wbidp75ngn5e5j4ig4ruouvabgeeclasmz66yqw4fncdracm",
-          "expectedSha256": "1456ac140dffeb4cde93a9e20dc8d1d4a80262104b04999f7b10b70ad10e2013",
-          "expectedSize": 3678
+          "expectedCid": "bafkreiep2pf2dmzogac3q6r64npwe2zge2u23tuberrzkhvijy3pfbl5aq",
+          "expectedSha256": "8fd3cba1b32e3005b87a3ee35f626b2626a9adce812463951ea84e36f2857d04",
+          "expectedSize": 3961
         },
         {
           "name": "experiment-1-miner-registry-candidate.json",
@@ -174,9 +174,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiejtj7rezakapvcedc23n5q4jquyo7lznwmacbsnobxox6up4c2a4",
-          "expectedSha256": "899a7f12640a03ea220c5adb7b0e2614c3bebcb6cc008326b83775fd47f05a07",
-          "expectedSize": 1212
+          "expectedCid": "bafkreidgpmextoxgvcuk3r65egvqegyvgzh44ypoj5egrali2z4g44qc7q",
+          "expectedSha256": "667b0979bae6a8a8adc7dd21ab021b15364fce61ee4f48688168d6786e7202fc",
+          "expectedSize": 1261
         },
         {
           "name": "pohw-gossip-mesh.service",

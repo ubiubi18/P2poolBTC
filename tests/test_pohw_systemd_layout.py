@@ -146,6 +146,10 @@ class SystemdLayoutTests(unittest.TestCase):
             self.assertIn("After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service", unit)
             self.assertIn(f"ExecStart={exec_start}", unit)
             self.assertIn(f"ReadWritePaths={write_path}", unit)
+            self.assertIn("Restart=on-failure", unit)
+            self.assertNotIn("Restart=always", unit)
+            self.assertIn("StartLimitIntervalSec=5min", unit)
+            self.assertIn("StartLimitBurst=3", unit)
 
     def test_experiment_1_units_use_the_installed_evidence_bound_runtime(self) -> None:
         wrappers = {

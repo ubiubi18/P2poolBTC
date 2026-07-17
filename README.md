@@ -33,18 +33,21 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > **Public-join status: blocked technical preview.** The idea, source, tests,
 > and sanitized screenshots may be shared for review. Do not advertise an open
 > mining network yet. The checked-in launch policy remains
-> `blocked-release-readiness`: it machine-records the missing exact source
-> release, CID/CAR/build evidence, second independent build operator, external
-> review, finalized ownerless-registry policy, and independent second-node
-> acceptance. Two matching registry builds by one operator are reproducibility
+> `blocked-release-readiness`: exact-commit source packaging and deployed
+> execute/rollback rehearsal gates now exist, but no independently published
+> release package, required builder set, public pin attestations, external
+> review, deployed rehearsal set, finalized ownerless-registry policy, or
+> independent second-node acceptance is bundled. Two matching registry builds
+> by one operator are reproducibility
 > evidence, but do not satisfy builder independence. Runtime wrappers fail
 > closed for `chain=pohw` unless the reviewed Idena anchor policy is mandatory.
 > A ready policy must bind the canonical deployment-readiness report CID and
 > CAR digest plus the evidence-bundle CID and CAR digest. The installed
 > `pohw-governance` verifier reconstructs the report from the exact
-> authenticated scope, builder, availability, and audit attestations before any
-> Experiment 1 service starts; editable status flags or aggregate counts cannot
-> open public joining.
+> authenticated scope, source-commit receipts, builder, availability, audit,
+> and risk-required migration-rehearsal attestations before any Experiment 1
+> service starts; editable status flags or aggregate counts cannot open public
+> joining.
 > Community onboarding additionally requires the canonical ecosystem CID to be
 > read independently from Idena governance, then verifies the corresponding
 > DAG-CBOR ecosystem CAR, P2poolBTC source CAR, and runtime artifact digests
@@ -343,6 +346,9 @@ Working prototype pieces:
   signature-domain replay isolation, revision-specific network identity, and a
   permanent difficulty-handoff marker,
 - live fork templates and fork-only block submission wired into the Stratum adapter,
+- fail-closed Experiment 1 identity checks inside the Rust gossip, Stratum, and
+  standalone block-submission paths, including continuous eligibility shutdown,
+  pre-persistence share checks, and checkpoint-authorized historical replay,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
 - signed TCP gossip mesh with inventory sync, peer exchange, rebroadcast, rate limits, and private-network defaults,
@@ -379,6 +385,9 @@ Working prototype pieces:
 Not done yet:
 
 - independent external review and multi-node soak testing of Experiment 1,
+- a separately activated successor consensus profile if the experiment requires
+  Bitcoin block validity itself, rather than P2Pool admission and payouts, to
+  depend on deterministic Idena eligibility proofs,
 - an exact public source release descriptor and a complete evidence-bound
   fresh-host service installation path,
 - two independent matching miner-registry builds, a verified ownerless Idena
@@ -467,6 +476,22 @@ scripts/pohw-experiment-package.sh --output-root output
 ```
 
 The archive includes the runbook, source, scripts, tests, env template, `QUICKSTART.md`, `MANIFEST.json`, and `SHA256SUMS`; it excludes local datadirs, build output, generated frontend/WASM artifacts, env files, keys, cookies, logs, and reports.
+
+For governance release evidence, package the immutable full commit rather than
+the current working tree:
+
+```sh
+COMMIT="$(git rev-parse HEAD)"
+cargo run --locked -p governance-cli -- package-commit \
+  --git-repository "$PWD" \
+  --commit "$COMMIT" \
+  --repository P2poolBTC \
+  --output-dir /tmp/p2pool-exact-source
+```
+
+This emits a deterministic source CID/CAR and `SourceCommitReceiptV1`. It does
+not authorize deployment; independent builders and public pin operators must
+reproduce and attest the exact content.
 
 ## Quick Start
 
@@ -989,7 +1014,12 @@ cargo run -p p2pool-node -- submit-stratum-block-candidate \
   --rpc-cookie-file ~/.bitcoin/.cookie
 ```
 
-The submit command refuses incomplete artifacts, candidates that do not meet the advertised block target, and Bitcoin mainnet RPC unless `--allow-mainnet-submit` is explicitly set.
+The submit command refuses incomplete artifacts, candidates that do not meet the
+advertised block target, and Bitcoin mainnet RPC unless
+`--allow-mainnet-submit` is explicitly set. When RPC reports Experiment 1
+`chain=pohw`, it additionally requires `--datadir`, `--miner-id`,
+`--idena-anchor-policy`, and `--idena-api-key-file`; it verifies the ownerless
+registry and current Newbie/Verified/Human state before calling `submitblock`.
 
 For a LAN miner or rented hashrate endpoint, bind to the node IP and require a password file:
 

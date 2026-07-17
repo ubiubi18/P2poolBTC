@@ -2,6 +2,8 @@
 Description=PoHW P2Pool local Stratum mining adapter (SD-card runtime)
 Wants=network-online.target pohw-gossip-mesh.service
 After=network-online.target pohw-gossip-mesh.service pohw-fork-chain-node.service
+StartLimitIntervalSec=5min
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -10,7 +12,7 @@ Group=ubuntu
 WorkingDirectory=/opt/p2pool
 EnvironmentFile=-/etc/pohw/p2pool.env
 ExecStart=/opt/p2pool/scripts/pohw-run-mining-adapter.sh
-Restart=always
+Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true

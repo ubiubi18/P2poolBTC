@@ -14,7 +14,14 @@
     "registry_registration_identity_callback_required": true,
     "checkpoint_vote_identity_callback_required": true,
     "production_idena_wasm_runtime_gate_required": true,
+    "historical_replay_requires_finalized_checkpoint": true,
+    "candidate_submission_identity_required": true,
     "bound_policy_replacement_allowed": false
+  },
+  "identity_admission_scope": {
+    "p2pool_runtime_enforced": true,
+    "bitcoin_block_consensus_enforced": false,
+    "successor_consensus_profile_required": true
   },
   "registry_source_candidate": {
     "path": "compatibility/experiment-1-miner-registry-candidate.json",

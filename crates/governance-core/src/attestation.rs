@@ -14,6 +14,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 const SHA2_256_CODE: u64 = 0x12;
 const CORE_ARTIFACT_SET_DOMAIN: &[u8] = b"IDENA_GOV_CORE_ARTIFACT_SET_V1\0";
+const MIGRATION_REHEARSAL_DIGEST_DOMAIN: &[u8] = b"IDENA_GOV_MIGRATION_REHEARSAL_V1\0";
 const MAX_PORTABLE_ARTIFACT_SIZE: u64 = 9_007_199_254_740_991;
 const MAX_REPOSITORY_CIDS: usize = 64;
 const MAX_TOOL_VERSIONS: usize = 256;
@@ -27,6 +28,7 @@ const IDENA_RECOVERABLE_SIGNATURE_HEX_LEN: usize = 130;
 pub const DETACHED_IDENA_SIGNATURE_AUTHENTICATION: &str = "detached-idena-signature-v1";
 pub const ON_CHAIN_SUBMITTER_AUTHENTICATION: &str = "on-chain-submitter";
 pub const EXTERNAL_AUDIT_ATTESTATION_DOMAIN: &str = "external_audit_v1";
+pub const MIGRATION_REHEARSAL_ATTESTATION_DOMAIN: &str = "migration_rehearsal_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -171,6 +173,40 @@ pub struct ExternalAuditAttestationV1 {
     pub unresolved_critical_findings: u32,
     pub unresolved_high_findings: u32,
     pub verdict: ExternalAuditVerdictV1,
+    pub creation_block_or_timestamp: u64,
+    pub authentication: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationRehearsalAttestationV1 {
+    pub schema_version: u16,
+    pub parent_ecosystem_cid: String,
+    pub candidate_ecosystem_cid: String,
+    pub scope_evidence_cid: String,
+    pub network_id: String,
+    pub governance_contract_address: String,
+    pub governance_contract_code_cid: String,
+    pub deployment_tx_hash: String,
+    pub deployment_block: u64,
+    pub execution_proposal_id: String,
+    pub execution_tx_hash: String,
+    pub execution_block: u64,
+    pub observed_candidate_ecosystem_cid: String,
+    pub rollback_proposal_id: String,
+    pub rollback_tx_hash: String,
+    pub rollback_block: u64,
+    pub observed_rollback_ecosystem_cid: String,
+    pub state_snapshot_cid: String,
+    pub event_log_cid: String,
+    pub command_log_cid: String,
+    pub legacy_compatibility_report_cid: String,
+    pub governance_disabled_report_cid: String,
+    pub rehearsal_digest: String,
+    pub tests_passed: bool,
+    pub operator_identity: String,
+    pub runtime_family: String,
+    pub architecture: String,
     pub creation_block_or_timestamp: u64,
     pub authentication: String,
 }
@@ -446,6 +482,22 @@ pub fn verify_external_audit_attestation_car(
     verify_package(bytes, validate_external_audit)
 }
 
+pub fn package_migration_rehearsal_attestation(
+    mut value: MigrationRehearsalAttestationV1,
+) -> Result<AttestationPackage<MigrationRehearsalAttestationV1>, AttestationError> {
+    value.governance_contract_address =
+        normalize_attestation_address(&value.governance_contract_address)?;
+    value.operator_identity = normalize_attestation_address(&value.operator_identity)?;
+    validate_migration_rehearsal(&value)?;
+    package(value)
+}
+
+pub fn verify_migration_rehearsal_attestation_car(
+    bytes: &[u8],
+) -> Result<AttestationPackage<MigrationRehearsalAttestationV1>, AttestationError> {
+    verify_package(bytes, validate_migration_rehearsal)
+}
+
 pub fn package_identity_metrics_attestation(
     mut value: IdentityMetricsAttestationV1,
 ) -> Result<AttestationPackage<IdentityMetricsAttestationV1>, AttestationError> {
@@ -689,6 +741,7 @@ fn validate_attestation_kind(value: &str) -> Result<(), AttestationError> {
             | "build_attestation_v1"
             | "data_availability_v1"
             | EXTERNAL_AUDIT_ATTESTATION_DOMAIN
+            | MIGRATION_REHEARSAL_ATTESTATION_DOMAIN
     ) {
         return invalid("unsupported attestation authentication kind");
     }
@@ -803,6 +856,117 @@ fn validate_external_audit(value: &ExternalAuditAttestationV1) -> Result<(), Att
         return invalid(
             "a passing external audit cannot contain unresolved high or critical findings",
         );
+    }
+    validate_authentication(&value.authentication)
+}
+
+pub fn migration_rehearsal_digest(
+    value: &MigrationRehearsalAttestationV1,
+) -> Result<String, AttestationError> {
+    let mut hasher = Sha256::new();
+    hasher.update(MIGRATION_REHEARSAL_DIGEST_DOMAIN);
+    for (field, label) in [
+        (&value.parent_ecosystem_cid, "parent ecosystem CID"),
+        (&value.candidate_ecosystem_cid, "candidate ecosystem CID"),
+        (&value.scope_evidence_cid, "scope evidence CID"),
+        (&value.network_id, "network id"),
+        (
+            &value.governance_contract_address,
+            "governance contract address",
+        ),
+        (
+            &value.governance_contract_code_cid,
+            "governance contract code CID",
+        ),
+        (&value.deployment_tx_hash, "deployment transaction hash"),
+        (&value.execution_proposal_id, "execution proposal id"),
+        (&value.execution_tx_hash, "execution transaction hash"),
+        (
+            &value.observed_candidate_ecosystem_cid,
+            "observed candidate ecosystem CID",
+        ),
+        (&value.rollback_proposal_id, "rollback proposal id"),
+        (&value.rollback_tx_hash, "rollback transaction hash"),
+        (
+            &value.observed_rollback_ecosystem_cid,
+            "observed rollback ecosystem CID",
+        ),
+        (&value.state_snapshot_cid, "state snapshot CID"),
+        (&value.event_log_cid, "event log CID"),
+    ] {
+        update_length_prefixed(&mut hasher, field.as_bytes(), label)?;
+    }
+    hasher.update(value.deployment_block.to_be_bytes());
+    hasher.update(value.execution_block.to_be_bytes());
+    hasher.update(value.rollback_block.to_be_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_migration_rehearsal(
+    value: &MigrationRehearsalAttestationV1,
+) -> Result<(), AttestationError> {
+    if value.schema_version != 1 {
+        return invalid("schemaVersion must be 1");
+    }
+    for (cid, field) in [
+        (&value.parent_ecosystem_cid, "parentEcosystemCid"),
+        (&value.candidate_ecosystem_cid, "candidateEcosystemCid"),
+        (&value.scope_evidence_cid, "scopeEvidenceCid"),
+        (
+            &value.observed_candidate_ecosystem_cid,
+            "observedCandidateEcosystemCid",
+        ),
+        (
+            &value.observed_rollback_ecosystem_cid,
+            "observedRollbackEcosystemCid",
+        ),
+    ] {
+        validate_dag_cbor_cid(cid, field)?;
+    }
+    validate_raw_cid(
+        &value.governance_contract_code_cid,
+        "governanceContractCodeCid",
+    )?;
+    for cid in [
+        &value.state_snapshot_cid,
+        &value.event_log_cid,
+        &value.command_log_cid,
+        &value.legacy_compatibility_report_cid,
+        &value.governance_disabled_report_cid,
+    ] {
+        validate_content_cid(cid)?;
+    }
+    validate_lower_label(&value.network_id, 80, "networkId")?;
+    validate_lower_label(&value.runtime_family, 31, "runtimeFamily")?;
+    validate_lower_label(&value.architecture, 31, "architecture")?;
+    normalize_attestation_address(&value.governance_contract_address)?;
+    normalize_attestation_address(&value.operator_identity)?;
+    for (digest, field) in [
+        (&value.deployment_tx_hash, "deploymentTxHash"),
+        (&value.execution_proposal_id, "executionProposalId"),
+        (&value.execution_tx_hash, "executionTxHash"),
+        (&value.rollback_proposal_id, "rollbackProposalId"),
+        (&value.rollback_tx_hash, "rollbackTxHash"),
+        (&value.rehearsal_digest, "rehearsalDigest"),
+    ] {
+        validate_sha256(digest)?;
+        if digest.bytes().all(|byte| byte == b'0') {
+            return invalid(&format!("{field} cannot be the zero digest"));
+        }
+    }
+    if value.observed_candidate_ecosystem_cid != value.candidate_ecosystem_cid {
+        return invalid("observedCandidateEcosystemCid does not match the candidate");
+    }
+    if value.observed_rollback_ecosystem_cid != value.parent_ecosystem_cid {
+        return invalid("observedRollbackEcosystemCid does not restore the parent");
+    }
+    if value.deployment_block >= value.execution_block
+        || value.execution_block >= value.rollback_block
+    {
+        return invalid("deployment, execution, and rollback blocks must be strictly ordered");
+    }
+    if migration_rehearsal_digest(value)? != value.rehearsal_digest {
+        return invalid("rehearsalDigest does not match the deployed migration transition");
     }
     validate_authentication(&value.authentication)
 }
@@ -1334,6 +1498,73 @@ mod tests {
         assert!(matches!(
             package_build_attestation(value),
             Err(AttestationError::Invalid(message)) if message.contains("coreArtifactDigest")
+        ));
+    }
+
+    fn migration_rehearsal_attestation() -> MigrationRehearsalAttestationV1 {
+        let mut value = MigrationRehearsalAttestationV1 {
+            schema_version: 1,
+            parent_ecosystem_cid: cid("parent"),
+            candidate_ecosystem_cid: cid("candidate"),
+            scope_evidence_cid: cid("scope"),
+            network_id: "idena-governance-testnet-1".to_string(),
+            governance_contract_address: format!("0x{}", "02".repeat(20)),
+            governance_contract_code_cid: raw_cid("governance-wasm"),
+            deployment_tx_hash: "11".repeat(32),
+            deployment_block: 100,
+            execution_proposal_id: "22".repeat(32),
+            execution_tx_hash: "33".repeat(32),
+            execution_block: 200,
+            observed_candidate_ecosystem_cid: cid("candidate"),
+            rollback_proposal_id: "44".repeat(32),
+            rollback_tx_hash: "55".repeat(32),
+            rollback_block: 300,
+            observed_rollback_ecosystem_cid: cid("parent"),
+            state_snapshot_cid: cid("state-snapshot"),
+            event_log_cid: raw_cid("event-log"),
+            command_log_cid: raw_cid("command-log"),
+            legacy_compatibility_report_cid: raw_cid("legacy-compatibility"),
+            governance_disabled_report_cid: raw_cid("governance-disabled"),
+            rehearsal_digest: "66".repeat(32),
+            tests_passed: true,
+            operator_identity: format!("0x{}", "03".repeat(20)),
+            runtime_family: "linux".to_string(),
+            architecture: "x86_64".to_string(),
+            creation_block_or_timestamp: 301,
+            authentication: DETACHED_IDENA_SIGNATURE_AUTHENTICATION.to_string(),
+        };
+        value.rehearsal_digest = migration_rehearsal_digest(&value).unwrap();
+        value
+    }
+
+    #[test]
+    fn migration_rehearsal_binds_execute_and_rollback_observations() {
+        let value = migration_rehearsal_attestation();
+        let package = package_migration_rehearsal_attestation(value.clone()).unwrap();
+        let verified = verify_migration_rehearsal_attestation_car(&package.car_bytes).unwrap();
+        assert_eq!(verified.value, value);
+
+        let mut substituted = value.clone();
+        substituted.rollback_tx_hash = "77".repeat(32);
+        assert!(matches!(
+            package_migration_rehearsal_attestation(substituted),
+            Err(AttestationError::Invalid(message)) if message.contains("rehearsalDigest")
+        ));
+
+        let mut no_rollback = value.clone();
+        no_rollback.observed_rollback_ecosystem_cid = no_rollback.candidate_ecosystem_cid.clone();
+        no_rollback.rehearsal_digest = migration_rehearsal_digest(&no_rollback).unwrap();
+        assert!(matches!(
+            package_migration_rehearsal_attestation(no_rollback),
+            Err(AttestationError::Invalid(message)) if message.contains("restore the parent")
+        ));
+
+        let mut unordered = value;
+        unordered.rollback_block = unordered.execution_block;
+        unordered.rehearsal_digest = migration_rehearsal_digest(&unordered).unwrap();
+        assert!(matches!(
+            package_migration_rehearsal_attestation(unordered),
+            Err(AttestationError::Invalid(message)) if message.contains("strictly ordered")
         ));
     }
 
