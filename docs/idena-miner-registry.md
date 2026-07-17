@@ -64,9 +64,15 @@ miner:<lowercase-Idena-address-without-0x>:<sequence>
 
 ## Security Boundary
 
-This design prevents a miner from claiming work before the miner's public
-contract registration. It also prevents arbitrary anchor reuse, policy
-substitution, block-hash substitution, and live submission with stale anchors.
+The registry prevents a miner from publishing an accepted registration whose
+contract lower-bound comes after the registration anchor. The active Experiment
+1 share format does not prove when a Bitcoin header was ground: registration
+alone cannot stop a miner from precomputing work and assigning it later. The
+inactive share-work successor closes that P2Pool-layer gap by committing the
+parent, target, snapshot, and finalized anchor into the coinbase Merkle root;
+see [`share-work-binding.md`](share-work-binding.md). Anchor-policy checks also
+prevent arbitrary anchor reuse, policy substitution, block-hash substitution,
+and live submission with stale anchors.
 
 It does not prove when every historical share was first disclosed. A miner may
 withhold content before a checkpoint finalizes, and a finalized checkpoint is

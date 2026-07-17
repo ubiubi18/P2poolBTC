@@ -149,7 +149,7 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
             }
         )
         policy["registry_source_candidate"]["deployment_authorized"] = True
-        policy["status"] = MODULE.READY_STATUS
+        policy["status"] = MODULE.BLOCKED_STATUS
 
         anchor = {
             "schema_version": 2,
@@ -296,7 +296,7 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.LaunchPolicyError, "unexpected.*digest"):
             MODULE.validate_readiness_report(report, self.DAG_CBOR_CID)
 
-    def test_complete_strict_evidence_can_satisfy_policy(self):
+    def test_complete_strict_evidence_still_requires_successor_consensus_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             policy, car_path, evidence_path, verifier_path, anchor_path = (
@@ -339,11 +339,19 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
                 text=True,
             )
             if platform.system() == "Linux":
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(MODULE.READY_STATUS, result.stdout)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("launch requires ready-for-public-join", result.stderr)
             else:
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("supported only on Linux", result.stderr)
+
+            policy["status"] = MODULE.READY_STATUS
+            with self.assertRaisesRegex(
+                MODULE.LaunchPolicyError, "successor consensus profile is required"
+            ):
+                self.validate_ready(
+                    policy, car_path, evidence_path, verifier_path, anchor_path
+                )
 
     def test_finalized_boolean_is_not_deployment_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

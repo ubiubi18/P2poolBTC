@@ -4,7 +4,8 @@ use crate::idena_anchor_verifier::IdenaAnchorVerifier;
 use crate::local_node;
 use crate::peer_policy::{PeerDecision, PeerPolicy, PeerPolicyConfig};
 use anyhow::{bail, Context, Result};
-use pohw_core::gossip::GossipEnvelope;
+use pohw_core::gossip::{GossipEnvelope, GOSSIP_PROTOCOL_VERSION};
+use pohw_core::share_work::ShareWorkBindingPolicyV1;
 use pohw_core::sharechain::SharechainMessage;
 use pohw_core::sharechain_state::ApplyOutcome;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,7 @@ pub struct WorkTemplateAdmissionConfig {
     pub validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy,
     pub allow_pohw_time_dependent_bits: bool,
     pub idena_anchor_verifier: Option<IdenaAnchorVerifier>,
+    pub share_work_binding_policy: Option<ShareWorkBindingPolicyV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -438,7 +440,7 @@ pub async fn run_gossip_mesh(
     validate_gossip_server_config(&server_config)?;
     validate_gossip_peer_loop_config(&peer_loop_config)?;
     let inbound_admission = peer_loop_config.work_template_admission.clone();
-    bind_idena_anchor_policy_if_configured(&server_config.datadir, inbound_admission.as_ref())
+    bind_admission_policies_if_configured(&server_config.datadir, inbound_admission.as_ref())
         .await?;
     tokio::select! {
         result = run_gossip_server_with_admission(server_config, inbound_admission) => result,
@@ -1167,7 +1169,7 @@ pub async fn sync_gossip_from_peer_with_work_template_admission(
     max_age_seconds: i64,
     work_template_admission: &WorkTemplateAdmissionConfig,
 ) -> Result<GossipSyncSummary> {
-    bind_idena_anchor_policy_if_configured(datadir, Some(work_template_admission)).await?;
+    bind_admission_policies_if_configured(datadir, Some(work_template_admission)).await?;
     sync_gossip_from_peer_inner(
         datadir,
         addr,
@@ -1179,7 +1181,7 @@ pub async fn sync_gossip_from_peer_with_work_template_admission(
     .await
 }
 
-async fn bind_idena_anchor_policy_if_configured(
+async fn bind_admission_policies_if_configured(
     datadir: &Path,
     admission: Option<&WorkTemplateAdmissionConfig>,
 ) -> Result<()> {
@@ -1190,6 +1192,10 @@ async fn bind_idena_anchor_policy_if_configured(
             .context("Idena miner registry deployment verification failed")?;
         local_node::bind_idena_anchor_policy(datadir, verifier.policy())
             .context("failed to bind Idena anchor policy to sharechain datadir")?;
+    }
+    if let Some(policy) = admission.and_then(|value| value.share_work_binding_policy.as_ref()) {
+        local_node::bind_share_work_binding_policy(datadir, policy)
+            .context("failed to bind share-work policy to sharechain datadir")?;
     }
     Ok(())
 }
@@ -1381,6 +1387,15 @@ async fn fetch_append_gossip_envelope_and_missing_parents(
                         continue;
                     }
                 };
+                if let Err(err) =
+                    authenticate_durable_envelope(datadir, &envelope, max_future_skew_seconds)
+                {
+                    result.failures.push(GossipSyncFailure {
+                        message_hash,
+                        error: format!("fetched envelope authentication failed: {err:#}"),
+                    });
+                    continue;
+                }
 
                 if depth > 0 && !matches!(&envelope.message, SharechainMessage::Share(_)) {
                     result.failures.push(GossipSyncFailure {
@@ -1598,6 +1613,8 @@ async fn fetch_append_missing_miner_registrations(
             bail!("peer returned no miner registration envelope for {miner_id}");
         };
         result.fetched_count += 1;
+        authenticate_durable_envelope(datadir, &registration_envelope, max_future_skew_seconds)
+            .context("fetched miner registration envelope authentication failed")?;
         let registration_message_hash = registration_envelope.message.message_hash();
         let append = append_gossip_envelope_after_template_admission_with_authorization(
             datadir,
@@ -1660,6 +1677,8 @@ async fn fetch_append_missing_bitcoin_work_template(
         bail!("peer returned no Bitcoin work template envelope for {template_hash}");
     };
     result.fetched_count += 1;
+    authenticate_durable_envelope(datadir, &template_envelope, max_future_skew_seconds)
+        .context("fetched Bitcoin work template envelope authentication failed")?;
     let template_message_hash = template_envelope.message.message_hash();
     fetch_append_missing_miner_registrations(
         datadir,
@@ -1727,8 +1746,7 @@ async fn append_gossip_envelope_after_template_admission_with_authorization(
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
     authorization: HistoricalReplayAuthorization,
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
-    let now = current_unix_timestamp()?;
-    envelope.verify_durable_at(now, max_future_skew_seconds)?;
+    authenticate_durable_envelope(datadir, &envelope, max_future_skew_seconds)?;
     let (historical_chain_material, require_current_idena_eligibility) =
         historical_admission_flags(authorization);
     admit_gossip_bitcoin_material(
@@ -1751,6 +1769,7 @@ async fn append_live_gossip_envelope_after_template_admission(
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
     let now = current_unix_timestamp()?;
     envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+    verify_envelope_network_binding(datadir, &envelope)?;
     admit_gossip_bitcoin_material(
         datadir,
         &envelope.message,
@@ -1760,6 +1779,27 @@ async fn append_live_gossip_envelope_after_template_admission(
     )
     .await?;
     local_node::append_gossip_envelope(datadir, envelope, max_future_skew_seconds, max_age_seconds)
+}
+
+fn authenticate_durable_envelope(
+    datadir: &Path,
+    envelope: &GossipEnvelope,
+    max_future_skew_seconds: i64,
+) -> Result<()> {
+    envelope.verify_durable_at(current_unix_timestamp()?, max_future_skew_seconds)?;
+    verify_envelope_network_binding(datadir, envelope)
+}
+
+fn verify_envelope_network_binding(datadir: &Path, envelope: &GossipEnvelope) -> Result<()> {
+    match local_node::gossip_network_id(datadir)? {
+        Some(network_id) => envelope
+            .verify_network(&network_id)
+            .context("gossip envelope is not bound to the datadir network"),
+        None if envelope.protocol_version == GOSSIP_PROTOCOL_VERSION => Ok(()),
+        None => {
+            bail!("network-bound gossip envelope requires an initialized gossip network datadir")
+        }
+    }
 }
 
 async fn admit_gossip_bitcoin_material(
@@ -1882,6 +1922,11 @@ async fn admit_bitcoin_share(
     share
         .verify_mining_signature_for_template(&registration.mining_pubkey_hex, &template)
         .context("share signature or proof-of-work fields are invalid")?;
+    if let Some(policy) = admission.share_work_binding_policy.as_ref() {
+        share
+            .verify_required_work_binding(&template, policy)
+            .context("share does not satisfy the successor work-binding policy")?;
+    }
     if let Some(verifier) = admission.idena_anchor_verifier.as_ref() {
         state
             .validate_idena_anchor_policy(
@@ -3078,6 +3123,44 @@ mod tests {
         path
     }
 
+    #[tokio::test]
+    async fn reusable_admission_path_refuses_unbound_successor_policy() {
+        let datadir = temp_dir("successor-policy-bind");
+        let network_id = "ab".repeat(32);
+        local_node::initialize_gossip_network(&datadir, &network_id).unwrap();
+        let admission = WorkTemplateAdmissionConfig {
+            bitcoin_rpc_client: None,
+            fork_chain_client: None,
+            validation_policy: bitcoin_rpc::BitcoinWorkTemplateValidationPolicy {
+                allow_mutable_time: false,
+                max_time_drift_seconds: 7_200,
+                expected_header_merkle_root_hex: None,
+                allow_unverified_merkle_root: false,
+            },
+            allow_pohw_time_dependent_bits: false,
+            idena_anchor_verifier: None,
+            share_work_binding_policy: Some(ShareWorkBindingPolicyV1 {
+                schema_version: 1,
+                experiment_id: "p2poolbtc-experiment-1".to_string(),
+                fork_activation_id: "11".repeat(32),
+                sharechain_network_id: network_id,
+                require_binding_from_genesis: true,
+            }),
+        };
+
+        let err = bind_admission_policies_if_configured(&datadir, Some(&admission))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("requires a bound Idena anchor policy"),
+            "unexpected error: {err:#}"
+        );
+        assert!(local_node::read_bound_share_work_binding_policy(&datadir)
+            .unwrap()
+            .is_none());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
     #[test]
     fn local_share_availability_fails_closed_on_corrupt_replay() {
         let datadir = temp_dir("share-availability-corrupt-replay");
@@ -3202,6 +3285,24 @@ mod tests {
         .unwrap();
         envelope.sign(keypair).unwrap();
         envelope
+    }
+
+    #[test]
+    fn fetched_envelope_authentication_precedes_dependency_processing() {
+        let datadir = temp_dir("fetched-envelope-authentication");
+        let keypair = keypair(7);
+        let mut invalid = envelope(&keypair);
+        invalid.nonce_hex = "66".repeat(32);
+        let error = authenticate_durable_envelope(&datadir, &invalid, 300).unwrap_err();
+        assert!(format!("{error:#}").contains("signature"));
+
+        let network_id = "11".repeat(32);
+        local_node::initialize_gossip_network(&datadir, &network_id).unwrap();
+        let wrong_network =
+            envelope_for_network_message(&"22".repeat(32), invalid.message.clone(), &keypair, 9);
+        let error = authenticate_durable_envelope(&datadir, &wrong_network, 300).unwrap_err();
+        assert!(format!("{error:#}").contains("datadir network"));
+        fs::remove_dir_all(datadir).unwrap();
     }
 
     #[tokio::test]
@@ -3357,6 +3458,7 @@ mod tests {
                 idena_snapshot_proof_root: proof_root.to_string(),
                 hashrate_score_delta: 1,
                 parent_share_hash: parent_hash.to_string(),
+                work_binding: None,
                 mining_signature_hex: String::new(),
             };
             share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
@@ -3634,7 +3736,37 @@ mod tests {
             },
             allow_pohw_time_dependent_bits: false,
             idena_anchor_verifier: None,
+            share_work_binding_policy: None,
         };
+        let mut successor_admission = admission.clone();
+        successor_admission.share_work_binding_policy = Some(ShareWorkBindingPolicyV1 {
+            schema_version: 1,
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            fork_activation_id: "12".repeat(32),
+            sharechain_network_id: network_id.clone(),
+            require_binding_from_genesis: true,
+        });
+        let successor_policy = Arc::new(Mutex::new(
+            PeerPolicy::new(server_config.peer_policy.clone()).unwrap(),
+        ));
+        let successor_rejected = submit_response(
+            handle_gossip_line_with_admission(
+                &line,
+                ip,
+                &server_config,
+                successor_policy,
+                Some(&successor_admission),
+            )
+            .await,
+        );
+        assert!(!successor_rejected.accepted);
+        assert!(successor_rejected
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("work-binding"));
+        assert!(local_node::gossip_inventory(&datadir).unwrap().is_empty());
+
         let admission_policy = Arc::new(Mutex::new(
             PeerPolicy::new(server_config.peer_policy.clone()).unwrap(),
         ));
@@ -3859,6 +3991,7 @@ mod tests {
             },
             allow_pohw_time_dependent_bits: false,
             idena_anchor_verifier: None,
+            share_work_binding_policy: None,
         };
 
         let summary = sync_gossip_from_peer_with_work_template_admission(
@@ -3942,6 +4075,7 @@ mod tests {
             },
             allow_pohw_time_dependent_bits: false,
             idena_anchor_verifier: None,
+            share_work_binding_policy: None,
         };
 
         let summary = sync_gossip_from_peer_with_work_template_admission(
@@ -4006,6 +4140,7 @@ mod tests {
             },
             allow_pohw_time_dependent_bits: false,
             idena_anchor_verifier: None,
+            share_work_binding_policy: None,
         };
 
         let mut known_hashes = local_node::gossip_inventory(&client_datadir)

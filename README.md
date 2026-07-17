@@ -58,6 +58,28 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > during review. A live join must use the later exact release commit and the
 > independently published CID, CAR digest, build evidence, and anchor policy.
 
+> **Experiment 1 cannot become public-join-ready.** Its Idena eligibility rules
+> are enforced by P2Pool, Stratum, gossip, and submission services, not by the
+> Bitcoin fork consensus engine. A node bypassing those services can construct
+> blocks without an eligible Idena identity. The launch-policy verifier therefore
+> keeps this activation at `blocked-release-readiness` even when every build,
+> audit, deployment, and availability artifact passes. Public joining requires a
+> separately reviewed successor manifest, network/activation ID, migration plan,
+> and consensus implementation; existing Experiment 1 history is never silently
+> reinterpreted.
+
+> **Share-work successor candidate:** the repository now implements a distinct,
+> inactive sharechain profile in which each Bitcoin header commits through a
+> `P2SW1` coinbase output to its parent share, assigned target, Idena snapshot,
+> finalized Idena anchor, and policy. Peer admission and replay verify the
+> coinbase Merkle proof, and ordinary pool shares no longer incorrectly require
+> the Bitcoin block target. The candidate has a new network and activation ID,
+> requires a fresh datadir, and cannot launch while its manifest says
+> `experimental-candidate`. This closes retrospective share assignment inside
+> P2Pool but is not yet a Bitcoin-consensus identity rule, so it does not remove
+> the public-join block. See
+> [Share-work binding successor](docs/share-work-binding.md).
+
 > **Bitcoin and Idena risk remain real.** Fork coins have no promised value,
 > but inherited Bitcoin scripts use mainnet keys; exposing one can lose real
 > BTC. A participant saying that an address is empty does not make key reuse
@@ -126,17 +148,18 @@ peer, start a service, or mine while the public-join interlock is blocked.
 Its Community Review Day section gives separate copy-pasteable tracks for an
 observer, an independent miner-registry builder, and a second-node host
 operator, with the expected fail-closed result for each track.
-After the interlock opens, the same state machine accepts only a DAO-selected
-ecosystem CID plus matching CAR/source/runtime artifacts and can produce a
-participant-specific live proof. Historical global sharechain activity does
-not count as newcomer success.
+A successor onboarding state machine may accept only a DAO-selected ecosystem
+CID plus matching CAR/source/runtime artifacts and produce a
+participant-specific live proof. It must use a new activation and consensus
+profile; changing only this repository's Experiment 1 policy is insufficient.
+Historical global sharechain activity does not count as newcomer success.
 
 Choose the path that matches what you are trying to do:
 
 | Goal | What is safe now | Stop condition |
 | --- | --- | --- |
 | Review or rehearse | Inspect the public candidate branch, verify the blocked policy and manifest, then build and test locally without credentials or live services | Do not connect Core, gossip, Stratum, an Idena identity, or mining hardware |
-| Join the live experiment | Wait for the policy verifier to print `ready-for-public-join`, independently read the canonical ecosystem CID from Idena governance, then run the exact source/CAR/artifact and local live-proof procedure | Never override the interlock or substitute a moving branch, self-reported CID, or unattested executable |
+| Join the live experiment | Wait for a separately activated consensus-enforced successor whose policy verifier prints `ready-for-public-join`, independently read its canonical ecosystem CID from Idena governance, then run its exact source/CAR/artifact and local live-proof procedure | Experiment 1 itself cannot open; never override its interlock or substitute a moving branch, self-reported CID, or unattested executable |
 | Create a separate experiment | Use the operator runbook and generate a new manifest and activation ID intentionally | Never advertise a separately generated network as the existing Experiment 1 |
 
 ### Review And Rehearse Now
@@ -348,7 +371,10 @@ Working prototype pieces:
 - live fork templates and fork-only block submission wired into the Stratum adapter,
 - fail-closed Experiment 1 identity checks inside the Rust gossip, Stratum, and
   standalone block-submission paths, including continuous eligibility shutdown,
-  pre-persistence share checks, and checkpoint-authorized historical replay,
+  pre-persistence share checks, signed candidate/miner/checkpoint binding,
+  checkpoint-authorized historical replay, and durable post-acceptance
+  sharechain-publication recovery; these are runtime policy controls, not Bitcoin
+  block-consensus rules,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
 - signed TCP gossip mesh with inventory sync, peer exchange, rebroadcast, rate limits, and private-network defaults,
@@ -1002,9 +1028,9 @@ cargo run -p p2pool-node -- build-stratum-block-candidate \
 
 The artifact contains the exact coinbase tx, header, block hash, target check, and complete `block_hex` when the job carries the raw non-coinbase transactions. Jobs built by this repository from Bitcoin RPC include that transaction data. Manually supplied legacy jobs with merkle branches but no transaction data remain audit-only and produce an incomplete artifact.
 
-When `run-mining-adapter` has `--block-candidate-dir`, every accepted submit that meets the advertised block target is also written as `block-<hash>.json` in that directory. Existing matching files are kept; different content at the same path is refused. The Pi wrapper enables this by default under `$POHW_DATADIR/block-candidates`, configurable with `POHW_STRATUM_BLOCK_CANDIDATE_DIR`.
+When `run-mining-adapter` has `--block-candidate-dir`, every accepted submit that meets the advertised block target is also written as `block-<hash>.json` in that directory. The adapter embeds the exact signed work template, signed share, miner key binding, and finalized Idena checkpoint used for authorization. Existing matching files are kept; different content at the same path is refused. The Pi wrapper enables this by default under `$POHW_DATADIR/block-candidates`, configurable with `POHW_STRATUM_BLOCK_CANDIDATE_DIR`.
 
-Add `--auto-submit-blocks` only when the job coinbase and RPC target are ready for real block submission. A complete target-meeting candidate is sent to `submitblock` immediately; the result is logged, while an RPC rejection or transient error does not erase the accepted share or its candidate artifact. The Pi setting is the explicit opt-in `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`.
+Add `--auto-submit-blocks` only when the job coinbase and RPC target are ready for real block submission. Before `submitblock`, the adapter atomically writes a durable journal under `$POHW_DATADIR/pending-block-publications`; the journal is capped at 128 candidates and refuses new work when full. If Core accepts the block but local sharechain publication is interrupted, startup and a 30-second retry loop authenticate the journal and finish publication. Recovery may publish a full block proven active by Core using historical proofs, but a header-only, side-chain, or unknown candidate must pass current miner, template-anchor, and checkpoint eligibility before any submission attempt. A definitive consensus rejection removes the journal. Transport errors and Bitcoin Core `inconclusive` outcomes preserve it for a later accepted-block check or retry. The Pi setting is the explicit opt-in `POHW_STRATUM_AUTO_SUBMIT_BLOCKS=true`.
 
 Submit a complete target-meeting candidate to a local fork/testnet Bitcoin RPC:
 
@@ -1017,9 +1043,16 @@ cargo run -p p2pool-node -- submit-stratum-block-candidate \
 The submit command refuses incomplete artifacts, candidates that do not meet the
 advertised block target, and Bitcoin mainnet RPC unless
 `--allow-mainnet-submit` is explicitly set. When RPC reports Experiment 1
-`chain=pohw`, it additionally requires `--datadir`, `--miner-id`,
-`--idena-anchor-policy`, and `--idena-api-key-file`; it verifies the ownerless
-registry and current Newbie/Verified/Human state before calling `submitblock`.
+`chain=pohw`, it additionally requires `--datadir`, `--idena-anchor-policy`, and
+`--idena-api-key-file`. `--miner-id` is optional, but when supplied it must match
+the miner signed into the candidate. The command verifies the exact signed
+template/share/block binding, ownerless registry, current
+Newbie/Verified/Human state, fresh Idena anchor, latest finalized checkpoint,
+and that the signed template and share are already present in local durable
+history before calling `submitblock`. A standalone artifact produced by
+`build-stratum-block-candidate` has no signed publication binding and is therefore
+audit-only for an Idena-gated chain; use the adapter-persisted candidate for manual
+submission.
 
 For a LAN miner or rented hashrate endpoint, bind to the node IP and require a password file:
 

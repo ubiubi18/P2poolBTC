@@ -1163,17 +1163,25 @@ def validate(
         raise LaunchPolicyError(
             "registry deployment finality flag does not match verified deployment evidence"
         )
-    ready = (
+    release_evidence_ready = (
         all(readiness_values)
         and verified_builders >= required_builders
         and readiness_report_bound
         and deployment_finalized
         and candidate_binding.get("deployment_authorized") is True
     )
+    ready = (
+        release_evidence_ready
+        and require_bool(admission_scope, "bitcoin_block_consensus_enforced") is True
+    )
     status = policy.get("status")
     if ready and status != READY_STATUS:
         raise LaunchPolicyError("all public-join gates pass but policy status is not ready")
     if not ready and status != BLOCKED_STATUS:
+        if release_evidence_ready:
+            raise LaunchPolicyError(
+                "public joining must remain blocked: Experiment 1 enforces Idena eligibility only in the P2Pool runtime; a separately activated successor consensus profile is required"
+            )
         raise LaunchPolicyError("public joining must remain blocked while any gate is incomplete")
 
     if policy_path.resolve(strict=True).parent != repo_root.resolve(strict=True) / "compatibility":

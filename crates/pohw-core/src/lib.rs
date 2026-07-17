@@ -7,6 +7,7 @@ pub mod ledger;
 pub mod merkle;
 pub mod payout;
 pub mod replay;
+pub mod share_work;
 pub mod sharechain;
 pub mod sharechain_state;
 pub mod snapshot;

@@ -1402,6 +1402,12 @@ def _missing_release_gates(policy: Mapping[str, Any]) -> list[str]:
     candidate = policy.get("registry_source_candidate")
     if not isinstance(candidate, dict) or candidate.get("deployment_authorized") is not True:
         missing.append("registry-deployment-authorization")
+    admission_scope = policy.get("identity_admission_scope")
+    if (
+        not isinstance(admission_scope, dict)
+        or admission_scope.get("bitcoin_block_consensus_enforced") is not True
+    ):
+        missing.append("successor-bitcoin-consensus-identity-enforcement")
     return sorted(set(missing))
 
 
@@ -1800,6 +1806,11 @@ def verify_release(
         and canonical_source_published
         and canonical_source_verified
         and registry_chain_verified
+        and isinstance(policy.get("identity_admission_scope"), dict)
+        and policy["identity_admission_scope"].get(
+            "bitcoin_block_consensus_enforced"
+        )
+        is True
         and policy_status == READY_POLICY_STATUS
         and not missing
     )

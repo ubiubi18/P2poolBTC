@@ -41,7 +41,7 @@ class CommunityJoinTests(unittest.TestCase):
             self.assertIn("sharechain", source)
 
         self.assertIn("Five-Step Live Journey", readme)
-        self.assertIn("Join Live Only After The Interlock Opens", guide)
+        self.assertIn("Successor-Network Template Only", guide)
         self.assertIn("uses no Idena identity signature", guide)
         self.assertIn("must not create a registration", guide)
         self.assertIn("revision-3 checkpoint height `958175`", guide)
@@ -341,7 +341,7 @@ class Experiment1CommunityGuideTests(unittest.TestCase):
         self.assertGreaterEqual(self.guide.count("--idena-anchor-policy"), 2)
         self.assertGreaterEqual(self.guide.count("--require-ready"), 2)
         self.assertIn(
-            "Do not invite people to connect miners to the live experiment yet.",
+            "Do not invite people to connect miners to the live Experiment 1 activation.",
             self.guide_prose,
         )
 

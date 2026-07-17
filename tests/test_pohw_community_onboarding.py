@@ -475,7 +475,11 @@ class CommunityOnboardingTests(unittest.TestCase):
                     run_tests=False,
                 )
             self.assertEqual(release["registry_chain_verified"], expected_ready)
-            self.assertEqual(release["public_join_ready"], expected_ready)
+            self.assertFalse(release["public_join_ready"])
+            self.assertIn(
+                "successor-bitcoin-consensus-identity-enforcement",
+                release["missing_release_gates"],
+            )
             run_attested.assert_called_once_with(
                 p2pool_node,
                 "p2pool-node",

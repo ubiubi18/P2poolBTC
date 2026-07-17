@@ -450,38 +450,20 @@ impl BitcoinRpcClient {
     pub async fn submit_block(&self, block_hex: &str) -> Result<SubmitBlockOutcome> {
         let block_hex = normalize_block_hex("block hex", block_hex)?;
         let result = self.call_value("submitblock", json!([block_hex])).await?;
-        let reject_reason = submitblock_reject_reason_from_result(result)?;
-        let status = if reject_reason.is_some() {
-            "rejected"
-        } else {
-            "accepted"
-        };
-        Ok(SubmitBlockOutcome {
-            status: status.to_string(),
-            reject_reason,
-        })
+        submitblock_outcome_from_result(result)
+    }
+
+    pub async fn block_is_active(&self, block_hash: &str) -> Result<bool> {
+        // A known header is insufficient: Core may know a header before it has
+        // received or accepted the full block. Requiring positive active-chain
+        // confirmations makes historical-only publication evidence-based.
+        Ok(self.block_confirmations(block_hash).await? > 0)
     }
 
     pub async fn block_confirmations(&self, block_hash: &str) -> Result<u32> {
         let requested_block_hash = normalize_hash_hex("requested block hash", block_hash)?;
         let block: GetBlockVerbose1Response = self.call("getblock", json!([block_hash, 1])).await?;
-        let returned_block_hash = normalize_hash_hex("block hash", &block.hash)?;
-        if returned_block_hash != requested_block_hash {
-            bail!(
-                "Bitcoin RPC returned block hash {}, expected {}",
-                returned_block_hash,
-                requested_block_hash
-            );
-        }
-        let confirmations = block.confirmations.unwrap_or(0);
-        if confirmations < 0 {
-            bail!(
-                "block {} is not on the active chain; confirmations={}",
-                block.hash,
-                confirmations
-            );
-        }
-        u32::try_from(confirmations).context("confirmations do not fit u32")
+        verified_active_chain_confirmations(&requested_block_hash, &block)
     }
 
     pub async fn confirm_coinbase_payout(
@@ -1562,6 +1544,49 @@ fn submitblock_reject_reason_from_result(value: serde_json::Value) -> Result<Opt
     }
 }
 
+fn submitblock_outcome_from_result(value: serde_json::Value) -> Result<SubmitBlockOutcome> {
+    let mut reject_reason = submitblock_reject_reason_from_result(value)?;
+    let status = match reject_reason.as_deref() {
+        None => "accepted",
+        Some("duplicate") => {
+            reject_reason = None;
+            "duplicate"
+        }
+        // Bitcoin Core uses these BIP22 results when submitblock cannot
+        // determine a final validation state. They are retryable, not proof of
+        // a consensus-invalid block.
+        Some("inconclusive" | "duplicate-inconclusive") => "ambiguous",
+        Some(_) => "rejected",
+    };
+    Ok(SubmitBlockOutcome {
+        status: status.to_string(),
+        reject_reason,
+    })
+}
+
+fn verified_active_chain_confirmations(
+    requested_block_hash: &str,
+    block: &GetBlockVerbose1Response,
+) -> Result<u32> {
+    let returned_block_hash = normalize_hash_hex("block hash", &block.hash)?;
+    if returned_block_hash != requested_block_hash {
+        bail!(
+            "Bitcoin RPC returned block hash {}, expected {}",
+            returned_block_hash,
+            requested_block_hash
+        );
+    }
+    let confirmations = block.confirmations.unwrap_or(0);
+    if confirmations < 0 {
+        bail!(
+            "block {} is not on the active chain; confirmations={}",
+            block.hash,
+            confirmations
+        );
+    }
+    u32::try_from(confirmations).context("confirmations do not fit u32")
+}
+
 fn btc_value_to_sats(value: &serde_json::Value) -> Result<u64> {
     let value = match value {
         serde_json::Value::Number(number) => number.to_string(),
@@ -2153,6 +2178,62 @@ mod tests {
             submitblock_reject_reason_from_result(serde_json::json!("bad-txnmrklroot")).unwrap(),
             Some("bad-txnmrklroot".to_string())
         );
+        assert_eq!(
+            submitblock_outcome_from_result(serde_json::json!("duplicate")).unwrap(),
+            SubmitBlockOutcome {
+                status: "duplicate".to_string(),
+                reject_reason: None,
+            }
+        );
+        assert_eq!(
+            submitblock_outcome_from_result(serde_json::json!("duplicate-invalid")).unwrap(),
+            SubmitBlockOutcome {
+                status: "rejected".to_string(),
+                reject_reason: Some("duplicate-invalid".to_string()),
+            }
+        );
+        for reason in ["inconclusive", "duplicate-inconclusive"] {
+            assert_eq!(
+                submitblock_outcome_from_result(serde_json::json!(reason)).unwrap(),
+                SubmitBlockOutcome {
+                    status: "ambiguous".to_string(),
+                    reject_reason: Some(reason.to_string()),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_block_recovery_requires_positive_active_chain_confirmations() {
+        let requested = "aa".repeat(32);
+        let mut block = GetBlockVerbose1Response {
+            hash: requested.clone(),
+            height: 1,
+            confirmations: Some(1),
+            tx: Vec::new(),
+        };
+        assert_eq!(
+            verified_active_chain_confirmations(&requested, &block).unwrap(),
+            1
+        );
+
+        block.confirmations = None;
+        assert_eq!(
+            verified_active_chain_confirmations(&requested, &block).unwrap(),
+            0
+        );
+        block.confirmations = Some(-1);
+        assert!(verified_active_chain_confirmations(&requested, &block)
+            .unwrap_err()
+            .to_string()
+            .contains("not on the active chain"));
+
+        block.confirmations = Some(1);
+        block.hash = "bb".repeat(32);
+        assert!(verified_active_chain_confirmations(&requested, &block)
+            .unwrap_err()
+            .to_string()
+            .contains("expected"));
     }
 
     #[test]

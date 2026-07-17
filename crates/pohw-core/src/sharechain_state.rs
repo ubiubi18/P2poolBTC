@@ -5,6 +5,7 @@ use crate::idena_anchor::{
 };
 use crate::ledger::{ClaimLedger, LedgerError};
 use crate::payout::{build_payout_schedule, ParticipantAccount, PayoutError, PayoutSchedule};
+use crate::share_work::ShareWorkBindingPolicyV1;
 use crate::sharechain::{
     BitcoinWorkTemplate, MinerRegistration, Share, SharechainError, SharechainMessage, SnapshotVote,
 };
@@ -238,6 +239,28 @@ pub enum SharechainReplayError {
 }
 
 impl SharechainReplayState {
+    pub fn validate_share_work_binding_policy(
+        &self,
+        message: &SharechainMessage,
+        policy: &ShareWorkBindingPolicyV1,
+    ) -> Result<(), SharechainReplayError> {
+        policy
+            .validate()
+            .map_err(SharechainError::InvalidShareWorkBinding)?;
+        let SharechainMessage::Share(share) = message else {
+            return Ok(());
+        };
+        let template_hash = share.bitcoin_template_hash.to_ascii_lowercase();
+        let template = self
+            .bitcoin_work_templates
+            .get(&template_hash)
+            .ok_or_else(|| {
+                SharechainReplayError::UnknownShareBitcoinWorkTemplate(template_hash.clone())
+            })?;
+        share.verify_required_work_binding(template, policy)?;
+        Ok(())
+    }
+
     pub fn validate_idena_anchor_policy(
         &self,
         message: &SharechainMessage,
@@ -1778,6 +1801,7 @@ mod tests {
             idena_snapshot_proof_root: proof_root.to_string(),
             hashrate_score_delta: 1,
             parent_share_hash: parent_hash.to_string(),
+            work_binding: None,
             mining_signature_hex: String::new(),
         };
         share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();

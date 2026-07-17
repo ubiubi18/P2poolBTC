@@ -5057,6 +5057,7 @@ mod tests {
             idena_snapshot_proof_root: "11".repeat(32),
             hashrate_score_delta: 1,
             parent_share_hash: "00".repeat(32),
+            work_binding: None,
             mining_signature_hex: String::new(),
         };
         let share_admission = store
@@ -5093,6 +5094,7 @@ mod tests {
             idena_snapshot_proof_root: "11".repeat(32),
             hashrate_score_delta: 1,
             parent_share_hash: "00".repeat(32),
+            work_binding: None,
             mining_signature_hex: String::new(),
         };
         let historical = store

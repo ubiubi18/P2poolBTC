@@ -3,6 +3,7 @@ use crate::idena_anchor::{
     validate_experiment_id, IdenaBlockAnchorV1, MinerRegistryAnchorV1, SharechainCheckpointAnchorV1,
 };
 use crate::payout::PayoutSchedule;
+use crate::share_work::{ShareWorkBindingError, ShareWorkBindingPolicyV1, ShareWorkBindingV1};
 use crate::withdrawal::{WithdrawalBatch, WithdrawalRequest};
 use crate::{canonical_json, hash_hex, sha256_tagged, Score};
 use bitcoin::consensus::Params;
@@ -105,6 +106,8 @@ pub struct Share {
     pub idena_snapshot_proof_root: String,
     pub hashrate_score_delta: Score,
     pub parent_share_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_binding: Option<Box<ShareWorkBindingV1>>,
     pub mining_signature_hex: String,
 }
 
@@ -204,6 +207,12 @@ pub enum SharechainError {
     ShareWorkAboveTarget,
     #[error("share hashrate score delta {actual} does not match target-derived score {expected}")]
     ShareScoreMismatch { expected: Score, actual: Score },
+    #[error("share-work binding is required by the active successor policy")]
+    MissingShareWorkBinding,
+    #[error("share-work binding field {0} does not match the share or work template")]
+    ShareWorkBindingMismatch(&'static str),
+    #[error("invalid share-work binding: {0}")]
+    InvalidShareWorkBinding(#[from] ShareWorkBindingError),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +283,8 @@ struct ShareSigningPayload {
     idena_snapshot_proof_root: String,
     hashrate_score_delta: Score,
     parent_share_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_binding: Option<ShareWorkBindingV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -822,6 +833,9 @@ impl Share {
         self.idena_snapshot_id = self.idena_snapshot_id.to_ascii_lowercase();
         self.idena_snapshot_proof_root = self.idena_snapshot_proof_root.to_ascii_lowercase();
         self.parent_share_hash = self.parent_share_hash.to_ascii_lowercase();
+        self.work_binding = self
+            .work_binding
+            .map(|binding| Box::new((*binding).normalized()));
         self.mining_signature_hex = self.mining_signature_hex.to_ascii_lowercase();
         self
     }
@@ -840,6 +854,10 @@ impl Share {
                 idena_snapshot_proof_root: self.idena_snapshot_proof_root.to_ascii_lowercase(),
                 hashrate_score_delta: self.hashrate_score_delta,
                 parent_share_hash: self.parent_share_hash.to_ascii_lowercase(),
+                work_binding: self
+                    .work_binding
+                    .clone()
+                    .map(|binding| (*binding).normalized()),
             }),
         )
     }
@@ -890,6 +908,7 @@ impl Share {
         self.verify_bitcoin_header_binding()?;
         self.verify_nonce_binding()?;
         self.verify_work_score()?;
+        self.verify_present_work_binding_fields()?;
         verify_mining_signature(
             mining_pubkey_hex,
             &self.mining_signature_hex,
@@ -925,6 +944,7 @@ impl Share {
         template.verify_assigned_share_target(&self.target)?;
         self.verify_nonce_binding()?;
         self.verify_work_score()?;
+        self.verify_present_work_binding_for_template(template)?;
         verify_mining_signature(
             mining_pubkey_hex,
             &self.mining_signature_hex,
@@ -944,6 +964,93 @@ impl Share {
         validate_hex_32("parent_share_hash", &self.parent_share_hash)?;
         if self.hashrate_score_delta == 0 {
             return Err(SharechainError::ZeroShareScore);
+        }
+        Ok(())
+    }
+
+    pub fn verify_required_work_binding(
+        &self,
+        template: &BitcoinWorkTemplate,
+        policy: &ShareWorkBindingPolicyV1,
+    ) -> Result<(), SharechainError> {
+        self.verify_present_work_binding_for_template(template)?;
+        let binding = self
+            .work_binding
+            .as_ref()
+            .ok_or(SharechainError::MissingShareWorkBinding)?;
+        binding.verify_policy(policy)?;
+        Ok(())
+    }
+
+    fn verify_present_work_binding_fields(&self) -> Result<(), SharechainError> {
+        let Some(binding) = self.work_binding.as_ref() else {
+            return Ok(());
+        };
+        binding.validate_commitment_fields()?;
+        if !binding.miner_id.eq_ignore_ascii_case(&self.miner_id) {
+            return Err(SharechainError::ShareWorkBindingMismatch("miner_id"));
+        }
+        if !binding
+            .assigned_share_target
+            .eq_ignore_ascii_case(&self.target)
+        {
+            return Err(SharechainError::ShareWorkBindingMismatch(
+                "assigned_share_target",
+            ));
+        }
+        if !binding
+            .parent_share_hash
+            .eq_ignore_ascii_case(&self.parent_share_hash)
+        {
+            return Err(SharechainError::ShareWorkBindingMismatch(
+                "parent_share_hash",
+            ));
+        }
+        if !binding
+            .idena_snapshot_id
+            .eq_ignore_ascii_case(&self.idena_snapshot_id)
+        {
+            return Err(SharechainError::ShareWorkBindingMismatch(
+                "idena_snapshot_id",
+            ));
+        }
+        if !binding
+            .idena_snapshot_proof_root
+            .eq_ignore_ascii_case(&self.idena_snapshot_proof_root)
+        {
+            return Err(SharechainError::ShareWorkBindingMismatch(
+                "idena_snapshot_proof_root",
+            ));
+        }
+        binding.verify_header_commitment(&self.bitcoin_header_hex)?;
+        Ok(())
+    }
+
+    fn verify_present_work_binding_for_template(
+        &self,
+        template: &BitcoinWorkTemplate,
+    ) -> Result<(), SharechainError> {
+        self.verify_present_work_binding_fields()?;
+        let Some(binding) = self.work_binding.as_ref() else {
+            return Ok(());
+        };
+        let anchor = template
+            .idena_anchor
+            .as_ref()
+            .ok_or(SharechainError::ShareWorkBindingMismatch("idena_anchor"))?;
+        if &binding.idena_anchor != anchor {
+            return Err(SharechainError::ShareWorkBindingMismatch("idena_anchor"));
+        }
+        let template_policy_hash = template.idena_anchor_policy_hash.as_deref().ok_or(
+            SharechainError::ShareWorkBindingMismatch("idena_anchor_policy_hash"),
+        )?;
+        if !binding
+            .idena_anchor_policy_hash
+            .eq_ignore_ascii_case(template_policy_hash)
+        {
+            return Err(SharechainError::ShareWorkBindingMismatch(
+                "idena_anchor_policy_hash",
+            ));
         }
         Ok(())
     }
@@ -1472,6 +1579,7 @@ mod tests {
             idena_snapshot_proof_root: "11".repeat(32),
             hashrate_score_delta: score,
             parent_share_hash: "22".repeat(32),
+            work_binding: None,
             mining_signature_hex: String::new(),
         };
         share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
@@ -1520,6 +1628,7 @@ mod tests {
             idena_snapshot_proof_root: "11".repeat(32),
             hashrate_score_delta: 1,
             parent_share_hash: "22".repeat(32),
+            work_binding: None,
             mining_signature_hex: String::new(),
         }
     }

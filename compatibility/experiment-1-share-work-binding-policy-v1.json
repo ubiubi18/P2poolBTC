@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "experiment_id": "p2poolbtc-experiment-1",
+  "fork_activation_id": "6528bfa616769d93d67b89aa4df7a3580949d610a4f7eb4711e791ca61dc3380",
+  "sharechain_network_id": "1d0b3087f85ef49f6fdfe1024bb2140d9398438d5f97e53ca5691ef400240498",
+  "require_binding_from_genesis": true
+}

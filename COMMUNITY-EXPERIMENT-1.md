@@ -5,7 +5,9 @@ separately identified Bitcoin Core fork with ordinary Bitcoin transactions,
 wallets, PSBTs, and scripts. It checkpoints the immutable revision-2 prefix and
 adds marker plus signature-domain replay protection. It is not Bitcoin mainnet
 and its coins have no promised value. Mining is paused and public joining is
-blocked until the revision-3 build and all interlock evidence pass.
+permanently blocked for this activation because Idena eligibility is not a
+Bitcoin block-consensus rule. Build and interlock evidence remain useful for
+review, but cannot open this activation.
 
 Start with the
 [five-minute guarded quick start](COMMUNITY-QUICKSTART.md). Its one read-only
@@ -50,9 +52,11 @@ include the canonical source CID and CAR SHA-256 when available, plus the exact
 contains only aggregate diagnostics; inspect the generated `issue-report.md`
 before posting it.
 
-### Lane B: Join Live Only After The Interlock Opens
+### Lane B: Successor-Network Template Only
 
-The live journey has five stages:
+The eventual live journey has five stages, but it applies only to a separately
+activated successor with consensus-enforced identity admission. The current
+Experiment 1 verifier cannot pass the first stage:
 
 | Stage | Outcome required before continuing |
 | --- | --- |
@@ -70,31 +74,45 @@ signature cannot replace any required verification result.
 
 You may publish the idea, source, threat model, test results, and sanitized
 screenshots for review. Do not invite people to connect miners to the live
-experiment yet. Public joining is blocked until all of these are published and
-independently checked:
+Experiment 1 activation. The evidence below is necessary for a successor, but
+is not sufficient without consensus-enforced identity admission:
 
 - an exact source commit, DAO-selected ecosystem CID, canonical DAG-CBOR
   ecosystem CAR, P2poolBTC source CAR, each CAR digest, runtime artifact
   digests, and build evidence, all retrievable from public IPFS;
 - at least two independent matching builds of the ownerless miner-registry WASM;
 - an external security review with no unresolved release-blocking finding;
-- a finalized Idena deployment receipt and immutable V2 anchor policy; and
+- a finalized Idena deployment receipt and immutable V2 anchor policy;
 - a successful independent second-node Core, gossip, registration, share, and
-  block acceptance rehearsal.
+  block acceptance rehearsal; and
+- a separately reviewed successor fork whose Bitcoin consensus validates the
+  required Idena authorization, with a new network/activation ID and explicit
+  migration boundary.
 
 The repository records the current interlock in
 `compatibility/experiment-1-launch-policy.json`. The verifier first binds the
-exact fork manifest and registry candidate, then rejects a ready status unless
-every recorded release gate passes. The checked-in candidate is
-`blocked-release-readiness`. A future ready policy is not sufficient by itself:
-sections 5.2 and 5.4 run the strict verifier with the report CAR, transitive
-evidence CAR, evidence-bound governance binary, and finalized Idena anchor.
-Continue to a live start only when that complete invocation prints
+exact fork manifest and registry candidate, then rejects a ready status. The
+checked-in candidate is `blocked-release-readiness`; even complete evidence
+cannot change that because `bitcoin_block_consensus_enforced` is false. Sections
+5.2 and 5.4 remain a fail-closed reference for a future successor, which must
+ship its own policy and activation. Do not edit Experiment 1 to print
 `ready-for-public-join`.
 
-The remaining sections are the procedure to use after that check passes. They
-are also suitable for isolated source review and local rehearsal, but a local
-rehearsal is not evidence that the public network is open.
+A separate inactive share-work successor candidate is available for source
+review. It commits each header to the selected parent, target, Idena snapshot,
+and finalized anchor through a coinbase `P2SW1` output and verifies the Merkle
+proof during replay and peer admission. It deliberately uses a new sharechain
+network and fresh datadir, and it does not reinterpret Experiment 1 history.
+Run the inspection commands in
+[docs/share-work-binding.md](docs/share-work-binding.md); the launchable check
+must fail while the profile remains `experimental-candidate`. This P2Pool-layer
+fix is necessary but does not supply the missing Bitcoin-consensus identity
+rule.
+
+The remaining sections are a successor implementation template and isolated
+source-review reference. They are not an executable invitation to join
+Experiment 1, and a local rehearsal is not evidence that a public network is
+open.
 
 This is a source-first procedure. There is no coordinator-signed installer and
 no lead-developer key to trust. Every participant independently reads the
@@ -103,11 +121,10 @@ verifies the activation manifest and CAR contents, and validates the fork
 locally. A Git branch, gateway response, launch-policy file, or executable is
 not allowed to authenticate itself.
 
-This guide joins the existing Experiment 1 network only after the interlock
-passes. Use the exact release commit and source CID, the tracked manifest, and
-verified existing peers. Do not generate a new activation manifest, change the
-activation ID, or initialize a different network unless you deliberately
-intend to create a separate experiment.
+This guide does not authorize joining the existing Experiment 1 network. A
+future successor guide must name its exact release commit and source CID,
+tracked manifest, new activation ID, and verified peers. Do not reuse the
+Experiment 1 activation ID or silently reinterpret its history.
 
 > [!WARNING]
 > Fork address encodings match Bitcoin mainnet. Never import or reuse a Bitcoin
@@ -1120,9 +1137,10 @@ done
 
 ### 5.4 Unlock And Start In Order
 
-Rerun the same strict launch-policy verifier immediately before creating the
-one start marker. Enabling a unit does not start it. Start gossip first and
-require it to remain active before starting the adapter.
+This is a negative acceptance check for Experiment 1: the strict verifier below
+must fail before creating a start marker. A successor must replace every
+Experiment 1 path and policy with its own reviewed activation before adapting
+this sequence. Enabling a unit does not start it.
 
 ```bash
 STATUS=$(sudo -u pohw -g pohw /usr/bin/python3 -I \

@@ -6,6 +6,7 @@ use pohw_core::gossip::{normalize_gossip_network_id, GossipEnvelope, GOSSIP_PROT
 use pohw_core::idena_anchor::IdenaAnchorPolicyV2;
 use pohw_core::ledger::ClaimLedger;
 use pohw_core::payout::{ParticipantAccount, PayoutSchedule};
+use pohw_core::share_work::{ShareWorkActivationManifestV1, ShareWorkBindingPolicyV1};
 use pohw_core::sharechain::{BitcoinWorkTemplate, MinerRegistration, SharechainMessage};
 use pohw_core::sharechain_state::{ApplyOutcome, SharechainReplayState, SharechainReplaySummary};
 use pohw_core::snapshot::Snapshot;
@@ -31,6 +32,7 @@ const GOSSIP_ENVELOPE_LOG: &str = "gossip-envelopes.ndjson";
 const GOSSIP_NETWORK_ID_FILE: &str = "gossip-network-id";
 const GOSSIP_PEERS_FILE: &str = "gossip-peers.json";
 const IDENA_ANCHOR_POLICY_FILE: &str = "idena-anchor-policy-v2.json";
+const SHARE_WORK_BINDING_POLICY_FILE: &str = "share-work-binding-policy-v1.json";
 const APPEND_LOCK: &str = "sharechain.append.lock";
 const GOSSIP_PEERS_LOCK: &str = "gossip-peers.lock";
 const CORRUPT_LOG_DIR: &str = "corrupt-log-lines";
@@ -48,6 +50,7 @@ const MAX_PERSISTED_GOSSIP_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PERSISTED_SHARECHAIN_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PERSISTED_ACCEPTED_TEMPLATE_LOG_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IDENA_ANCHOR_POLICY_BYTES: u64 = 64 * 1024;
+const MAX_SHARE_WORK_BINDING_POLICY_BYTES: u64 = 64 * 1024;
 
 static GOSSIP_ENVELOPE_CACHE: OnceLock<StdMutex<BTreeMap<PathBuf, GossipEnvelopeCacheEntry>>> =
     OnceLock::new();
@@ -117,6 +120,7 @@ pub struct SharechainIndex {
     pub log_stamp: Option<SharechainLogStamp>,
     pub accepted_bitcoin_work_templates_log_stamp: Option<SharechainLogStamp>,
     pub idena_anchor_policy_hash: Option<String>,
+    pub share_work_binding_policy_hash: Option<String>,
     pub message_count: usize,
     pub replay: SharechainReplaySummary,
     pub registrations_by_miner: BTreeMap<String, MinerRegistration>,
@@ -516,6 +520,159 @@ fn write_bound_idena_anchor_policy(datadir: &Path, policy: &IdenaAnchorPolicyV2)
     sync_dir(datadir)
 }
 
+pub fn read_share_work_binding_policy_file(path: &Path) -> Result<ShareWorkBindingPolicyV1> {
+    let payload = read_bounded_regular_text_file(
+        path,
+        "share-work binding policy",
+        MAX_SHARE_WORK_BINDING_POLICY_BYTES,
+    )?;
+    let policy: ShareWorkBindingPolicyV1 =
+        crate::strict_json::from_str(&payload).with_context(|| {
+            format!(
+                "share-work binding policy {} is not strict JSON",
+                path.display()
+            )
+        })?;
+    let policy = policy.normalized();
+    policy
+        .validate()
+        .with_context(|| format!("invalid share-work binding policy {}", path.display()))?;
+    Ok(policy)
+}
+
+pub fn read_share_work_activation_manifest_file(
+    path: &Path,
+) -> Result<ShareWorkActivationManifestV1> {
+    let payload = read_bounded_regular_text_file(
+        path,
+        "share-work activation manifest",
+        MAX_SHARE_WORK_BINDING_POLICY_BYTES,
+    )?;
+    let manifest: ShareWorkActivationManifestV1 = crate::strict_json::from_str(&payload)
+        .with_context(|| {
+            format!(
+                "share-work activation manifest {} is not strict JSON",
+                path.display()
+            )
+        })?;
+    let manifest = manifest.normalized();
+    manifest
+        .validate()
+        .with_context(|| format!("invalid share-work activation manifest {}", path.display()))?;
+    Ok(manifest)
+}
+
+pub fn bind_share_work_binding_policy(
+    datadir: &Path,
+    policy: &ShareWorkBindingPolicyV1,
+) -> Result<String> {
+    ensure_datadir(datadir)?;
+    let policy = policy.clone().normalized();
+    policy
+        .validate()
+        .context("invalid share-work binding policy")?;
+    let commitment = policy.commitment_hash()?;
+    let _lock = acquire_append_lock(datadir)?;
+
+    let network_id = gossip_network_id(datadir)?
+        .context("share-work binding requires an initialized gossip network datadir")?;
+    if network_id != policy.sharechain_network_id {
+        anyhow::bail!(
+            "share-work policy network {} does not match datadir gossip network {}",
+            policy.sharechain_network_id,
+            network_id
+        );
+    }
+    let idena_policy = read_bound_idena_anchor_policy(datadir)?
+        .context("share-work binding requires a bound Idena anchor policy")?;
+    if !idena_policy
+        .experiment_id
+        .eq_ignore_ascii_case(&policy.experiment_id)
+    {
+        anyhow::bail!(
+            "share-work policy experiment {} does not match bound Idena experiment {}",
+            policy.experiment_id,
+            idena_policy.experiment_id
+        );
+    }
+    if let Some(existing) = read_bound_share_work_binding_policy(datadir)? {
+        let existing_commitment = existing.commitment_hash()?;
+        if existing_commitment != commitment {
+            anyhow::bail!(
+                "node datadir is already bound to share-work policy {existing_commitment}; refusing replacement with {commitment}"
+            );
+        }
+    }
+
+    audit_sharechain_with_share_work_binding_policy(datadir, &policy)?;
+    if read_bound_share_work_binding_policy(datadir)?.is_none() {
+        write_bound_share_work_binding_policy(datadir, &policy)?;
+    }
+    if let Some(cache) = SHARECHAIN_REPLAY_CACHE.get() {
+        cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?
+            .remove(&replay_cache_key(datadir));
+    }
+    Ok(commitment)
+}
+
+pub fn read_bound_share_work_binding_policy(
+    datadir: &Path,
+) -> Result<Option<ShareWorkBindingPolicyV1>> {
+    let path = share_work_binding_policy_path(datadir);
+    if validate_datadir_file(&path, "share-work binding policy")?.is_none() {
+        return Ok(None);
+    }
+    read_share_work_binding_policy_file(&path).map(Some)
+}
+
+fn audit_sharechain_with_share_work_binding_policy(
+    datadir: &Path,
+    policy: &ShareWorkBindingPolicyV1,
+) -> Result<SharechainReplayState> {
+    let mut state = replay_state_with_accepted_bitcoin_work_templates(
+        datadir,
+        TruncatedTailRepair::Conservative,
+    )?;
+    for message in read_messages_with_repair(datadir, TruncatedTailRepair::Conservative)? {
+        state
+            .validate_share_work_binding_policy(&message, policy)
+            .context("existing sharechain history violates the share-work binding policy")?;
+        state.apply_message(&message)?;
+    }
+    Ok(state)
+}
+
+fn write_bound_share_work_binding_policy(
+    datadir: &Path,
+    policy: &ShareWorkBindingPolicyV1,
+) -> Result<()> {
+    let path = share_work_binding_policy_path(datadir);
+    let (tmp_path, mut file) = create_random_temp_file(datadir, SHARE_WORK_BINDING_POLICY_FILE)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    serde_json::to_writer_pretty(&mut file, policy)
+        .context("failed to encode bound share-work binding policy")?;
+    file.write_all(b"\n")
+        .context("failed to terminate bound share-work binding policy")?;
+    file.flush()
+        .context("failed to flush bound share-work binding policy")?;
+    file.sync_all()
+        .context("failed to sync bound share-work binding policy")?;
+    fs::rename(&tmp_path, &path).with_context(|| {
+        format!(
+            "failed to install bound share-work binding policy {} from {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
+    sync_dir(datadir)
+}
+
 pub fn append_message_file(datadir: &Path, message_file: &Path) -> Result<AppendMessageResult> {
     ensure_datadir(datadir)?;
     let message_json = read_bounded_regular_text_file(
@@ -706,6 +863,7 @@ fn append_message_locked(
     require_target_bound: bool,
 ) -> Result<AppendMessageResult> {
     let bound_policy = read_bound_idena_anchor_policy(datadir)?;
+    let bound_share_work_policy = read_bound_share_work_binding_policy(datadir)?;
     let cache_key = replay_cache_key(datadir);
     let cache = SHARECHAIN_REPLAY_CACHE.get_or_init(|| StdMutex::new(BTreeMap::new()));
     let mut cache = cache
@@ -713,18 +871,30 @@ fn append_message_locked(
         .map_err(|_| anyhow::anyhow!("sharechain replay cache lock poisoned"))?;
     let mut entry = match cache.remove(&cache_key) {
         Some(mut entry) => {
-            refresh_replay_cache_entry(datadir, &mut entry, bound_policy.as_ref())?;
+            refresh_replay_cache_entry(
+                datadir,
+                &mut entry,
+                bound_policy.as_ref(),
+                bound_share_work_policy.as_ref(),
+            )?;
             entry
         }
-        None => build_replay_cache_entry_with_policy(datadir, bound_policy.as_ref())?,
+        None => build_replay_cache_entry_with_policy(
+            datadir,
+            bound_policy.as_ref(),
+            bound_share_work_policy.as_ref(),
+        )?,
     };
     let message_hash = message.message_hash();
     if require_target_bound {
         entry.state.validate_target_bound_message(&message)?;
     }
-    if let Some(policy) = bound_policy.as_ref() {
-        entry.state.validate_idena_anchor_policy(&message, policy)?;
-    }
+    validate_bound_sharechain_policies(
+        &entry.state,
+        &message,
+        bound_policy.as_ref(),
+        bound_share_work_policy.as_ref(),
+    )?;
     let outcome = entry.state.apply_message(&message)?;
     if outcome == ApplyOutcome::Applied {
         let mut file = open_append_datadir_file(&log_path(datadir), "sharechain log")?;
@@ -746,6 +916,10 @@ fn append_message_locked(
         bound_policy
             .as_ref()
             .map(IdenaAnchorPolicyV2::commitment_hash)
+            .transpose()?,
+        bound_share_work_policy
+            .as_ref()
+            .map(ShareWorkBindingPolicyV1::commitment_hash)
             .transpose()?,
         entry.message_count,
         &entry.state,
@@ -903,14 +1077,18 @@ pub fn rebuild_sharechain_index(datadir: &Path) -> Result<SharechainIndex> {
 pub fn replay_state(datadir: &Path) -> Result<SharechainReplayState> {
     ensure_datadir(datadir)?;
     let bound_policy = read_bound_idena_anchor_policy(datadir)?;
+    let bound_share_work_policy = read_bound_share_work_binding_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(
         datadir,
         TruncatedTailRepair::Conservative,
     )?;
     for message in read_messages(datadir)? {
-        if let Some(policy) = bound_policy.as_ref() {
-            state.validate_idena_anchor_policy(&message, policy)?;
-        }
+        validate_bound_sharechain_policies(
+            &state,
+            &message,
+            bound_policy.as_ref(),
+            bound_share_work_policy.as_ref(),
+        )?;
         state.apply_message(&message)?;
     }
     Ok(state)
@@ -1292,11 +1470,15 @@ fn replay_state_for_repair(
 ) -> Result<SharechainReplayState> {
     ensure_datadir(datadir)?;
     let bound_policy = read_bound_idena_anchor_policy(datadir)?;
+    let bound_share_work_policy = read_bound_share_work_binding_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in read_messages_with_repair(datadir, repair)? {
-        if let Some(policy) = bound_policy.as_ref() {
-            state.validate_idena_anchor_policy(&message, policy)?;
-        }
+        validate_bound_sharechain_policies(
+            &state,
+            &message,
+            bound_policy.as_ref(),
+            bound_share_work_policy.as_ref(),
+        )?;
         state.apply_message(&message)?;
     }
     Ok(state)
@@ -1319,11 +1501,15 @@ fn replay_state_for_confirmed_payout_commitment_with_repair(
         normalize_hash_hex("commitment sharechain_state_root", expected_state_root)?;
 
     let bound_policy = read_bound_idena_anchor_policy(datadir)?;
+    let bound_share_work_policy = read_bound_share_work_binding_policy(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in read_messages_with_repair(datadir, repair)? {
-        if let Some(policy) = bound_policy.as_ref() {
-            state.validate_idena_anchor_policy(&message, policy)?;
-        }
+        validate_bound_sharechain_policies(
+            &state,
+            &message,
+            bound_policy.as_ref(),
+            bound_share_work_policy.as_ref(),
+        )?;
         state.apply_message(&message)?;
         if state.best_share_tip() != Some(sharechain_tip.as_str()) {
             continue;
@@ -1345,18 +1531,32 @@ fn replay_cache_key(datadir: &Path) -> PathBuf {
     fs::canonicalize(datadir).unwrap_or_else(|_| datadir.to_path_buf())
 }
 
+fn validate_bound_sharechain_policies(
+    state: &SharechainReplayState,
+    message: &SharechainMessage,
+    idena_policy: Option<&IdenaAnchorPolicyV2>,
+    share_work_policy: Option<&ShareWorkBindingPolicyV1>,
+) -> Result<()> {
+    if let Some(policy) = idena_policy {
+        state.validate_idena_anchor_policy(message, policy)?;
+    }
+    if let Some(policy) = share_work_policy {
+        state.validate_share_work_binding_policy(message, policy)?;
+    }
+    Ok(())
+}
+
 fn build_replay_cache_entry_with_policy(
     datadir: &Path,
     bound_policy: Option<&IdenaAnchorPolicyV2>,
+    bound_share_work_policy: Option<&ShareWorkBindingPolicyV1>,
 ) -> Result<ReplayCacheEntry> {
     ensure_datadir(datadir)?;
     let mut state =
         replay_state_with_accepted_bitcoin_work_templates(datadir, TruncatedTailRepair::Force)?;
     let messages = read_messages_with_repair(datadir, TruncatedTailRepair::Force)?;
     for message in &messages {
-        if let Some(policy) = bound_policy {
-            state.validate_idena_anchor_policy(message, policy)?;
-        }
+        validate_bound_sharechain_policies(&state, message, bound_policy, bound_share_work_policy)?;
         state.apply_message(message)?;
     }
     Ok(ReplayCacheEntry {
@@ -1371,6 +1571,7 @@ fn refresh_replay_cache_entry(
     datadir: &Path,
     entry: &mut ReplayCacheEntry,
     bound_policy: Option<&IdenaAnchorPolicyV2>,
+    bound_share_work_policy: Option<&ShareWorkBindingPolicyV1>,
 ) -> Result<()> {
     let current_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     let cached_template_len = entry
@@ -1382,7 +1583,8 @@ fn refresh_replay_cache_entry(
         || (current_template_len == cached_template_len
             && current_template_stamp != entry.accepted_template_stamp)
     {
-        *entry = build_replay_cache_entry_with_policy(datadir, bound_policy)?;
+        *entry =
+            build_replay_cache_entry_with_policy(datadir, bound_policy, bound_share_work_policy)?;
         return Ok(());
     }
     if current_template_len > cached_template_len {
@@ -1402,7 +1604,8 @@ fn refresh_replay_cache_entry(
     if current_log_len < cached_log_len
         || (current_log_len == cached_log_len && current_log_stamp != entry.log_stamp)
     {
-        *entry = build_replay_cache_entry_with_policy(datadir, bound_policy)?;
+        *entry =
+            build_replay_cache_entry_with_policy(datadir, bound_policy, bound_share_work_policy)?;
         return Ok(());
     }
     if current_log_len > cached_log_len {
@@ -1412,9 +1615,12 @@ fn refresh_replay_cache_entry(
             cached_log_len,
         )?;
         for message in &messages {
-            if let Some(policy) = bound_policy {
-                entry.state.validate_idena_anchor_policy(message, policy)?;
-            }
+            validate_bound_sharechain_policies(
+                &entry.state,
+                message,
+                bound_policy,
+                bound_share_work_policy,
+            )?;
             entry.state.apply_message(message)?;
         }
         entry.message_count = entry.message_count.saturating_add(messages.len());
@@ -1749,6 +1955,11 @@ fn sharechain_index_with_repair(
         .as_ref()
         .map(IdenaAnchorPolicyV2::commitment_hash)
         .transpose()?;
+    let bound_share_work_policy = read_bound_share_work_binding_policy(datadir)?;
+    let bound_share_work_policy_hash = bound_share_work_policy
+        .as_ref()
+        .map(ShareWorkBindingPolicyV1::commitment_hash)
+        .transpose()?;
     let before_stamp = sharechain_log_stamp(datadir)?;
     let before_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     if repair == TruncatedTailRepair::Conservative {
@@ -1757,6 +1968,7 @@ fn sharechain_index_with_repair(
             &before_stamp,
             &before_template_stamp,
             bound_policy_hash.as_deref(),
+            bound_share_work_policy_hash.as_deref(),
         )? {
             return Ok(index);
         }
@@ -1767,9 +1979,12 @@ fn sharechain_index_with_repair(
     let after_template_stamp = accepted_bitcoin_work_templates_log_stamp(datadir)?;
     let mut state = replay_state_with_accepted_bitcoin_work_templates(datadir, repair)?;
     for message in &messages {
-        if let Some(policy) = bound_policy.as_ref() {
-            state.validate_idena_anchor_policy(message, policy)?;
-        }
+        validate_bound_sharechain_policies(
+            &state,
+            message,
+            bound_policy.as_ref(),
+            bound_share_work_policy.as_ref(),
+        )?;
         state.apply_message(message)?;
     }
     let index = build_sharechain_index(
@@ -1777,6 +1992,7 @@ fn sharechain_index_with_repair(
         after_stamp,
         after_template_stamp,
         bound_policy_hash,
+        bound_share_work_policy_hash,
         messages.len(),
         &state,
     )?;
@@ -1789,16 +2005,18 @@ fn build_sharechain_index(
     log_stamp: Option<SharechainLogStamp>,
     accepted_bitcoin_work_templates_log_stamp: Option<SharechainLogStamp>,
     idena_anchor_policy_hash: Option<String>,
+    share_work_binding_policy_hash: Option<String>,
     message_count: usize,
     state: &SharechainReplayState,
 ) -> Result<SharechainIndex> {
     Ok(SharechainIndex {
-        schema_version: 3,
+        schema_version: 4,
         generated_at_unix: current_unix_timestamp()?,
         sharechain_log: log_path(datadir),
         log_stamp,
         accepted_bitcoin_work_templates_log_stamp,
         idena_anchor_policy_hash,
+        share_work_binding_policy_hash,
         message_count,
         replay: state.summary(),
         registrations_by_miner: state.registrations().clone(),
@@ -1813,6 +2031,7 @@ fn read_fresh_sharechain_index(
     log_stamp: &Option<SharechainLogStamp>,
     accepted_bitcoin_work_templates_log_stamp: &Option<SharechainLogStamp>,
     idena_anchor_policy_hash: Option<&str>,
+    share_work_binding_policy_hash: Option<&str>,
 ) -> Result<Option<SharechainIndex>> {
     let path = sharechain_index_path(datadir);
     let Some(json) = read_optional_datadir_file_to_string(&path, "sharechain index")? else {
@@ -1822,11 +2041,12 @@ fn read_fresh_sharechain_index(
         Ok(index) => index,
         Err(_) => return Ok(None),
     };
-    if index.schema_version != 3
+    if index.schema_version != 4
         || &index.log_stamp != log_stamp
         || &index.accepted_bitcoin_work_templates_log_stamp
             != accepted_bitcoin_work_templates_log_stamp
         || index.idena_anchor_policy_hash.as_deref() != idena_anchor_policy_hash
+        || index.share_work_binding_policy_hash.as_deref() != share_work_binding_policy_hash
     {
         return Ok(None);
     }
@@ -2753,6 +2973,10 @@ fn idena_anchor_policy_path(datadir: &Path) -> PathBuf {
     datadir.join(IDENA_ANCHOR_POLICY_FILE)
 }
 
+fn share_work_binding_policy_path(datadir: &Path) -> PathBuf {
+    datadir.join(SHARE_WORK_BINDING_POLICY_FILE)
+}
+
 fn lock_path(datadir: &Path) -> PathBuf {
     datadir.join(APPEND_LOCK)
 }
@@ -3221,6 +3445,16 @@ mod tests {
         }
     }
 
+    fn share_work_policy(network_id: &str) -> ShareWorkBindingPolicyV1 {
+        ShareWorkBindingPolicyV1 {
+            schema_version: 1,
+            experiment_id: idena_anchor_policy().experiment_id,
+            fork_activation_id: "26".repeat(32),
+            sharechain_network_id: network_id.to_string(),
+            require_binding_from_genesis: true,
+        }
+    }
+
     fn test_message() -> SharechainMessage {
         SharechainMessage::PohwCommitment(PohwCommitment {
             version: "POHW1".to_string(),
@@ -3295,6 +3529,81 @@ mod tests {
             "unexpected error: {err:#}"
         );
         assert!(read_bound_idena_anchor_policy(&datadir).unwrap().is_none());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn share_work_policy_is_network_bound_immutable_and_idempotent() {
+        let datadir = temp_dir("share-work-policy-binding");
+        let network_id = "ab".repeat(32);
+        initialize_gossip_network(&datadir, &network_id).unwrap();
+        bind_idena_anchor_policy(&datadir, &idena_anchor_policy()).unwrap();
+        let policy = share_work_policy(&network_id);
+
+        let commitment = bind_share_work_binding_policy(&datadir, &policy).unwrap();
+        assert_eq!(commitment, policy.commitment_hash().unwrap());
+        assert_eq!(
+            read_bound_share_work_binding_policy(&datadir).unwrap(),
+            Some(policy.clone())
+        );
+        assert_eq!(
+            bind_share_work_binding_policy(&datadir, &policy).unwrap(),
+            commitment
+        );
+
+        let mut replacement = policy;
+        replacement.fork_activation_id = "27".repeat(32);
+        let err = bind_share_work_binding_policy(&datadir, &replacement).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing replacement"),
+            "unexpected error: {err:#}"
+        );
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn share_work_policy_rejects_wrong_network_without_persisting() {
+        let datadir = temp_dir("share-work-policy-wrong-network");
+        initialize_gossip_network(&datadir, &"ab".repeat(32)).unwrap();
+        bind_idena_anchor_policy(&datadir, &idena_anchor_policy()).unwrap();
+
+        let err = bind_share_work_binding_policy(&datadir, &share_work_policy(&"cd".repeat(32)))
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not match datadir gossip network"),
+            "unexpected error: {err:#}"
+        );
+        assert!(read_bound_share_work_binding_policy(&datadir)
+            .unwrap()
+            .is_none());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn share_work_policy_reader_rejects_duplicate_json_keys() {
+        let datadir = temp_dir("share-work-policy-duplicate-key");
+        let path = datadir.join("policy.json");
+        fs::write(
+            &path,
+            format!(
+                concat!(
+                    "{{\"schema_version\":1,\"schema_version\":1,",
+                    "\"experiment_id\":\"p2poolbtc-experiment-1\",",
+                    "\"fork_activation_id\":\"{}\",",
+                    "\"sharechain_network_id\":\"{}\",",
+                    "\"require_binding_from_genesis\":true}}"
+                ),
+                "11".repeat(32),
+                "22".repeat(32)
+            ),
+        )
+        .unwrap();
+
+        let err = read_share_work_binding_policy_file(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("duplicate JSON key: schema_version"),
+            "unexpected error: {err:#}"
+        );
         fs::remove_dir_all(datadir).unwrap();
     }
 
@@ -3378,6 +3687,7 @@ mod tests {
                 hashrate_score_delta: 1,
                 parent_share_hash:
                     "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                work_binding: None,
                 mining_signature_hex: String::new(),
             };
             share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();

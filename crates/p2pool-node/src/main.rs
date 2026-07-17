@@ -12,6 +12,7 @@ mod local_node;
 mod mining_adapter;
 mod p2p_node;
 mod peer_policy;
+mod strict_json;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, SecretKey};
@@ -462,6 +463,10 @@ enum Command {
         allow_mutable_time: bool,
         #[arg(long, default_value_t = 7_200)]
         max_template_time_drift_seconds: u32,
+        #[arg(long)]
+        share_work_binding_policy: Option<PathBuf>,
+        #[arg(long)]
+        share_work_binding_activation_manifest: Option<PathBuf>,
         #[command(flatten)]
         idena_anchor: IdenaAnchorCliArgs,
     },
@@ -528,6 +533,14 @@ enum Command {
     InspectIdenaAnchorPolicy {
         #[arg(long)]
         policy_file: PathBuf,
+    },
+    InspectShareWorkActivation {
+        #[arg(long)]
+        activation_manifest: PathBuf,
+        #[arg(long)]
+        binding_policy: PathBuf,
+        #[arg(long)]
+        require_launchable: bool,
     },
     /// Verify the exact registry deployment and immutable parameters through live Idena RPC.
     VerifyIdenaRegistryDeployment {
@@ -838,6 +851,10 @@ enum Command {
         derive_pohw_min_snapshot_voters: usize,
         #[arg(long)]
         snapshot_dir: Option<PathBuf>,
+        #[arg(long)]
+        share_work_binding_policy: Option<PathBuf>,
+        #[arg(long)]
+        share_work_binding_activation_manifest: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -2258,12 +2275,21 @@ async fn main() -> Result<()> {
             allow_unverified_merkle_root,
             allow_mutable_time,
             max_template_time_drift_seconds,
+            share_work_binding_policy,
+            share_work_binding_activation_manifest,
             idena_anchor,
         } => {
             if expected_header_merkle_root_hex.is_some() && allow_unverified_merkle_root {
                 anyhow::bail!(
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
+            }
+            let share_work_binding_policy = load_share_work_binding_policy(
+                share_work_binding_policy.as_deref(),
+                share_work_binding_activation_manifest.as_deref(),
+            )?;
+            if share_work_binding_policy.is_some() && !admit_peer_work_templates {
+                bail!("share-work binding policy requires --admit-peer-work-templates");
             }
             let fork_chain_requires_idena_admission = match (
                 fork_chain_rpc_addr,
@@ -2288,6 +2314,13 @@ async fn main() -> Result<()> {
             }
             let work_template_admission = if admit_peer_work_templates {
                 let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
+                if let Some(policy) = share_work_binding_policy.as_ref() {
+                    let verifier = idena_anchor_verifier
+                        .as_ref()
+                        .context("share-work binding policy requires --idena-anchor-policy")?;
+                    local_node::bind_idena_anchor_policy(&datadir, verifier.policy())?;
+                    local_node::bind_share_work_binding_policy(&datadir, policy)?;
+                }
                 let bitcoin_rpc_client = if fork_chain_client.is_none() {
                     Some(bitcoin_rpc_client(
                         rpc_url,
@@ -2334,6 +2367,7 @@ async fn main() -> Result<()> {
                     },
                     allow_pohw_time_dependent_bits,
                     idena_anchor_verifier,
+                    share_work_binding_policy: share_work_binding_policy.clone(),
                 })
             } else {
                 if fork_chain_client.is_some() {
@@ -2341,6 +2375,9 @@ async fn main() -> Result<()> {
                 }
                 if idena_anchor.idena_anchor_policy.is_some() {
                     bail!("--idena-anchor-policy requires --admit-peer-work-templates");
+                }
+                if share_work_binding_policy.is_some() {
+                    bail!("share-work binding policy requires --admit-peer-work-templates");
                 }
                 None
             };
@@ -2457,6 +2494,28 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "policy": policy,
                     "policy_commitment": policy_commitment,
+                }))?
+            );
+        }
+        Command::InspectShareWorkActivation {
+            activation_manifest,
+            binding_policy,
+            require_launchable,
+        } => {
+            let manifest =
+                local_node::read_share_work_activation_manifest_file(&activation_manifest)?;
+            let policy = local_node::read_share_work_binding_policy_file(&binding_policy)?;
+            validate_share_work_policy_activation_pair(&policy, &manifest, require_launchable)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "activation_id": manifest.activation_id,
+                    "binding_policy_hash": policy.commitment_hash()?,
+                    "bitcoin_fork_activation_id": manifest.bitcoin_fork_activation_id,
+                    "experiment_id": manifest.experiment_id,
+                    "launch_enabled": manifest.launch_enabled,
+                    "sharechain_network_id": manifest.sharechain_network_id,
+                    "status": manifest.status,
                 }))?
             );
         }
@@ -2677,6 +2736,7 @@ async fn main() -> Result<()> {
                 idena_snapshot_proof_root,
                 hashrate_score_delta,
                 parent_share_hash,
+                work_binding: None,
                 mining_signature_hex: String::new(),
             };
             if share.bitcoin_template_hash.is_empty() {
@@ -2898,6 +2958,7 @@ async fn main() -> Result<()> {
                     Some(parent_share_hash) => parent_share_hash,
                     None => default_parent_share_hash(&datadir)?,
                 },
+                work_binding: None,
                 mining_signature_hex: String::new(),
             };
             if share.bitcoin_template_hash.is_empty() {
@@ -2965,6 +3026,8 @@ async fn main() -> Result<()> {
             derive_pohw_payouts_from_state,
             derive_pohw_min_snapshot_voters,
             snapshot_dir,
+            share_work_binding_policy,
+            share_work_binding_activation_manifest,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -2974,6 +3037,10 @@ async fn main() -> Result<()> {
             idena_anchor,
         } => {
             let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
+            let share_work_binding_policy = load_share_work_binding_policy(
+                share_work_binding_policy.as_deref(),
+                share_work_binding_activation_manifest.as_deref(),
+            )?;
             let (fork_chain_client, fork_chain_requires_idena_admission) = match (
                 fork_chain_rpc_addr,
                 fork_chain_activation_manifest,
@@ -3109,6 +3176,7 @@ async fn main() -> Result<()> {
                 derive_share_target_from_block,
                 require_idena_admission,
                 idena_anchor_verifier,
+                share_work_binding_policy,
             })
             .await?;
         }
@@ -3234,6 +3302,7 @@ async fn main() -> Result<()> {
                 &material,
                 extranonce2_size,
                 MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+                None,
             )?;
             if replace {
                 write_json_file_replace_existing_regular(&job_out, &built.built.job)?;
@@ -3359,16 +3428,18 @@ async fn main() -> Result<()> {
             verify_current_idena_submission_authorization(
                 &datadir,
                 miner_id.as_deref(),
+                &candidate,
                 verifier.as_ref(),
                 chain_name_requires_idena_admission(&chain_info.chain),
             )
             .await?;
             let outcome = client.submit_block(block_hex).await?;
-            if let Some(reason) = outcome.reject_reason {
+            if !matches!(outcome.status.as_str(), "accepted" | "duplicate") {
                 return Err(anyhow!(
-                    "Bitcoin RPC submitblock rejected candidate {}: {}",
+                    "Bitcoin RPC submitblock did not accept candidate {} (status={}): {}",
                     candidate.block_hash,
-                    reason
+                    outcome.status,
+                    outcome.reject_reason.as_deref().unwrap_or("no reason")
                 ));
             }
             println!(
@@ -3400,6 +3471,7 @@ async fn main() -> Result<()> {
             verify_current_idena_submission_authorization(
                 &datadir,
                 miner_id.as_deref(),
+                &candidate,
                 verifier.as_ref(),
                 chain_name_requires_idena_admission(&manifest.config.chain_name),
             )
@@ -3597,6 +3669,7 @@ async fn main() -> Result<()> {
                 },
                 allow_pohw_time_dependent_bits,
                 idena_anchor_verifier,
+                share_work_binding_policy: None,
             };
             let report = p2p_node::sync_gossip_from_peer_with_work_template_admission(
                 &datadir,
@@ -6315,6 +6388,65 @@ fn read_json_files<T: serde::de::DeserializeOwned>(paths: &[PathBuf]) -> Result<
     paths.iter().map(|path| read_json_file(path)).collect()
 }
 
+fn load_share_work_binding_policy(
+    policy_path: Option<&Path>,
+    activation_manifest_path: Option<&Path>,
+) -> Result<Option<pohw_core::share_work::ShareWorkBindingPolicyV1>> {
+    let (policy_path, activation_manifest_path) = match (policy_path, activation_manifest_path) {
+        (None, None) => return Ok(None),
+        (Some(policy_path), Some(activation_manifest_path)) => {
+            (policy_path, activation_manifest_path)
+        }
+        _ => bail!(
+            "--share-work-binding-policy and --share-work-binding-activation-manifest must be supplied together"
+        ),
+    };
+    let policy = local_node::read_share_work_binding_policy_file(policy_path)?;
+    let activation_manifest =
+        local_node::read_share_work_activation_manifest_file(activation_manifest_path)?;
+    validate_share_work_policy_activation_pair(&policy, &activation_manifest, true)?;
+    Ok(Some(policy))
+}
+
+fn validate_share_work_policy_activation_pair(
+    policy: &pohw_core::share_work::ShareWorkBindingPolicyV1,
+    activation_manifest: &pohw_core::share_work::ShareWorkActivationManifestV1,
+    require_launchable: bool,
+) -> Result<()> {
+    if require_launchable {
+        activation_manifest
+            .validate_for_launch()
+            .context("share-work activation manifest is not enabled for launch")?;
+    } else {
+        activation_manifest.validate()?;
+    }
+    if policy.fork_activation_id != activation_manifest.activation_id {
+        bail!(
+            "share-work policy activation {} does not match pinned activation manifest {}",
+            policy.fork_activation_id,
+            activation_manifest.activation_id
+        );
+    }
+    if policy.experiment_id != activation_manifest.experiment_id {
+        bail!(
+            "share-work policy experiment {} does not match activation manifest {}",
+            policy.experiment_id,
+            activation_manifest.experiment_id
+        );
+    }
+    if policy.sharechain_network_id != activation_manifest.sharechain_network_id {
+        bail!(
+            "share-work policy network {} does not match activation manifest {}",
+            policy.sharechain_network_id,
+            activation_manifest.sharechain_network_id
+        );
+    }
+    if policy.require_binding_from_genesis != activation_manifest.require_binding_from_genesis {
+        bail!("share-work policy binding mode does not match activation manifest");
+    }
+    Ok(())
+}
+
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
@@ -6363,6 +6495,7 @@ fn chain_name_requires_idena_admission(chain_name: &str) -> bool {
 async fn verify_current_idena_submission_authorization(
     datadir: &Path,
     miner_id: Option<&str>,
+    candidate: &mining_adapter::StratumBlockCandidate,
     verifier: Option<&idena_anchor_verifier::IdenaAnchorVerifier>,
     required: bool,
 ) -> Result<()> {
@@ -6370,25 +6503,68 @@ async fn verify_current_idena_submission_authorization(
         return Ok(());
     }
     let verifier = verifier.context("this fork profile requires --idena-anchor-policy")?;
-    let miner_id = miner_id.context("this fork profile requires --miner-id")?;
+    let publication = candidate
+        .publication
+        .as_ref()
+        .context("Idena-gated submission requires a signed candidate publication binding")?;
+    if let Some(miner_id) = miner_id {
+        if !miner_id.eq_ignore_ascii_case(&publication.share.miner_id) {
+            bail!("--miner-id does not match the miner signed into the candidate");
+        }
+    }
     verifier
         .verify_registry_deployment()
         .await
         .context("Idena miner registry deployment verification failed")?;
-    local_node::bind_idena_anchor_policy(datadir, verifier.policy())
-        .context("failed to bind Idena anchor policy to submission datadir")?;
     let replay = local_node::replay_state(datadir)
         .context("failed to replay the local miner registration")?;
     let registration = replay
         .registrations()
-        .get(&miner_id.to_ascii_lowercase())
-        .context("configured miner is not registered in the local sharechain")?
+        .get(&publication.share.miner_id.to_ascii_lowercase())
+        .context("candidate miner is not registered in the local sharechain")?
         .clone();
+    for (message, label) in [
+        (
+            SharechainMessage::BitcoinWorkTemplate(publication.template.clone()),
+            "work template",
+        ),
+        (SharechainMessage::Share(publication.share.clone()), "share"),
+    ] {
+        if !replay.has_message_hash(&message.message_hash()) {
+            bail!(
+                "candidate {label} is absent from local durable sharechain history; recover or publish it before standalone block submission"
+            );
+        }
+    }
     drop(replay);
+    let policy_hash = verifier.policy().commitment_hash()?;
+    mining_adapter::validate_candidate_publication_binding(
+        candidate,
+        publication,
+        Some(&registration),
+        Some(&policy_hash),
+    )?;
     verifier
         .verify_registration(&registration)
         .await
-        .context("registered Idena identity is not currently eligible for block submission")
+        .context("registered Idena identity is not currently eligible for block submission")?;
+    verifier
+        .verify_template(&registration, &publication.template, true)
+        .await
+        .context("candidate Idena anchor is not fresh and valid")?;
+    let checkpoint =
+        mining_adapter::verify_latest_submission_checkpoint(datadir, verifier, true).await?;
+    if publication.checkpoint.as_ref() != Some(&checkpoint)
+        || !publication
+            .share
+            .parent_share_hash
+            .eq_ignore_ascii_case(&checkpoint.share_tip_hash)
+    {
+        bail!("candidate is not bound to the active finalized sharechain checkpoint");
+    }
+    local_node::bind_idena_anchor_policy(datadir, verifier.policy())
+        .context("failed to bind Idena anchor policy to submission datadir")?;
+    Ok(())
 }
 
 fn fork_chain_client_from_options(
@@ -7608,6 +7784,9 @@ fn systemd_credential_permissions_are_safe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pohw_core::share_work::{
+        ShareWorkActivationManifestV1, ShareWorkBindingPolicyV1, SHARE_WORK_ACTIVATION_SCHEMA,
+    };
 
     fn test_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("{label}-{}", random_nonce_hex()));
@@ -7619,6 +7798,79 @@ mod tests {
                 .expect("secure test dir");
         }
         path
+    }
+
+    fn test_share_work_activation_pair(
+        launch_enabled: bool,
+    ) -> (ShareWorkBindingPolicyV1, ShareWorkActivationManifestV1) {
+        let mut manifest = ShareWorkActivationManifestV1 {
+            schema_version: SHARE_WORK_ACTIVATION_SCHEMA.to_string(),
+            profile_revision: 1,
+            status: if launch_enabled {
+                "experimental-active"
+            } else {
+                "experimental-candidate"
+            }
+            .to_string(),
+            launch_enabled,
+            activation_id: "00".repeat(32),
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            bitcoin_fork_activation_id: "11".repeat(32),
+            sharechain_network_id: "22".repeat(32),
+            require_binding_from_genesis: true,
+            require_fresh_datadir: true,
+            history_reinterpreted: false,
+            coinbase_commitment_tag: "P2SW1".to_string(),
+        };
+        manifest.activation_id = manifest.recomputed_activation_id().unwrap();
+        let policy = ShareWorkBindingPolicyV1 {
+            schema_version: 1,
+            experiment_id: manifest.experiment_id.clone(),
+            fork_activation_id: manifest.activation_id.clone(),
+            sharechain_network_id: manifest.sharechain_network_id.clone(),
+            require_binding_from_genesis: true,
+        };
+        (policy, manifest)
+    }
+
+    #[test]
+    fn share_work_activation_pair_is_content_bound_and_launch_interlocked() {
+        let (candidate_policy, candidate) = test_share_work_activation_pair(false);
+        validate_share_work_policy_activation_pair(&candidate_policy, &candidate, false).unwrap();
+        assert!(
+            validate_share_work_policy_activation_pair(&candidate_policy, &candidate, true)
+                .unwrap_err()
+                .to_string()
+                .contains("not enabled for launch")
+        );
+
+        let (mut active_policy, active) = test_share_work_activation_pair(true);
+        validate_share_work_policy_activation_pair(&active_policy, &active, true).unwrap();
+        active_policy.sharechain_network_id = "33".repeat(32);
+        assert!(
+            validate_share_work_policy_activation_pair(&active_policy, &active, true)
+                .unwrap_err()
+                .to_string()
+                .contains("network")
+        );
+    }
+
+    #[test]
+    fn checked_in_share_work_successor_is_valid_but_not_launchable() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = local_node::read_share_work_activation_manifest_file(
+            &repository_root.join("compatibility/experiment-1-share-work-successor-candidate.json"),
+        )
+        .unwrap();
+        let policy = local_node::read_share_work_binding_policy_file(
+            &repository_root.join("compatibility/experiment-1-share-work-binding-policy-v1.json"),
+        )
+        .unwrap();
+
+        validate_share_work_policy_activation_pair(&policy, &manifest, false).unwrap();
+        assert!(!manifest.launch_enabled);
+        assert_eq!(manifest.status, "experimental-candidate");
+        assert!(validate_share_work_policy_activation_pair(&policy, &manifest, true).is_err());
     }
 
     #[tokio::test]

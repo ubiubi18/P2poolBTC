@@ -12,11 +12,21 @@ mainnet key in the experiment.
 
 ## Community Review Day
 
-Until the public interlock opens, community onboarding has three independent
-preparation tracks. None imports an identity, contacts a peer, starts a service,
-or mines. Record the exact commit from `git rev-parse HEAD` as mirror metadata.
+Experiment 1's public interlock does not open: its Idena eligibility gate is a
+P2Pool runtime policy, not a Bitcoin block-consensus rule. Community onboarding
+therefore has three independent preparation tracks while a separately activated,
+consensus-enforced successor is designed and reviewed. None imports an identity,
+contacts a peer, starts a service, or mines. Record the exact commit from
+`git rev-parse HEAD` as mirror metadata.
 When canonical artifacts exist, also record the source CID and source-CAR
 SHA-256; those content identities are authoritative, while the commit is not.
+
+Reviewers can also inspect the inactive share-work successor described in
+[`docs/share-work-binding.md`](docs/share-work-binding.md). Its content-bound
+activation and policy must verify, while `--require-launchable` must fail. It
+prevents a P2Pool miner from assigning already-ground header work to a different
+parent or Idena anchor, but it is not the still-required Bitcoin-consensus
+identity gate.
 
 ### Observer or source reviewer
 
@@ -65,11 +75,13 @@ On a Linux host with SSD storage, run only the read-only host and policy check:
   --storage-path /srv/sharechain
 ```
 
-The expected result today is `blocked-public-join`. A suitable host may pass its
+The expected Experiment 1 result is always `blocked-public-join`. A suitable host may pass its
 system checks, but the command must not register an identity or start Core,
 gossip, Stratum, or mining. The end-to-end second-node rehearsal happens only
-after the independently verified registry deployment and release evidence are
-available.
+on a new successor activation after its consensus implementation, independently
+verified registry deployment, migration rehearsal, and release evidence are
+available. No evidence bundle can turn the existing Experiment 1 activation into
+that successor.
 
 Use the dedicated
 [independent verification form](https://github.com/ubiubi18/P2poolBTC/issues/new?template=experiment-1-independent-verification.yml)
@@ -150,8 +162,9 @@ For a future pruned-node host readiness check:
 
 Today, a clean observer checkout should end at `review-ready`; this means the
 guarded static review completed, not that project tests or release verification
-passed. A miner should end at `blocked-public-join`, because the independent release, registry, and
-second-node gates are not complete. That block is a safety result, not an
+passed. A miner should end at `blocked-public-join`, because Experiment 1 lacks
+Bitcoin-consensus identity enforcement in addition to its incomplete independent
+release, registry, and second-node gates. That block is a safety result, not an
 installation failure. Do not bypass it.
 
 The command writes three private local files under
@@ -172,8 +185,8 @@ posting anything.
 | `review-ready` | Guarded static source, manifest, policy, and host checks completed; project code was not executed | Review code and docs; use a disposable clean-room builder for tests |
 | `host-not-ready` | The selected role exceeds this host or required tools are missing | Read the plain-language next actions; choose `observer` if appropriate |
 | `verification-failed` | Source is dirty or a pinned verifier/test failed | Stop and use a clean exact checkout; do not override the failure |
-| `blocked-public-join` | Local checks passed, but public release gates remain incomplete | Wait; do not register an identity or start services |
-| `ready-for-identity-registration` | A future exact release passed every public gate | Continue with the full reviewed guide |
+| `blocked-public-join` | Local checks passed, but this activation lacks Bitcoin-consensus identity enforcement or another release gate | Review only; do not register an identity or start services; wait for a separately activated successor |
+| `ready-for-identity-registration` | A future successor release passed every public and consensus gate | Continue with that successor's reviewed guide |
 | `live-join-incomplete` | A read-only live proof found a missing local result | Follow only the listed local corrective action |
 | `live-join-verified` | The exact local Core service and consensus profile, fresh tip and peer, registration, eligible three-voter snapshot, template, gossip peer, and a fresh share from this miner all passed | Keep the receipt and monitor progress |
 

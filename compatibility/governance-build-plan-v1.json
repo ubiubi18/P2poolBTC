@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiccrmx4vtshnlgwnlmip45ovturpqq22tzfmioo6ec62s6qlsciyu",
-          "expectedSha256": "428b2fcace476acd66ad887f3aeace917c21ad4f25621cef105ed4bd05c848c5",
-          "expectedSize": 51315
+          "expectedCid": "bafkreibwyy6b4syccndi7bo6cc7l7usqb5zx73k7j3wfm6ydohdf5ox2va",
+          "expectedSha256": "36c63c1e4b0213468f85de10bebfd2500f737fed5f4eec567b0371c65ebafaa8",
+          "expectedSize": 51740
         },
         {
           "name": "experiment-1-full-consensus.json",

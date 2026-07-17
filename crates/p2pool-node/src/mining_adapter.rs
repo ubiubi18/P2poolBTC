@@ -16,10 +16,15 @@ use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{Block, ScriptBuf, Transaction};
 use chrono::{NaiveDate, Utc};
+use fs2::FileExt;
 use pohw_core::commitment::{
     validate_pohw_commitment, PohwCommitment, PohwCommitmentParams, PohwCommitmentValidationContext,
 };
+use pohw_core::idena_anchor::SharechainCheckpointAnchorV1;
 use pohw_core::payout::PayoutSchedule;
+use pohw_core::share_work::{
+    ShareWorkBindingPolicyV1, ShareWorkBindingV1, SHARE_WORK_BINDING_SCHEMA_VERSION,
+};
 use pohw_core::sharechain::{BitcoinWorkTemplate, MinerRegistration, Share, SharechainMessage};
 use pohw_core::snapshot::Snapshot;
 use pohw_core::vault::vault_script_pubkey_hex;
@@ -44,6 +49,7 @@ const DEFAULT_MAX_LINE_BYTES: usize = 16 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_JOB_REFRESH_INTERVAL_SECONDS: u64 = 5;
 const IDENA_ELIGIBILITY_POLL_INTERVAL_SECONDS: u64 = 15;
+const PENDING_BLOCK_PUBLICATION_RETRY_SECONDS: u64 = 30;
 const MAX_IDLE_TIMEOUT_SECONDS: u64 = 86_400;
 const MAX_JOB_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 const MIN_NON_LOOPBACK_PASSWORD_BYTES: usize = 16;
@@ -61,11 +67,19 @@ const MAX_JOB_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MERKLE_BRANCHES: usize = 512;
 const MAX_COINBASE_HEX_BYTES: usize = 512 * 1024;
 const MAX_COMPLETE_BLOCK_BYTES: usize = 4 * 1024 * 1024;
-const MAX_BLOCK_CANDIDATE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+// A consensus-valid block can serialize to almost 4 MiB and doubles in size when
+// represented as hex inside the candidate JSON.
+const MAX_BLOCK_CANDIDATE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PAYOUT_EVIDENCE_SNAPSHOT_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PAYOUT_EVIDENCE_SCHEDULE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PAYOUT_EVIDENCE_COMMITMENT_JSON_BYTES: u64 = 256 * 1024;
 const MAX_PAYOUT_EVIDENCE_CANDIDATE_JSON_BYTES: u64 = 64 * 1024;
+// The recovery record contains the hex-encoded block plus bounded payout evidence.
+const MAX_PENDING_BLOCK_PUBLICATION_JSON_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PENDING_BLOCK_PUBLICATIONS: usize = 128;
+const PENDING_BLOCK_PUBLICATION_DIR: &str = "pending-block-publications";
+const PENDING_BLOCK_PUBLICATION_LOCK_FILE: &str = ".pending-block-publications.lock";
+const STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION: u16 = 1;
 const PACKAGED_EXAMPLE_JOB_ID: &str = "experiment-0-example";
 const STRATUM_EXTRANONCE1_BYTES: usize = 4;
 const MAX_COINBASE_OUTPUTS: usize = 1_000;
@@ -165,6 +179,7 @@ pub(crate) struct MiningAdapterConfig {
     pub derive_share_target_from_block: bool,
     pub require_idena_admission: bool,
     pub idena_anchor_verifier: Option<IdenaAnchorVerifier>,
+    pub share_work_binding_policy: Option<ShareWorkBindingPolicyV1>,
 }
 
 #[derive(Clone)]
@@ -210,6 +225,7 @@ pub(crate) struct BuiltDynamicPohwStratumJob {
     pub snapshot: Snapshot,
     pub payout_schedule: PayoutSchedule,
     pub pohw_commitment: PohwCommitment,
+    pub share_work_binding: Option<ShareWorkBindingV1>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +240,16 @@ struct ActivePayoutEvidence {
 struct ActiveStratumJob {
     job: StratumJob,
     payout_evidence: Option<ActivePayoutEvidence>,
+    share_work_binding: Option<ShareWorkBindingV1>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ShareWorkBindingSeed {
+    policy_hash: String,
+    miner_id: String,
+    assigned_share_target: String,
+    idena_anchor: pohw_core::idena_anchor::IdenaBlockAnchorV1,
+    idena_anchor_policy_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +269,26 @@ pub(crate) struct StratumBlockCandidate {
     pub merkle_branch_count: usize,
     pub block_hex: Option<String>,
     pub block_hex_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<StratumCandidatePublicationV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StratumCandidatePublicationV1 {
+    pub schema_version: u16,
+    pub template: BitcoinWorkTemplate,
+    pub share: Share,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<SharechainCheckpointAnchorV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingBlockPublicationV1 {
+    schema_version: u16,
+    candidate: StratumBlockCandidate,
+    payout_messages: Vec<SharechainMessage>,
 }
 
 struct AdapterState {
@@ -300,8 +346,9 @@ struct AcceptedShareSummary {
     target: String,
     template_hash: String,
     share_hash: String,
-    template_publish: Value,
-    share_publish: Value,
+    template_publish: Option<Value>,
+    share_publish: Option<Value>,
+    publication_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,6 +373,23 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
     validate_bind_addr(config.bind_addr, config.allow_non_loopback_stratum)?;
     if config.require_idena_admission && config.idena_anchor_verifier.is_none() {
         bail!("this mining profile requires an active Idena anchor policy");
+    }
+    if let Some(policy) = config.share_work_binding_policy.as_ref() {
+        policy
+            .validate()
+            .context("invalid successor share-work binding policy")?;
+        if config.idena_anchor_verifier.is_none() {
+            bail!("share-work binding requires an active Idena anchor policy");
+        }
+        if config.share_target.is_none() {
+            bail!("share-work binding requires an explicit --share-target");
+        }
+        if !config.append {
+            bail!("share-work binding requires durable local sharechain append");
+        }
+        if config.fork_chain_client.is_none() && !config.refresh_job_from_rpc {
+            bail!("share-work binding requires a live Bitcoin template source");
+        }
     }
     if !config.bind_addr.ip().is_loopback() && config.stratum_password_file.is_none() {
         bail!("refusing non-loopback Stratum adapter without --stratum-password-file");
@@ -403,12 +467,32 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         local_node::bind_idena_anchor_policy(&config.datadir, verifier.policy())
             .context("failed to bind Idena anchor policy to mining sharechain datadir")?;
     }
+    if let Some(policy) = config.share_work_binding_policy.as_ref() {
+        let verifier = config
+            .idena_anchor_verifier
+            .as_ref()
+            .expect("validated share-work policy has an Idena verifier");
+        if !policy
+            .experiment_id
+            .eq_ignore_ascii_case(&verifier.policy().experiment_id)
+        {
+            bail!(
+                "share-work experiment {} does not match Idena anchor experiment {}",
+                policy.experiment_id,
+                verifier.policy().experiment_id
+            );
+        }
+        local_node::bind_share_work_binding_policy(&config.datadir, policy)
+            .context("failed to bind successor share-work policy to mining datadir")?;
+    }
     if config.payout_schedule.is_some()
         && !config.refresh_job_from_rpc
         && config.fork_chain_client.is_none()
     {
         bail!("payout schedule and PoHW commitment require a live template source");
     }
+    let share_work_seed =
+        prepare_share_work_binding_seed(&config, config.share_target.as_deref()).await?;
     let active_job = if let Some(client) = config.fork_chain_client.as_ref() {
         let material = client.mining_template().await?;
         if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
@@ -418,19 +502,11 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
                 config.miner_id.clone(),
                 material,
                 config.extranonce2_size,
+                share_work_seed.clone(),
             )
             .await?
         } else {
-            ActiveStratumJob {
-                job: build_job_for_template_source(
-                    &material,
-                    config.payout_schedule.as_ref(),
-                    config.pohw_commitment.as_ref(),
-                    config.extranonce2_size,
-                )?
-                .job,
-                payout_evidence: None,
-            }
+            build_static_active_job(&config, &material, share_work_seed.as_ref())?
         }
     } else if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
         let client = config
@@ -444,8 +520,16 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             config.miner_id.clone(),
             material,
             config.extranonce2_size,
+            share_work_seed.clone(),
         )
         .await?
+    } else if config.refresh_job_from_rpc {
+        let client = config
+            .bitcoin_rpc_client
+            .as_ref()
+            .context("Bitcoin RPC is required for live job refresh")?;
+        let (_, material) = crate::mining_job_template_if_ready(client).await?;
+        build_static_active_job(&config, &material, share_work_seed.as_ref())?
     } else {
         let job_file = config
             .job_file
@@ -454,6 +538,7 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         ActiveStratumJob {
             job: read_stratum_job_file(job_file)?,
             payout_evidence: None,
+            share_work_binding: None,
         }
     };
     let job = &active_job.job;
@@ -484,10 +569,6 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             .get(&config.miner_id.to_ascii_lowercase())
             .context("anchored mining requires a local miner registration")?
             .clone();
-        verifier
-            .verify_registration(&registration)
-            .await
-            .context("local Idena miner registry rejected the configured miner")?;
         Some((verifier.clone(), registration))
     } else {
         None
@@ -505,6 +586,15 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         block_submission_lock: Mutex::new(()),
         idena_anchor_submission_lock: Mutex::new(()),
     });
+    if state.config.auto_submit_blocks {
+        recover_pending_block_publications(&state).await?;
+    }
+    if let Some((verifier, registration)) = idena_eligibility_monitor.as_ref() {
+        verifier
+            .verify_registration(registration)
+            .await
+            .context("local Idena miner registry rejected the configured miner")?;
+    }
     let listener = TcpListener::bind(state.config.bind_addr)
         .await
         .with_context(|| {
@@ -522,6 +612,12 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         let refresh_state = Arc::clone(&state);
         tokio::spawn(async move {
             refresh_job_loop(refresh_state).await;
+        });
+    }
+    if state.config.auto_submit_blocks {
+        let recovery_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            pending_block_publication_recovery_loop(recovery_state).await;
         });
     }
 
@@ -645,6 +741,8 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
             .context("live mining template source is not configured")?;
         crate::mining_job_template_if_ready(client).await?.1
     };
+    let share_work_seed =
+        prepare_share_work_binding_seed(&state.config, Some(&state.share_target)).await?;
     let active_job = if let Some(dynamic) = state.config.dynamic_pohw_payout.as_ref() {
         build_dynamic_active_job(
             state.config.datadir.clone(),
@@ -652,19 +750,11 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
             state.config.miner_id.clone(),
             material,
             state.config.extranonce2_size,
+            share_work_seed.clone(),
         )
         .await?
     } else {
-        ActiveStratumJob {
-            job: build_job_for_template_source(
-                &material,
-                state.config.payout_schedule.as_ref(),
-                state.config.pohw_commitment.as_ref(),
-                state.config.extranonce2_size,
-            )?
-            .job,
-            payout_evidence: None,
-        }
+        build_static_active_job(&state.config, &material, share_work_seed.as_ref())?
     };
     let job = &active_job.job;
     job.validate()?;
@@ -690,6 +780,7 @@ async fn build_dynamic_active_job(
     miner_id: String,
     material: BitcoinMiningJobTemplate,
     extranonce2_size: usize,
+    share_work_seed: Option<ShareWorkBindingSeed>,
 ) -> Result<ActiveStratumJob> {
     let dynamic_job = tokio::task::spawn_blocking(move || {
         build_dynamic_pohw_stratum_job_from_template(
@@ -700,6 +791,7 @@ async fn build_dynamic_active_job(
             &material,
             extranonce2_size,
             dynamic.min_snapshot_voters,
+            share_work_seed.as_ref(),
         )
     })
     .await
@@ -712,6 +804,94 @@ async fn build_dynamic_active_job(
             pohw_commitment: dynamic_job.pohw_commitment,
             reward_sats: dynamic_job.built.source_coinbase_value_sats,
         }),
+        share_work_binding: dynamic_job.share_work_binding,
+    })
+}
+
+async fn prepare_share_work_binding_seed(
+    config: &MiningAdapterConfig,
+    assigned_share_target: Option<&str>,
+) -> Result<Option<ShareWorkBindingSeed>> {
+    let Some(policy) = config.share_work_binding_policy.as_ref() else {
+        return Ok(None);
+    };
+    let assigned_share_target = assigned_share_target
+        .context("share-work binding requires an explicit assigned share target")?;
+    let verifier = config
+        .idena_anchor_verifier
+        .as_ref()
+        .context("share-work binding requires an Idena anchor verifier")?;
+    let replay = local_node::replay_state(&config.datadir)?;
+    let registration = replay
+        .registrations()
+        .get(&config.miner_id.to_ascii_lowercase())
+        .context("share-work binding requires a local miner registration")?;
+    verifier
+        .verify_registration(registration)
+        .await
+        .context("share-work binding miner registration is not currently eligible")?;
+    let idena_anchor = verifier
+        .fresh_finalized_anchor(registration)
+        .await
+        .context("failed to select a finalized Idena anchor before issuing mining work")?;
+    Ok(Some(ShareWorkBindingSeed {
+        policy_hash: policy.commitment_hash()?,
+        miner_id: config.miner_id.to_ascii_lowercase(),
+        assigned_share_target: assigned_share_target.to_ascii_lowercase(),
+        idena_anchor,
+        idena_anchor_policy_hash: verifier.policy().commitment_hash()?,
+    }))
+}
+
+fn build_share_work_binding(
+    seed: &ShareWorkBindingSeed,
+    parent_share_hash: &str,
+    idena_snapshot_id: &str,
+    idena_snapshot_proof_root: &str,
+) -> Result<ShareWorkBindingV1> {
+    let binding = ShareWorkBindingV1 {
+        schema_version: SHARE_WORK_BINDING_SCHEMA_VERSION,
+        policy_hash: seed.policy_hash.clone(),
+        miner_id: seed.miner_id.clone(),
+        assigned_share_target: seed.assigned_share_target.clone(),
+        parent_share_hash: parent_share_hash.to_ascii_lowercase(),
+        idena_snapshot_id: idena_snapshot_id.to_ascii_lowercase(),
+        idena_snapshot_proof_root: idena_snapshot_proof_root.to_ascii_lowercase(),
+        idena_anchor: seed.idena_anchor.clone().normalized(),
+        idena_anchor_policy_hash: seed.idena_anchor_policy_hash.clone(),
+        coinbase_tx_hex: String::new(),
+        coinbase_merkle_branches: Vec::new(),
+    };
+    binding.validate_commitment_fields()?;
+    Ok(binding)
+}
+
+fn build_static_active_job(
+    config: &MiningAdapterConfig,
+    material: &BitcoinMiningJobTemplate,
+    share_work_seed: Option<&ShareWorkBindingSeed>,
+) -> Result<ActiveStratumJob> {
+    let share_work_binding = share_work_seed
+        .map(|seed| {
+            build_share_work_binding(
+                seed,
+                &default_parent_share_hash(&config.datadir)?,
+                &config.idena_snapshot_id,
+                &config.idena_snapshot_proof_root,
+            )
+        })
+        .transpose()?;
+    Ok(ActiveStratumJob {
+        job: build_job_for_template_source(
+            material,
+            config.payout_schedule.as_ref(),
+            config.pohw_commitment.as_ref(),
+            share_work_binding.as_ref(),
+            config.extranonce2_size,
+        )?
+        .job,
+        payout_evidence: None,
+        share_work_binding,
     })
 }
 
@@ -719,13 +899,22 @@ fn build_job_for_template_source(
     material: &BitcoinMiningJobTemplate,
     payout_schedule: Option<&PayoutSchedule>,
     pohw_commitment: Option<&PohwCommitment>,
+    share_work_binding: Option<&ShareWorkBindingV1>,
     extranonce2_size: usize,
 ) -> Result<BuiltStratumJob> {
     match (payout_schedule, pohw_commitment) {
-        (Some(schedule), Some(commitment)) => {
-            build_pohw_stratum_job_from_template(material, schedule, commitment, extranonce2_size)
-        }
-        (None, None) => build_stratum_job_from_template(material, extranonce2_size),
+        (Some(schedule), Some(commitment)) => build_pohw_stratum_job_from_template_with_binding(
+            material,
+            schedule,
+            commitment,
+            share_work_binding,
+            extranonce2_size,
+        ),
+        (None, None) => build_stratum_job_from_template_with_binding(
+            material,
+            share_work_binding,
+            extranonce2_size,
+        ),
         _ => Err(anyhow!(
             "payout schedule and PoHW commitment must be supplied together"
         )),
@@ -736,12 +925,21 @@ pub(crate) fn build_stratum_job_from_template(
     material: &BitcoinMiningJobTemplate,
     extranonce2_size: usize,
 ) -> Result<BuiltStratumJob> {
+    build_stratum_job_from_template_with_binding(material, None, extranonce2_size)
+}
+
+fn build_stratum_job_from_template_with_binding(
+    material: &BitcoinMiningJobTemplate,
+    share_work_binding: Option<&ShareWorkBindingV1>,
+    extranonce2_size: usize,
+) -> Result<BuiltStratumJob> {
     validate_extranonce2_size(extranonce2_size)?;
     let (coinbase1, coinbase2) = coinbase_split_for_extranonces(
         material.height,
         extranonce2_size,
         material.default_witness_commitment.as_deref(),
         material.pohw_replay_marker.as_deref(),
+        share_work_binding,
     )?;
     build_stratum_job_from_parts(
         material,
@@ -758,6 +956,22 @@ pub(crate) fn build_pohw_stratum_job_from_template(
     pohw_commitment: &PohwCommitment,
     extranonce2_size: usize,
 ) -> Result<BuiltStratumJob> {
+    build_pohw_stratum_job_from_template_with_binding(
+        material,
+        payout_schedule,
+        pohw_commitment,
+        None,
+        extranonce2_size,
+    )
+}
+
+fn build_pohw_stratum_job_from_template_with_binding(
+    material: &BitcoinMiningJobTemplate,
+    payout_schedule: &PayoutSchedule,
+    pohw_commitment: &PohwCommitment,
+    share_work_binding: Option<&ShareWorkBindingV1>,
+    extranonce2_size: usize,
+) -> Result<BuiltStratumJob> {
     validate_extranonce2_size(extranonce2_size)?;
     let (coinbase1, coinbase2) = coinbase_split_for_pohw_payouts(
         material.height,
@@ -767,6 +981,7 @@ pub(crate) fn build_pohw_stratum_job_from_template(
         pohw_commitment,
         material.default_witness_commitment.as_deref(),
         material.pohw_replay_marker.as_deref(),
+        share_work_binding,
     )?;
     build_stratum_job_from_parts(
         material,
@@ -777,6 +992,7 @@ pub(crate) fn build_pohw_stratum_job_from_template(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
     datadir: &Path,
     snapshot_dir: &Path,
@@ -785,6 +1001,7 @@ pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
     material: &BitcoinMiningJobTemplate,
     extranonce2_size: usize,
     min_snapshot_voters: usize,
+    share_work_seed: Option<&ShareWorkBindingSeed>,
 ) -> Result<BuiltDynamicPohwStratumJob> {
     let state = local_node::replay_state_with_confirmed_payouts(datadir, Some(snapshot_dir))?;
     let snapshot_status = local_node::latest_verified_snapshot(snapshot_dir)?;
@@ -878,10 +1095,21 @@ pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
         },
     )
     .context("derived PoHW commitment failed validation")?;
-    let built = build_pohw_stratum_job_from_template(
+    let share_work_binding = share_work_seed
+        .map(|seed| {
+            build_share_work_binding(
+                seed,
+                &sharechain_tip,
+                &snapshot_day,
+                &verified.snapshot.score_root,
+            )
+        })
+        .transpose()?;
+    let built = build_pohw_stratum_job_from_template_with_binding(
         material,
         &payout_schedule,
         &pohw_commitment,
+        share_work_binding.as_ref(),
         extranonce2_size,
     )?;
     Ok(BuiltDynamicPohwStratumJob {
@@ -889,6 +1117,7 @@ pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
         snapshot: verified.snapshot,
         payout_schedule,
         pohw_commitment,
+        share_work_binding,
     })
 }
 
@@ -1221,13 +1450,145 @@ pub(crate) fn build_stratum_block_candidate(
         merkle_branch_count: job.merkle_branches.len(),
         block_hex,
         block_hex_status,
+        publication: None,
     })
+}
+
+fn attach_candidate_publication(
+    candidate: &mut StratumBlockCandidate,
+    template: BitcoinWorkTemplate,
+    share: Share,
+    checkpoint: Option<SharechainCheckpointAnchorV1>,
+) -> Result<()> {
+    if candidate.publication.is_some() {
+        bail!("candidate publication binding is already present");
+    }
+    let publication = StratumCandidatePublicationV1 {
+        schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+        template,
+        share,
+        checkpoint,
+    };
+    validate_candidate_publication_binding(candidate, &publication, None, None)?;
+    candidate.publication = Some(publication);
+    Ok(())
+}
+
+pub(crate) fn validate_candidate_publication_binding<'a>(
+    candidate: &StratumBlockCandidate,
+    publication: &'a StratumCandidatePublicationV1,
+    registration: Option<&MinerRegistration>,
+    expected_policy_hash: Option<&str>,
+) -> Result<&'a StratumCandidatePublicationV1> {
+    if publication.schema_version != STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION {
+        bail!(
+            "unsupported candidate publication schema version {}",
+            publication.schema_version
+        );
+    }
+    validate_stratum_candidate_header(candidate)?;
+    publication
+        .template
+        .verify_template_hash()
+        .context("candidate publication template hash is invalid")?;
+    if !publication
+        .share
+        .miner_id
+        .eq_ignore_ascii_case(&publication.template.miner_id)
+    {
+        bail!("candidate publication template and share use different miners");
+    }
+    if !publication
+        .share
+        .bitcoin_header_hex
+        .eq_ignore_ascii_case(&candidate.bitcoin_header_hex)
+        || !publication
+            .share
+            .work_hash
+            .eq_ignore_ascii_case(&candidate.block_hash)
+    {
+        bail!("candidate publication share does not commit to the candidate block");
+    }
+    if let Some(registration) = registration {
+        if !registration
+            .miner_id
+            .eq_ignore_ascii_case(&publication.share.miner_id)
+        {
+            bail!("candidate publication is not signed by the selected miner");
+        }
+        publication
+            .template
+            .verify_mining_signature(&registration.mining_pubkey_hex)
+            .context("candidate publication template signature is invalid")?;
+        publication
+            .share
+            .verify_mining_signature_for_template(
+                &registration.mining_pubkey_hex,
+                &publication.template,
+            )
+            .context("candidate publication share signature is invalid")?;
+    }
+    if let Some(expected_policy_hash) = expected_policy_hash {
+        let actual_policy_hash = publication
+            .template
+            .require_idena_anchor_policy_hash()
+            .context("candidate publication template has no Idena policy binding")?;
+        if !actual_policy_hash.eq_ignore_ascii_case(expected_policy_hash) {
+            bail!("candidate publication uses a different Idena anchor policy");
+        }
+    }
+    Ok(publication)
 }
 
 pub(crate) fn block_hex_for_stratum_candidate_submission(
     candidate: &StratumBlockCandidate,
 ) -> Result<&str> {
+    validate_stratum_candidate_header(candidate)?;
+    if !candidate.meets_block_target {
+        bail!(
+            "refusing to submit candidate {} because it does not meet the advertised block target",
+            candidate.block_hash
+        );
+    }
+
+    if !matches!(
+        candidate.block_hex_status.as_str(),
+        "complete_coinbase_only" | "complete_with_non_coinbase_transactions"
+    ) {
+        bail!(
+            "refusing to submit candidate {} because block_hex_status is {}; only complete block_hex candidates can be submitted",
+            candidate.block_hash,
+            candidate.block_hex_status
+        );
+    }
+    let block_hex = candidate.block_hex.as_deref().ok_or_else(|| {
+        anyhow!(
+            "candidate {} has no complete block_hex",
+            candidate.block_hash
+        )
+    })?;
     let header = decode_hex_exact_bytes("bitcoin_header", &candidate.bitcoin_header_hex, 80)?;
+    validate_candidate_block_hex(candidate, block_hex, &header)?;
+
+    Ok(block_hex)
+}
+
+fn validate_stratum_candidate_header(candidate: &StratumBlockCandidate) -> Result<()> {
+    let header = decode_hex_exact_bytes("bitcoin_header", &candidate.bitcoin_header_hex, 80)?;
+    validate_hex_exact("candidate ntime", &candidate.ntime, 4)?;
+    if !candidate
+        .ntime
+        .eq_ignore_ascii_case(&hex::encode(&header[68..72]))
+    {
+        bail!("candidate ntime does not match the serialized block header");
+    }
+    validate_hex_exact("candidate nonce", &candidate.nonce, 4)?;
+    if !candidate
+        .nonce
+        .eq_ignore_ascii_case(&hex::encode(&header[76..80]))
+    {
+        bail!("candidate nonce does not match the serialized block header");
+    }
     let computed_block_hash = sha256d::Hash::hash(&header).to_string();
     if !candidate
         .block_hash
@@ -1260,32 +1621,7 @@ pub(crate) fn block_hex_for_stratum_candidate_submission(
             recomputed_meets_block_target
         );
     }
-    if !recomputed_meets_block_target {
-        bail!(
-            "refusing to submit candidate {} because it does not meet the advertised block target",
-            candidate.block_hash
-        );
-    }
-
-    if !matches!(
-        candidate.block_hex_status.as_str(),
-        "complete_coinbase_only" | "complete_with_non_coinbase_transactions"
-    ) {
-        bail!(
-            "refusing to submit candidate {} because block_hex_status is {}; only complete block_hex candidates can be submitted",
-            candidate.block_hash,
-            candidate.block_hex_status
-        );
-    }
-    let block_hex = candidate.block_hex.as_deref().ok_or_else(|| {
-        anyhow!(
-            "candidate {} has no complete block_hex",
-            candidate.block_hash
-        )
-    })?;
-    validate_candidate_block_hex(candidate, block_hex, &header)?;
-
-    Ok(block_hex)
+    Ok(())
 }
 
 impl StratumJob {
@@ -1810,7 +2146,7 @@ async fn accept_submit(
     } else {
         None
     };
-    let block_candidate = submit_stage(
+    let mut block_candidate = submit_stage(
         build_stratum_block_candidate(
             job,
             extranonce1,
@@ -1822,6 +2158,32 @@ async fn accept_submit(
         ),
         "candidate",
     )?;
+    let share_work_binding = if let Some(binding) = active_job.share_work_binding.as_ref() {
+        let current_parent = submit_stage(
+            default_parent_share_hash(&state.config.datadir),
+            "share-work-binding",
+        )?;
+        if !binding
+            .parent_share_hash
+            .eq_ignore_ascii_case(&current_parent)
+        {
+            return Err(anyhow!(
+                "Stratum job is stale: committed share parent {} is no longer active",
+                binding.parent_share_hash
+            )
+            .context(ShareSubmitStage("share-work-binding")));
+        }
+        let mut binding = binding.clone();
+        binding.coinbase_tx_hex = block_candidate.coinbase_tx_hex.clone();
+        binding.coinbase_merkle_branches = job.merkle_branches.clone();
+        submit_stage(
+            binding.verify_header_commitment(&bitcoin_header_hex),
+            "share-work-binding",
+        )?;
+        Some(binding)
+    } else {
+        None
+    };
     let _block_submission_guard =
         if block_candidate.meets_block_target && state.config.auto_submit_blocks {
             Some(state.block_submission_lock.lock().await)
@@ -1832,7 +2194,12 @@ async fn accept_submit(
         template_created_at_unix_from_header_hex(&bitcoin_header_hex),
         "template",
     )?;
-    let idena_anchor = if let Some(verifier) = state.config.idena_anchor_verifier.as_ref() {
+    let idena_anchor = if let Some(binding) = share_work_binding.as_ref() {
+        Some((
+            binding.idena_anchor.clone(),
+            binding.idena_anchor_policy_hash.clone(),
+        ))
+    } else if let Some(verifier) = state.config.idena_anchor_verifier.as_ref() {
         let replay = submit_stage(
             local_node::replay_state(&state.config.datadir),
             "idena-anchor",
@@ -1853,31 +2220,6 @@ async fn accept_submit(
         ))
     } else {
         None
-    };
-    let block_candidate_file = submit_stage(
-        persist_target_block_candidate(
-            state.config.block_candidate_dir.as_deref(),
-            &block_candidate,
-        ),
-        "candidate-persistence",
-    )?;
-    let payout_candidate_file = match (
-        block_candidate.meets_block_target,
-        active_job.payout_evidence.as_ref(),
-    ) {
-        (true, Some(evidence)) => {
-            let candidate_dir = state
-                .config
-                .payout_candidate_dir
-                .as_deref()
-                .context("dynamic PoHW payout candidate dir is not configured")?;
-            let path = submit_stage(
-                persist_payout_confirmation_evidence(candidate_dir, &block_candidate, evidence),
-                "payout-persistence",
-            )?;
-            Some(path)
-        }
-        _ => None,
     };
     let mut template = submit_stage(
         match idena_anchor {
@@ -1911,14 +2253,21 @@ async fn accept_submit(
     )?;
     let template_hash = template.template_hash.clone();
 
-    let (idena_snapshot_id, idena_snapshot_proof_root) = active_job
-        .payout_evidence
+    let (idena_snapshot_id, idena_snapshot_proof_root) = share_work_binding
         .as_ref()
-        .map(|evidence| {
+        .map(|binding| {
             (
-                evidence.snapshot.snapshot_day.to_string(),
-                evidence.snapshot.score_root.clone(),
+                binding.idena_snapshot_id.clone(),
+                binding.idena_snapshot_proof_root.clone(),
             )
+        })
+        .or_else(|| {
+            active_job.payout_evidence.as_ref().map(|evidence| {
+                (
+                    evidence.snapshot.snapshot_day.to_string(),
+                    evidence.snapshot.score_root.clone(),
+                )
+            })
         })
         .unwrap_or_else(|| {
             (
@@ -1926,6 +2275,10 @@ async fn accept_submit(
                 state.config.idena_snapshot_proof_root.clone(),
             )
         });
+    let parent_share_hash = match share_work_binding.as_ref() {
+        Some(binding) => Ok(binding.parent_share_hash.clone()),
+        None => default_parent_share_hash(&state.config.datadir),
+    };
     let mut share = Share {
         miner_id: state.config.miner_id.clone(),
         bitcoin_header_hex,
@@ -1939,7 +2292,8 @@ async fn accept_submit(
             Share::expected_hashrate_score_delta_for_target(&state.share_target),
             "share",
         )?,
-        parent_share_hash: submit_stage(default_parent_share_hash(&state.config.datadir), "share")?,
+        parent_share_hash: submit_stage(parent_share_hash, "share")?,
+        work_binding: share_work_binding.map(Box::new),
         mining_signature_hex: String::new(),
     };
     share.mining_signature_hex = sign_hash_hex(share.signing_hash(), &mining_keypair);
@@ -1947,9 +2301,28 @@ async fn accept_submit(
         share.verify_mining_signature_for_template(&state.mining_pubkey_hex, &template),
         "signing",
     )?;
+    if let Some(policy) = state.config.share_work_binding_policy.as_ref() {
+        submit_stage(
+            share.verify_required_work_binding(&template, policy),
+            "share-work-binding",
+        )?;
+    }
     if let Some(verifier) = state.config.idena_anchor_verifier.as_ref() {
         let replay = submit_stage(
             local_node::replay_state(&state.config.datadir),
+            "idena-anchor",
+        )?;
+        let registration = submit_stage(
+            replay
+                .registrations()
+                .get(&state.config.miner_id.to_ascii_lowercase())
+                .context("anchored mining requires a local miner registration"),
+            "idena-anchor",
+        )?;
+        submit_stage(
+            verifier
+                .verify_template(registration, &template, true)
+                .await,
             "idena-anchor",
         )?;
         submit_stage(
@@ -2006,78 +2379,144 @@ async fn accept_submit(
             )?;
         }
     }
-    let block_submit = maybe_submit_block_candidate(state, &block_candidate).await;
-    if block_candidate.meets_block_target && state.config.auto_submit_blocks {
+    let checkpoint = if block_candidate.meets_block_target {
+        if let Some(verifier) = state.config.idena_anchor_verifier.as_ref() {
+            let checkpoint = submit_stage(
+                verify_latest_submission_checkpoint(&state.config.datadir, verifier, true).await,
+                "checkpoint",
+            )?;
+            if !share
+                .parent_share_hash
+                .eq_ignore_ascii_case(&checkpoint.share_tip_hash)
+            {
+                return Err(anyhow!(
+                    "target share does not extend the active finalized checkpoint"
+                )
+                .context(ShareSubmitStage("checkpoint")));
+            }
+            Some(checkpoint)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let publication = StratumCandidatePublicationV1 {
+        schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+        template: template.clone(),
+        share: share.clone(),
+        checkpoint: checkpoint.clone(),
+    };
+    if block_candidate.meets_block_target {
         submit_stage(
-            require_successful_block_submission(block_submit.as_ref()),
-            "block-submission",
+            attach_candidate_publication(
+                &mut block_candidate,
+                template.clone(),
+                share.clone(),
+                checkpoint,
+            ),
+            "candidate-binding",
         )?;
     }
-    submit_stage(
-        local_node::accept_bitcoin_work_template(&state.config.datadir, template.clone()),
-        "publication",
+    let block_candidate_file = submit_stage(
+        persist_target_block_candidate(
+            state.config.block_candidate_dir.as_deref(),
+            &block_candidate,
+        ),
+        "candidate-persistence",
     )?;
-    let template_publish = submit_stage(
-        publish_sharechain_message(PublishSharechainMessageInput {
-            datadir: state.config.datadir.clone(),
-            message: SharechainMessage::BitcoinWorkTemplate(template),
-            node_secret_key_file: state.config.node_secret_key_file.clone(),
-            message_out: None,
-            envelope_out: None,
-            append: state.config.append,
-            peer_addrs: state.config.peer_addrs.clone(),
-        })
-        .await,
-        "publication",
-    )?;
-    if let Some(evidence) = active_job
+    let payout_candidate_file = match (
+        block_candidate.meets_block_target,
+        active_job.payout_evidence.as_ref(),
+    ) {
+        (true, Some(evidence)) => {
+            let candidate_dir = state
+                .config
+                .payout_candidate_dir
+                .as_deref()
+                .context("dynamic PoHW payout candidate dir is not configured")?;
+            let path = submit_stage(
+                persist_payout_confirmation_evidence(candidate_dir, &block_candidate, evidence),
+                "payout-persistence",
+            )?;
+            Some(path)
+        }
+        _ => None,
+    };
+    let payout_messages = active_job
         .payout_evidence
         .as_ref()
         .filter(|_| block_candidate.meets_block_target)
-    {
-        for (message, label) in target_block_payout_messages(evidence) {
-            submit_stage(
-                publish_sharechain_message(PublishSharechainMessageInput {
-                    datadir: state.config.datadir.clone(),
-                    message,
-                    node_secret_key_file: state.config.node_secret_key_file.clone(),
-                    message_out: None,
-                    envelope_out: None,
-                    append: true,
-                    peer_addrs: state.config.peer_addrs.clone(),
-                })
-                .await
-                .with_context(|| format!("failed to publish target block's {label}")),
-                "publication",
-            )?;
+        .map(|evidence| {
+            target_block_payout_messages(evidence)
+                .into_iter()
+                .map(|(message, _)| message)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let pending_publication =
+        if block_candidate.meets_block_target && state.config.auto_submit_blocks {
+            Some(submit_stage(
+                persist_pending_block_publication(
+                    &state.config.datadir,
+                    &PendingBlockPublicationV1 {
+                        schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+                        candidate: block_candidate.clone(),
+                        payout_messages: payout_messages.clone(),
+                    },
+                ),
+                "publication-journal",
+            )?)
+        } else {
+            None
+        };
+    let block_submit = maybe_submit_block_candidate(state, &block_candidate).await;
+    if block_candidate.meets_block_target && state.config.auto_submit_blocks {
+        if let Err(error) = require_successful_block_submission(block_submit.as_ref()) {
+            if block_submission_is_definitively_rejected(block_submit.as_ref()) {
+                if let Some(path) = pending_publication.as_deref() {
+                    remove_pending_block_publication(path)?;
+                }
+            }
+            return Err(error.context(ShareSubmitStage("block-submission")));
         }
     }
     let share_hash = share.share_hash();
     let bitcoin_header_hex = share.bitcoin_header_hex.clone();
     let work_hash = share.work_hash.clone();
-    let share_publish = submit_stage(
-        publish_sharechain_message(PublishSharechainMessageInput {
-            datadir: state.config.datadir.clone(),
-            message: SharechainMessage::Share(share),
-            node_secret_key_file: state.config.node_secret_key_file.clone(),
-            message_out: None,
-            envelope_out: None,
-            append: state.config.append,
-            peer_addrs: state.config.peer_addrs.clone(),
+    let block_was_submitted = block_candidate.meets_block_target
+        && state.config.auto_submit_blocks
+        && block_submission_succeeded(block_submit.as_ref());
+    let (template_publish, share_publish, publication_pending) =
+        match publish_candidate_publication(state, &block_candidate, &publication, &payout_messages)
+            .await
+        {
+            Ok((template_publish, share_publish)) => {
+                if let Some(path) = pending_publication.as_deref() {
+                    remove_pending_block_publication(path)?;
+                }
+                (Some(template_publish), Some(share_publish), false)
+            }
+            Err(error) if block_was_submitted => {
+                eprintln!(
+                    "block accepted but sharechain publication is pending durable recovery: {error:#}"
+                );
+                (None, None, true)
+            }
+            Err(error) => return Err(error.context(ShareSubmitStage("publication"))),
+        };
+    if state.config.share_work_binding_policy.is_some()
+        || block_submit.as_ref().is_some_and(|submission| {
+            submission
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| matches!(outcome.status.as_str(), "accepted" | "duplicate"))
         })
-        .await,
-        "publication",
-    )?;
-    if block_submit.as_ref().is_some_and(|submission| {
-        submission
-            .outcome
-            .as_ref()
-            .is_some_and(|outcome| matches!(outcome.status.as_str(), "accepted" | "duplicate"))
-    }) {
+    {
         match refresh_job_once(state).await {
             Ok(Some(job_id)) => eprintln!("published replacement Stratum job {job_id}"),
             Ok(None) => {}
-            Err(err) => eprintln!("failed immediate post-block Stratum refresh: {err:#}"),
+            Err(err) => eprintln!("failed immediate post-share Stratum refresh: {err:#}"),
         }
     }
 
@@ -2100,6 +2539,7 @@ async fn accept_submit(
         share_hash,
         template_publish,
         share_publish,
+        publication_pending,
     })
 }
 
@@ -2118,6 +2558,82 @@ fn target_block_payout_messages(
     ]
 }
 
+async fn publish_candidate_publication(
+    state: &AdapterState,
+    candidate: &StratumBlockCandidate,
+    publication: &StratumCandidatePublicationV1,
+    payout_messages: &[SharechainMessage],
+) -> Result<(Value, Value)> {
+    let replay = local_node::replay_state(&state.config.datadir)
+        .context("failed to replay registrations before sharechain publication")?;
+    let registration = replay
+        .registrations()
+        .get(&publication.share.miner_id.to_ascii_lowercase())
+        .context("candidate publication miner is not registered locally")?
+        .clone();
+    drop(replay);
+    let expected_policy_hash = state
+        .config
+        .idena_anchor_verifier
+        .as_ref()
+        .map(|verifier| verifier.policy().commitment_hash())
+        .transpose()
+        .context("failed to derive the active Idena anchor policy commitment")?;
+    validate_candidate_publication_binding(
+        candidate,
+        publication,
+        Some(&registration),
+        expected_policy_hash.as_deref(),
+    )?;
+    validate_pending_payout_messages(payout_messages)?;
+
+    local_node::accept_bitcoin_work_template(&state.config.datadir, publication.template.clone())?;
+    let template_publish = publish_sharechain_message(PublishSharechainMessageInput {
+        datadir: state.config.datadir.clone(),
+        message: SharechainMessage::BitcoinWorkTemplate(publication.template.clone()),
+        node_secret_key_file: state.config.node_secret_key_file.clone(),
+        message_out: None,
+        envelope_out: None,
+        append: state.config.append,
+        peer_addrs: state.config.peer_addrs.clone(),
+    })
+    .await?;
+    for message in payout_messages {
+        publish_sharechain_message(PublishSharechainMessageInput {
+            datadir: state.config.datadir.clone(),
+            message: message.clone(),
+            node_secret_key_file: state.config.node_secret_key_file.clone(),
+            message_out: None,
+            envelope_out: None,
+            append: true,
+            peer_addrs: state.config.peer_addrs.clone(),
+        })
+        .await
+        .context("failed to publish target block payout evidence")?;
+    }
+    let share_publish = publish_sharechain_message(PublishSharechainMessageInput {
+        datadir: state.config.datadir.clone(),
+        message: SharechainMessage::Share(publication.share.clone()),
+        node_secret_key_file: state.config.node_secret_key_file.clone(),
+        message_out: None,
+        envelope_out: None,
+        append: state.config.append,
+        peer_addrs: state.config.peer_addrs.clone(),
+    })
+    .await?;
+    Ok((template_publish, share_publish))
+}
+
+fn validate_pending_payout_messages(messages: &[SharechainMessage]) -> Result<()> {
+    match messages {
+        [] => Ok(()),
+        [SharechainMessage::PayoutSchedule(_), SharechainMessage::PohwCommitment(_)] => Ok(()),
+        _ => bail!(
+            "pending block publication must contain no payout messages or one schedule followed by one commitment"
+        ),
+    }
+}
+
 async fn maybe_submit_block_candidate(
     state: &AdapterState,
     candidate: &StratumBlockCandidate,
@@ -2127,45 +2643,13 @@ async fn maybe_submit_block_candidate(
     }
     let result = async {
         if let Some(verifier) = state.config.idena_anchor_verifier.as_ref() {
-            let replay = local_node::replay_state(&state.config.datadir)
-                .context("failed to replay checkpointed sharechain before block submission")?;
-            let checkpoint = replay.latest_sharechain_checkpoint().cloned().context(
-                "block submission is locked until sharechain checkpoint round 1 finalizes",
-            )?;
-            if replay.best_share_tip() != Some(checkpoint.share_tip_hash.as_str()) {
-                bail!(
-                    "active payout tip does not match the latest finalized sharechain checkpoint"
-                );
-            }
-            let supporter_registrations = checkpoint
-                .supporters
-                .iter()
-                .map(|miner_id| {
-                    replay
-                        .registrations()
-                        .get(miner_id)
-                        .cloned()
-                        .with_context(|| {
-                            format!("checkpoint supporter {miner_id} is absent from local replay")
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            drop(replay);
-            verifier
-                .verify_checkpoint(&checkpoint, true)
-                .await
-                .context("latest sharechain checkpoint is no longer fresh or verifiable")?;
-            for registration in supporter_registrations {
-                verifier
-                    .verify_registration(&registration)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "checkpoint supporter {} is no longer eligible",
-                            registration.miner_id
-                        )
-                    })?;
-            }
+            verify_current_candidate_submission_authorization(
+                &state.config.datadir,
+                verifier,
+                candidate,
+                state.config.share_work_binding_policy.as_ref(),
+            )
+            .await?;
         }
         let block_hex = block_hex_for_stratum_candidate_submission(candidate)?;
         if let Some(client) = state.config.fork_chain_client.as_ref() {
@@ -2193,14 +2677,593 @@ async fn maybe_submit_block_candidate(
     })
 }
 
+async fn verify_current_candidate_submission_authorization(
+    datadir: &Path,
+    verifier: &IdenaAnchorVerifier,
+    candidate: &StratumBlockCandidate,
+    share_work_binding_policy: Option<&ShareWorkBindingPolicyV1>,
+) -> Result<()> {
+    let publication = candidate
+        .publication
+        .as_ref()
+        .context("Idena-gated block submission requires a signed publication binding")?;
+    let replay = local_node::replay_state(datadir)
+        .context("failed to replay registrations before block submission")?;
+    let registration = replay
+        .registrations()
+        .get(&publication.share.miner_id.to_ascii_lowercase())
+        .context("candidate publication miner is not registered locally")?
+        .clone();
+    drop(replay);
+    let expected_policy_hash = verifier
+        .policy()
+        .commitment_hash()
+        .context("failed to derive the active Idena anchor policy commitment")?;
+    validate_candidate_publication_binding(
+        candidate,
+        publication,
+        Some(&registration),
+        Some(&expected_policy_hash),
+    )?;
+    if let Some(policy) = share_work_binding_policy {
+        publication
+            .share
+            .verify_required_work_binding(&publication.template, policy)
+            .context("candidate publication uses a different share-work policy")?;
+    }
+    verifier
+        .verify_template(&registration, &publication.template, true)
+        .await
+        .context("candidate template is no longer current and eligible")?;
+
+    let checkpoint = verify_latest_submission_checkpoint(datadir, verifier, true).await?;
+    if publication.checkpoint.as_ref() != Some(&checkpoint)
+        || !publication
+            .share
+            .parent_share_hash
+            .eq_ignore_ascii_case(&checkpoint.share_tip_hash)
+    {
+        bail!("candidate publication is not bound to the active finalized checkpoint");
+    }
+    Ok(())
+}
+
+pub(crate) async fn verify_latest_submission_checkpoint(
+    datadir: &Path,
+    verifier: &IdenaAnchorVerifier,
+    require_current_supporters: bool,
+) -> Result<SharechainCheckpointAnchorV1> {
+    let replay = local_node::replay_state(datadir)
+        .context("failed to replay checkpointed sharechain before block submission")?;
+    let checkpoint = replay
+        .latest_sharechain_checkpoint()
+        .cloned()
+        .context("block submission is locked until sharechain checkpoint round 1 finalizes")?;
+    if replay.best_share_tip() != Some(checkpoint.share_tip_hash.as_str()) {
+        bail!("active payout tip does not match the latest finalized sharechain checkpoint");
+    }
+    let supporter_registrations = checkpoint
+        .supporters
+        .iter()
+        .map(|miner_id| {
+            replay
+                .registrations()
+                .get(miner_id)
+                .cloned()
+                .with_context(|| {
+                    format!("checkpoint supporter {miner_id} is absent from local replay")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    drop(replay);
+    verifier
+        .verify_checkpoint(&checkpoint, require_current_supporters)
+        .await
+        .context("latest sharechain checkpoint is no longer verifiable")?;
+    if require_current_supporters {
+        for registration in supporter_registrations {
+            verifier
+                .verify_registration(&registration)
+                .await
+                .with_context(|| {
+                    format!(
+                        "checkpoint supporter {} is no longer eligible",
+                        registration.miner_id
+                    )
+                })?;
+        }
+    } else {
+        for registration in supporter_registrations {
+            verifier
+                .verify_historical_registration(&registration)
+                .await
+                .with_context(|| {
+                    format!(
+                        "checkpoint supporter {} has no valid historical registration",
+                        registration.miner_id
+                    )
+                })?;
+        }
+    }
+    Ok(checkpoint)
+}
+
 fn require_successful_block_submission(submission: Option<&BlockSubmitSummary>) -> Result<()> {
-    let accepted = submission
-        .and_then(|submission| submission.outcome.as_ref())
-        .is_some_and(|outcome| matches!(outcome.status.as_str(), "accepted" | "duplicate"));
-    if !accepted {
+    if !block_submission_succeeded(submission) {
         bail!("block submission failed before sharechain publication");
     }
     Ok(())
+}
+
+fn block_submission_succeeded(submission: Option<&BlockSubmitSummary>) -> bool {
+    submission
+        .and_then(|submission| submission.outcome.as_ref())
+        .is_some_and(|outcome| matches!(outcome.status.as_str(), "accepted" | "duplicate"))
+}
+
+fn block_submission_is_definitively_rejected(submission: Option<&BlockSubmitSummary>) -> bool {
+    submission
+        .and_then(|submission| submission.outcome.as_ref())
+        .is_some_and(|outcome| outcome.status == "rejected")
+}
+
+fn pending_block_publication_dir(datadir: &Path) -> PathBuf {
+    datadir.join(PENDING_BLOCK_PUBLICATION_DIR)
+}
+
+fn persist_pending_block_publication(
+    datadir: &Path,
+    pending: &PendingBlockPublicationV1,
+) -> Result<PathBuf> {
+    validate_pending_block_publication(pending)?;
+    let directory = pending_block_publication_dir(datadir);
+    ensure_block_candidate_dir(&directory)?;
+    let path = directory.join(format!(
+        "block-{}.json",
+        pending.candidate.block_hash.to_ascii_lowercase()
+    ));
+    let bytes = json_line_bytes(
+        pending,
+        "pending block publication",
+        MAX_PENDING_BLOCK_PUBLICATION_JSON_BYTES,
+    )?;
+    let _journal_lock = acquire_pending_block_publication_lock(datadir)?;
+    if existing_file_matches_bytes(
+        &path,
+        &bytes,
+        "pending block publication",
+        MAX_PENDING_BLOCK_PUBLICATION_JSON_BYTES,
+    )? {
+        return Ok(path);
+    }
+    let existing = pending_block_publication_files_unlocked(datadir)?;
+    if existing.len() >= MAX_PENDING_BLOCK_PUBLICATIONS {
+        bail!(
+            "pending block publication directory has reached the limit of {MAX_PENDING_BLOCK_PUBLICATIONS} files"
+        );
+    }
+    write_bytes_atomic_create_new_or_matching(
+        &path,
+        &bytes,
+        "pending block publication",
+        MAX_PENDING_BLOCK_PUBLICATION_JSON_BYTES,
+    )?;
+    Ok(path)
+}
+
+fn validate_pending_block_publication(pending: &PendingBlockPublicationV1) -> Result<()> {
+    if pending.schema_version != STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION {
+        bail!(
+            "unsupported pending block publication schema version {}",
+            pending.schema_version
+        );
+    }
+    if !pending.candidate.meets_block_target {
+        bail!("pending block publication candidate does not meet the block target");
+    }
+    let publication = pending
+        .candidate
+        .publication
+        .as_ref()
+        .context("pending block publication has no signed publication binding")?;
+    validate_candidate_publication_binding(&pending.candidate, publication, None, None)?;
+    validate_pending_payout_messages(&pending.payout_messages)
+}
+
+fn read_pending_block_publication(path: &Path) -> Result<PendingBlockPublicationV1> {
+    validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect pending block publication {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "pending block publication must be a regular file: {}",
+            path.display()
+        );
+    }
+    if metadata.len() > MAX_PENDING_BLOCK_PUBLICATION_JSON_BYTES {
+        bail!(
+            "pending block publication {} exceeds the maximum size",
+            path.display()
+        );
+    }
+    let bytes = fs::read(path).with_context(|| {
+        format!(
+            "failed to read pending block publication {}",
+            path.display()
+        )
+    })?;
+    let pending: PendingBlockPublicationV1 = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse pending block publication {}",
+            path.display()
+        )
+    })?;
+    validate_pending_block_publication(&pending)?;
+    let expected_name = format!(
+        "block-{}.json",
+        pending.candidate.block_hash.to_ascii_lowercase()
+    );
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        bail!(
+            "pending block publication filename does not match candidate hash: {}",
+            path.display()
+        );
+    }
+    Ok(pending)
+}
+
+fn pending_block_publication_files(datadir: &Path) -> Result<Vec<PathBuf>> {
+    let directory = pending_block_publication_dir(datadir);
+    validate_no_unsafe_block_candidate_symlink_ancestors(&directory)?;
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect pending block publication directory {}",
+                    directory.display()
+                )
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "pending block publication path is not a regular directory: {}",
+            directory.display()
+        );
+    }
+    let _journal_lock = acquire_pending_block_publication_lock(datadir)?;
+    pending_block_publication_files_unlocked(datadir)
+}
+
+fn pending_block_publication_files_unlocked(datadir: &Path) -> Result<Vec<PathBuf>> {
+    let directory = pending_block_publication_dir(datadir);
+    let mut paths = Vec::new();
+    let mut removed_temp = false;
+    for entry in fs::read_dir(&directory).with_context(|| {
+        format!(
+            "failed to read pending block publication directory {}",
+            directory.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "unexpected non-file in pending block publication directory: {}",
+                path.display()
+            );
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_pending_block_publication_temp_name)
+        {
+            fs::remove_file(&path).with_context(|| {
+                format!(
+                    "failed to remove incomplete pending block publication {}",
+                    path.display()
+                )
+            })?;
+            removed_temp = true;
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            bail!(
+                "unexpected file in pending block publication directory: {}",
+                path.display()
+            );
+        }
+        paths.push(path);
+        if paths.len() > MAX_PENDING_BLOCK_PUBLICATIONS {
+            bail!(
+                "pending block publication directory exceeds the limit of {MAX_PENDING_BLOCK_PUBLICATIONS} files"
+            );
+        }
+    }
+    if removed_temp {
+        sync_directory(&directory)?;
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn remove_pending_block_publication(path: &Path) -> Result<()> {
+    validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
+    let datadir = path
+        .parent()
+        .and_then(Path::parent)
+        .context("pending block publication has no datadir parent")?;
+    let _journal_lock = acquire_pending_block_publication_lock(datadir)?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect pending block publication {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "pending block publication must be a regular file: {}",
+            path.display()
+        );
+    }
+    fs::remove_file(path).with_context(|| {
+        format!(
+            "failed to remove pending block publication {}",
+            path.display()
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn acquire_pending_block_publication_lock(datadir: &Path) -> Result<fs::File> {
+    let path = datadir.join(PENDING_BLOCK_PUBLICATION_LOCK_FILE);
+    validate_no_unsafe_block_candidate_symlink_ancestors(&path)?;
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "pending block publication lock path is not a regular file: {}",
+                path.display()
+            );
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).with_context(|| {
+        format!(
+            "failed to open pending block publication lock {}",
+            path.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(&path).with_context(|| {
+        format!(
+            "failed to inspect pending block publication lock {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "pending block publication lock path is not a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata().with_context(|| {
+            format!(
+                "failed to inspect opened pending block publication lock {}",
+                path.display()
+            )
+        })?;
+        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+            bail!(
+                "pending block publication lock changed while opening: {}",
+                path.display()
+            );
+        }
+        if metadata.mode() & 0o077 != 0 {
+            bail!(
+                "pending block publication lock must not grant group or other access: {}",
+                path.display()
+            );
+        }
+    }
+    file.try_lock_exclusive().with_context(|| {
+        format!(
+            "pending block publication journal is locked by another writer: {}",
+            path.display()
+        )
+    })?;
+    Ok(file)
+}
+
+fn is_pending_block_publication_temp_name(name: &str) -> bool {
+    let Some(body) = name
+        .strip_prefix(".block-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((block_hash, nonce)) = body.split_once('.') else {
+        return false;
+    };
+    [block_hash, nonce]
+        .into_iter()
+        .all(|value| value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit))
+}
+
+async fn pending_block_publication_recovery_loop(state: Arc<AdapterState>) {
+    let mut ticker = interval(Duration::from_secs(PENDING_BLOCK_PUBLICATION_RETRY_SECONDS));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let _submission_guard = state.block_submission_lock.lock().await;
+        if let Err(error) = recover_pending_block_publications(&state).await {
+            eprintln!("failed pending block publication recovery: {error:#}");
+        }
+    }
+}
+
+async fn recover_pending_block_publications(state: &AdapterState) -> Result<usize> {
+    let mut recovered = 0usize;
+    for path in pending_block_publication_files(&state.config.datadir)? {
+        let pending = read_pending_block_publication(&path)?;
+        let publication = pending
+            .candidate
+            .publication
+            .as_ref()
+            .context("pending block publication has no signed publication binding")?;
+        verify_recoverable_candidate_publication(state, &pending.candidate, publication).await?;
+
+        let mut block_is_accepted = candidate_block_is_accepted(state, &pending.candidate)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "could not prove pending candidate {} is accepted before retry: {error:#}",
+                    pending.candidate.block_hash
+                );
+                false
+            });
+        if !block_is_accepted {
+            let submission = maybe_submit_block_candidate(state, &pending.candidate).await;
+            if block_submission_is_definitively_rejected(submission.as_ref()) {
+                remove_pending_block_publication(&path)?;
+                continue;
+            }
+            block_is_accepted = block_submission_succeeded(submission.as_ref());
+        }
+        if !block_is_accepted {
+            continue;
+        }
+
+        publish_candidate_publication(
+            state,
+            &pending.candidate,
+            publication,
+            &pending.payout_messages,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to recover sharechain publication for accepted block {}",
+                pending.candidate.block_hash
+            )
+        })?;
+        remove_pending_block_publication(&path)?;
+        recovered += 1;
+    }
+    if recovered > 0 {
+        eprintln!("recovered {recovered} pending accepted block publication(s)");
+    }
+    Ok(recovered)
+}
+
+async fn verify_recoverable_candidate_publication(
+    state: &AdapterState,
+    candidate: &StratumBlockCandidate,
+    publication: &StratumCandidatePublicationV1,
+) -> Result<()> {
+    let replay = local_node::replay_state(&state.config.datadir)
+        .context("failed to replay sharechain before pending publication recovery")?;
+    let registration = replay
+        .registrations()
+        .get(&publication.share.miner_id.to_ascii_lowercase())
+        .context("pending candidate miner is not registered locally")?
+        .clone();
+    if let Some(checkpoint) = publication.checkpoint.as_ref() {
+        let checkpoint_hash =
+            SharechainMessage::SharechainCheckpoint(checkpoint.clone()).message_hash();
+        if !replay.has_message_hash(&checkpoint_hash) {
+            bail!("pending candidate checkpoint is absent from local durable history");
+        }
+        if !publication
+            .share
+            .parent_share_hash
+            .eq_ignore_ascii_case(&checkpoint.share_tip_hash)
+        {
+            bail!("pending candidate share does not extend its finalized checkpoint");
+        }
+    }
+    drop(replay);
+
+    let expected_policy_hash = state
+        .config
+        .idena_anchor_verifier
+        .as_ref()
+        .map(|verifier| verifier.policy().commitment_hash())
+        .transpose()
+        .context("failed to derive Idena policy commitment during recovery")?;
+    validate_candidate_publication_binding(
+        candidate,
+        publication,
+        Some(&registration),
+        expected_policy_hash.as_deref(),
+    )?;
+    if let Some(policy) = state.config.share_work_binding_policy.as_ref() {
+        publication
+            .share
+            .verify_required_work_binding(&publication.template, policy)
+            .context("pending candidate uses a different share-work policy")?;
+    }
+    match (
+        state.config.idena_anchor_verifier.as_ref(),
+        publication.template.idena_anchor_policy_hash.as_ref(),
+        publication.checkpoint.as_ref(),
+    ) {
+        (Some(verifier), Some(_), Some(checkpoint)) => {
+            verifier
+                .verify_template(&registration, &publication.template, false)
+                .await
+                .context("pending candidate historical Idena template proof is invalid")?;
+            verifier
+                .verify_checkpoint(checkpoint, false)
+                .await
+                .context("pending candidate historical checkpoint proof is invalid")?;
+        }
+        (Some(_), _, _) => {
+            bail!("Idena-gated pending candidate is missing its policy or checkpoint binding")
+        }
+        (None, Some(_), _) | (None, _, Some(_)) => {
+            bail!("pending candidate requires an Idena verifier that is not configured")
+        }
+        (None, None, None) => {}
+    }
+    Ok(())
+}
+
+async fn candidate_block_is_accepted(
+    state: &AdapterState,
+    candidate: &StratumBlockCandidate,
+) -> Result<bool> {
+    if let Some(client) = state.config.fork_chain_client.as_ref() {
+        return Ok(client
+            .block_summary(candidate.block_hash.clone())
+            .await?
+            .is_some());
+    }
+    state
+        .config
+        .bitcoin_rpc_client
+        .as_ref()
+        .context("block-submission client is not configured")?
+        .block_is_active(&candidate.block_hash)
+        .await
 }
 
 fn persist_target_block_candidate(
@@ -2296,12 +3359,7 @@ fn write_json_create_new_or_matching<T: Serialize>(
     label: &str,
     max_bytes: u64,
 ) -> Result<()> {
-    let mut bytes =
-        serde_json::to_vec_pretty(value).with_context(|| format!("failed to encode {label}"))?;
-    bytes.push(b'\n');
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-        bail!("{label} exceeds the maximum size of {max_bytes} bytes");
-    }
+    let bytes = json_line_bytes(value, label, max_bytes)?;
     validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -2352,6 +3410,114 @@ fn write_json_create_new_or_matching<T: Serialize>(
             Err(err).with_context(|| format!("failed to create {label} {}", path.display()))
         }
     }
+}
+
+fn json_line_bytes<T: Serialize>(value: &T, label: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec_pretty(value).with_context(|| format!("failed to encode {label}"))?;
+    bytes.push(b'\n');
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        bail!("{label} exceeds the maximum size of {max_bytes} bytes");
+    }
+    Ok(bytes)
+}
+
+fn existing_file_matches_bytes(
+    path: &Path,
+    bytes: &[u8],
+    label: &str,
+    max_bytes: u64,
+) -> Result<bool> {
+    validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect existing {label} {}", path.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "existing {label} path is not a regular file: {}",
+            path.display()
+        );
+    }
+    if metadata.len() > max_bytes {
+        bail!(
+            "existing {label} {} exceeds the maximum size",
+            path.display()
+        );
+    }
+    let existing = fs::read(path)
+        .with_context(|| format!("failed to read existing {label} {}", path.display()))?;
+    if existing != bytes {
+        bail!(
+            "existing {label} {} differs from current evidence",
+            path.display()
+        );
+    }
+    Ok(true)
+}
+
+fn write_bytes_atomic_create_new_or_matching(
+    path: &Path,
+    bytes: &[u8],
+    label: &str,
+    max_bytes: u64,
+) -> Result<()> {
+    if existing_file_matches_bytes(path, bytes, label, max_bytes)? {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .with_context(|| format!("{label} path has no parent: {}", path.display()))?;
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{label} path is not valid UTF-8: {}", path.display()))?;
+    let temp_path = parent.join(format!(".{file_stem}.{}.tmp", random_nonce_hex()));
+    validate_no_unsafe_block_candidate_symlink_ancestors(&temp_path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write_result = (|| -> Result<()> {
+        let mut file = options.open(&temp_path).with_context(|| {
+            format!("failed to create temporary {label} {}", temp_path.display())
+        })?;
+        file.write_all(bytes).with_context(|| {
+            format!("failed to write temporary {label} {}", temp_path.display())
+        })?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temporary {label} {}", temp_path.display()))?;
+        drop(file);
+        match fs::hard_link(&temp_path, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                if !existing_file_matches_bytes(path, bytes, label, max_bytes)? {
+                    bail!("existing {label} disappeared during atomic installation");
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to atomically install {label} {}", path.display())
+                });
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup_result = match fs::remove_file(&temp_path) {
+        Ok(()) => sync_directory(parent),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to remove temporary {label} {}", temp_path.display())),
+    };
+    write_result.and(cleanup_result)
 }
 
 fn ensure_block_candidate_dir(candidate_dir: &Path) -> Result<()> {
@@ -2409,6 +3575,10 @@ fn write_block_candidate_file_create_new_or_matching(
     candidate: &StratumBlockCandidate,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(candidate).context("failed to encode block candidate")?;
+    let serialized_bytes = bytes.len().saturating_add(1);
+    if u64::try_from(serialized_bytes).unwrap_or(u64::MAX) > MAX_BLOCK_CANDIDATE_JSON_BYTES {
+        bail!("block candidate exceeds the maximum size of {MAX_BLOCK_CANDIDATE_JSON_BYTES} bytes");
+    }
     validate_no_unsafe_block_candidate_symlink_ancestors(path)?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -2757,11 +3927,18 @@ fn coinbase_split_for_extranonces(
     extranonce2_size: usize,
     default_witness_commitment: Option<&str>,
     pohw_replay_marker: Option<&str>,
+    share_work_binding: Option<&ShareWorkBindingV1>,
 ) -> Result<(String, String)> {
     let mut outputs = vec![CoinbaseOutputSpec {
         amount_sats: 0,
         script_pubkey_hex: "6a".to_string(),
     }];
+    if let Some(binding) = share_work_binding {
+        outputs.push(CoinbaseOutputSpec {
+            amount_sats: 0,
+            script_pubkey_hex: binding.op_return_script_pubkey_hex()?,
+        });
+    }
     if let Some(script_pubkey_hex) = pohw_replay_marker {
         outputs.push(CoinbaseOutputSpec {
             amount_sats: 0,
@@ -2782,6 +3959,7 @@ fn coinbase_split_for_extranonces(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn coinbase_split_for_pohw_payouts(
     height: u64,
     extranonce2_size: usize,
@@ -2790,6 +3968,7 @@ fn coinbase_split_for_pohw_payouts(
     pohw_commitment: &PohwCommitment,
     default_witness_commitment: Option<&str>,
     pohw_replay_marker: Option<&str>,
+    share_work_binding: Option<&ShareWorkBindingV1>,
 ) -> Result<(String, String)> {
     payout_schedule.validate()?;
     let pohw_commitment = pohw_commitment.clone().normalized();
@@ -2837,6 +4016,12 @@ fn coinbase_split_for_pohw_payouts(
         amount_sats: 0,
         script_pubkey_hex: pohw_commitment.op_return_script_pubkey_hex(),
     });
+    if let Some(binding) = share_work_binding {
+        outputs.push(CoinbaseOutputSpec {
+            amount_sats: 0,
+            script_pubkey_hex: binding.op_return_script_pubkey_hex()?,
+        });
+    }
     if let Some(script_pubkey_hex) = pohw_replay_marker {
         outputs.push(CoinbaseOutputSpec {
             amount_sats: 0,
@@ -3211,7 +4396,7 @@ mod tests {
     use bitcoin::{absolute, transaction, Amount, OutPoint, Sequence, TxIn, TxOut, Txid, Witness};
     use idena_lite_indexer::rpc::IdenaRpcClient;
     use pohw_core::commitment::PohwCommitmentParams;
-    use pohw_core::idena_anchor::{IdenaAnchorPolicyV2, MinerRegistryAnchorV1};
+    use pohw_core::idena_anchor::{IdenaAnchorPolicyV2, IdenaBlockAnchorV1, MinerRegistryAnchorV1};
     use pohw_core::payout::{DirectPayout, VaultAllocation};
     use pohw_core::sharechain::{MinerRegistration, SnapshotVote};
     use pohw_core::snapshot::{IdenaStatus, SnapshotLeaf};
@@ -3279,6 +4464,19 @@ mod tests {
         };
         assert!(require_successful_block_submission(Some(&transport_error)).is_err());
         assert!(require_successful_block_submission(None).is_err());
+        assert!(block_submission_is_definitively_rejected(Some(&rejected)));
+        assert!(!block_submission_is_definitively_rejected(Some(
+            &BlockSubmitSummary {
+                outcome: Some(SubmitBlockOutcome {
+                    status: "ambiguous".to_string(),
+                    reject_reason: Some("inconclusive".to_string()),
+                }),
+                error: None,
+            }
+        )));
+        assert!(!block_submission_is_definitively_rejected(Some(
+            &transport_error
+        )));
     }
 
     #[test]
@@ -3324,6 +4522,415 @@ mod tests {
             }
         }
         panic!("test did not find a target-meeting candidate");
+    }
+
+    fn non_target_candidate() -> StratumBlockCandidate {
+        let mut job = test_job();
+        job.nbits = compact_bits_to_header_order_hex("1f00ffff").unwrap();
+        for nonce in 0u32..100_000 {
+            let candidate = build_stratum_block_candidate(
+                &job,
+                "aabbccdd",
+                "01020304",
+                &job.ntime,
+                &hex::encode(nonce.to_le_bytes()),
+                4,
+                false,
+            )
+            .expect("build candidate");
+            if !candidate.meets_block_target
+                && candidate.block_hash.as_str()
+                    <= pohw_core::sharechain::MAX_ACCEPTED_SHARE_TARGET_HEX
+            {
+                return candidate;
+            }
+        }
+        panic!("test did not find a non-target candidate");
+    }
+
+    fn signed_candidate_publication(
+        miner_id: &str,
+        mining_key_byte: u8,
+    ) -> (StratumBlockCandidate, MinerRegistration) {
+        signed_candidate_publication_for_candidate(
+            miner_id,
+            mining_key_byte,
+            target_meeting_candidate(),
+        )
+    }
+
+    fn signed_candidate_publication_for_candidate(
+        miner_id: &str,
+        mining_key_byte: u8,
+        mut candidate: StratumBlockCandidate,
+    ) -> (StratumBlockCandidate, MinerRegistration) {
+        let (registration, mining_keypair) = signed_test_registration(
+            miner_id,
+            mining_key_byte,
+            mining_key_byte + 1,
+            mining_key_byte + 2,
+        );
+        let share_target = if candidate.meets_block_target {
+            candidate.block_target.clone()
+        } else {
+            pohw_core::sharechain::MAX_ACCEPTED_SHARE_TARGET_HEX.to_string()
+        };
+        let mut template = BitcoinWorkTemplate::from_bitcoin_header_hex_with_share_target(
+            miner_id,
+            &candidate.bitcoin_header_hex,
+            &share_target,
+            1_700_000_000,
+        )
+        .unwrap();
+        template.mining_signature_hex = sign_test_schnorr(template.signing_hash(), &mining_keypair);
+        let mut share = Share {
+            miner_id: miner_id.to_string(),
+            bitcoin_header_hex: candidate.bitcoin_header_hex.clone(),
+            bitcoin_template_hash: template.template_hash.clone(),
+            nonce_hex: candidate.nonce.clone(),
+            work_hash: candidate.block_hash.clone(),
+            target: share_target.clone(),
+            idena_snapshot_id: "2026-07-17".to_string(),
+            idena_snapshot_proof_root: "11".repeat(32),
+            hashrate_score_delta: Share::expected_hashrate_score_delta_for_target(&share_target)
+                .unwrap(),
+            parent_share_hash: "00".repeat(32),
+            work_binding: None,
+            mining_signature_hex: String::new(),
+        };
+        share.mining_signature_hex = sign_test_schnorr(share.signing_hash(), &mining_keypair);
+        attach_candidate_publication(&mut candidate, template, share, None).unwrap();
+        (candidate, registration)
+    }
+
+    fn anchored_signed_candidate_publication(
+        miner_id: &str,
+        mining_key_byte: u8,
+    ) -> (StratumBlockCandidate, MinerRegistration) {
+        let (registration, mining_keypair) = anchored_test_registration(
+            miner_id,
+            mining_key_byte,
+            mining_key_byte + 1,
+            mining_key_byte + 2,
+        );
+        let mut candidate = target_meeting_candidate();
+        let policy_hash = test_idena_anchor_policy().commitment_hash().unwrap();
+        let mut template =
+            BitcoinWorkTemplate::from_bitcoin_header_hex_with_share_target_and_idena_anchor(
+                miner_id,
+                &candidate.bitcoin_header_hex,
+                &candidate.block_target,
+                IdenaBlockAnchorV1 {
+                    height: 206,
+                    hash: format!("0x{}", "aa".repeat(32)),
+                },
+                policy_hash,
+                1_700_000_000,
+            )
+            .unwrap();
+        template.mining_signature_hex = sign_test_schnorr(template.signing_hash(), &mining_keypair);
+        let mut share = Share {
+            miner_id: miner_id.to_string(),
+            bitcoin_header_hex: candidate.bitcoin_header_hex.clone(),
+            bitcoin_template_hash: template.template_hash.clone(),
+            nonce_hex: candidate.nonce.clone(),
+            work_hash: candidate.block_hash.clone(),
+            target: candidate.block_target.clone(),
+            idena_snapshot_id: "2026-07-17".to_string(),
+            idena_snapshot_proof_root: "11".repeat(32),
+            hashrate_score_delta: Share::expected_hashrate_score_delta_for_target(
+                &candidate.block_target,
+            )
+            .unwrap(),
+            parent_share_hash: "00".repeat(32),
+            work_binding: None,
+            mining_signature_hex: String::new(),
+        };
+        share.mining_signature_hex = sign_test_schnorr(share.signing_hash(), &mining_keypair);
+        attach_candidate_publication(&mut candidate, template, share, None).unwrap();
+        (candidate, registration)
+    }
+
+    #[test]
+    fn candidate_publication_binds_exact_miner_key_and_block() {
+        let (candidate, registration) = signed_candidate_publication("miner-a", 61);
+        let publication = candidate.publication.as_ref().unwrap();
+        validate_candidate_publication_binding(&candidate, publication, Some(&registration), None)
+            .unwrap();
+
+        let (other_registration, _) = signed_test_registration("miner-b", 71, 72, 73);
+        let error = validate_candidate_publication_binding(
+            &candidate,
+            publication,
+            Some(&other_registration),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("selected miner"));
+
+        let mut different_candidate = target_meeting_candidate();
+        different_candidate.nonce = "ffffffff".to_string();
+        let error = validate_candidate_publication_binding(
+            &different_candidate,
+            publication,
+            Some(&registration),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("candidate")
+                || error.to_string().contains("block")
+                || error.to_string().contains("nonce")
+        );
+    }
+
+    #[test]
+    fn ordinary_pool_share_publication_does_not_require_block_target() {
+        let (candidate, registration) =
+            signed_candidate_publication_for_candidate("miner-a", 62, non_target_candidate());
+        assert!(!candidate.meets_block_target);
+        let publication = candidate.publication.as_ref().unwrap();
+        validate_candidate_publication_binding(&candidate, publication, Some(&registration), None)
+            .unwrap();
+
+        let error = block_hex_for_stratum_candidate_submission(&candidate).unwrap_err();
+        assert!(error.to_string().contains("does not meet"));
+    }
+
+    fn test_share_work_policy() -> ShareWorkBindingPolicyV1 {
+        ShareWorkBindingPolicyV1 {
+            schema_version: 1,
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            fork_activation_id: "12".repeat(32),
+            sharechain_network_id: "ab".repeat(32),
+            require_binding_from_genesis: true,
+        }
+    }
+
+    #[test]
+    fn share_work_binding_commits_parent_idena_anchor_and_coinbase_merkle_root() {
+        let policy = test_share_work_policy();
+        let target = pohw_core::sharechain::MAX_ACCEPTED_SHARE_TARGET_HEX;
+        let anchor = IdenaBlockAnchorV1 {
+            height: 500,
+            hash: format!("0x{}", "ab".repeat(32)),
+        };
+        let idena_policy_hash = "34".repeat(32);
+        let seed = ShareWorkBindingSeed {
+            policy_hash: policy.commitment_hash().unwrap(),
+            miner_id: "miner-a".to_string(),
+            assigned_share_target: target.to_string(),
+            idena_anchor: anchor.clone(),
+            idena_anchor_policy_hash: idena_policy_hash.clone(),
+        };
+        let parent = "56".repeat(32);
+        let mut binding =
+            build_share_work_binding(&seed, &parent, "2026-07-17", &"78".repeat(32)).unwrap();
+        let job =
+            build_stratum_job_from_template_with_binding(&mining_job_material(), Some(&binding), 4)
+                .unwrap()
+                .job;
+        let candidate = (0u32..10_000)
+            .find_map(|nonce| {
+                let candidate = build_stratum_block_candidate(
+                    &job,
+                    "aabbccdd",
+                    "01020304",
+                    &job.ntime,
+                    &hex::encode(nonce.to_le_bytes()),
+                    4,
+                    false,
+                )
+                .unwrap();
+                (candidate.block_hash.as_str() <= target).then_some(candidate)
+            })
+            .expect("test job should produce a pool-target share");
+        binding.coinbase_tx_hex = candidate.coinbase_tx_hex.clone();
+        binding.coinbase_merkle_branches = job.merkle_branches.clone();
+        binding
+            .verify_header_commitment(&candidate.bitcoin_header_hex)
+            .unwrap();
+
+        let mining_keypair = test_keypair(99);
+        let mut template =
+            BitcoinWorkTemplate::from_bitcoin_header_hex_with_share_target_and_idena_anchor(
+                "miner-a",
+                &candidate.bitcoin_header_hex,
+                target,
+                anchor,
+                idena_policy_hash,
+                1_700_000_000,
+            )
+            .unwrap();
+        template.mining_signature_hex = sign_test_schnorr(template.signing_hash(), &mining_keypair);
+        let mut share = Share {
+            miner_id: "miner-a".to_string(),
+            bitcoin_header_hex: candidate.bitcoin_header_hex.clone(),
+            bitcoin_template_hash: template.template_hash.clone(),
+            nonce_hex: candidate.nonce.clone(),
+            work_hash: candidate.block_hash.clone(),
+            target: target.to_string(),
+            idena_snapshot_id: "2026-07-17".to_string(),
+            idena_snapshot_proof_root: "78".repeat(32),
+            hashrate_score_delta: Share::expected_hashrate_score_delta_for_target(target).unwrap(),
+            parent_share_hash: parent,
+            work_binding: Some(Box::new(binding)),
+            mining_signature_hex: String::new(),
+        };
+        share.mining_signature_hex = sign_test_schnorr(share.signing_hash(), &mining_keypair);
+        let mining_pubkey = mining_keypair.x_only_public_key().0.to_string();
+        share
+            .verify_mining_signature_for_template(&mining_pubkey, &template)
+            .unwrap();
+        share
+            .verify_required_work_binding(&template, &policy)
+            .unwrap();
+
+        let mut missing = share.clone();
+        missing.work_binding = None;
+        assert!(missing
+            .verify_required_work_binding(&template, &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("required"));
+
+        let mut changed_parent = share.clone();
+        changed_parent.parent_share_hash = "90".repeat(32);
+        assert!(changed_parent
+            .verify_required_work_binding(&template, &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("parent_share_hash"));
+
+        let mut changed_anchor_template = template.clone();
+        changed_anchor_template
+            .idena_anchor
+            .as_mut()
+            .unwrap()
+            .height += 1;
+        assert!(share
+            .verify_required_work_binding(&changed_anchor_template, &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("idena_anchor"));
+
+        let mut changed_coinbase = share.clone();
+        changed_coinbase
+            .work_binding
+            .as_mut()
+            .unwrap()
+            .coinbase_tx_hex
+            .replace_range(0..2, "03");
+        assert!(changed_coinbase
+            .verify_required_work_binding(&template, &policy)
+            .is_err());
+    }
+
+    #[test]
+    fn pending_publication_journal_is_bounded_and_candidate_named() {
+        let datadir = temp_dir("pending-publication-journal");
+        let (candidate, _) = signed_candidate_publication("miner-a", 81);
+        let pending = PendingBlockPublicationV1 {
+            schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+            candidate: candidate.clone(),
+            payout_messages: Vec::new(),
+        };
+        let path = persist_pending_block_publication(&datadir, &pending).unwrap();
+        assert_eq!(read_pending_block_publication(&path).unwrap(), pending);
+        assert_eq!(
+            pending_block_publication_files(&datadir).unwrap(),
+            vec![path.clone()]
+        );
+
+        let wrong_name = path.with_file_name("block-wrong.json");
+        fs::rename(&path, &wrong_name).unwrap();
+        assert!(read_pending_block_publication(&wrong_name)
+            .unwrap_err()
+            .to_string()
+            .contains("filename"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn pending_publication_journal_allows_limit_but_rejects_next_file() {
+        let datadir = temp_dir("pending-publication-capacity");
+        let directory = pending_block_publication_dir(&datadir);
+        ensure_block_candidate_dir(&directory).unwrap();
+        for index in 0..(MAX_PENDING_BLOCK_PUBLICATIONS - 1) {
+            fs::write(
+                directory.join(format!("block-{index:064x}.json")),
+                b"placeholder\n",
+            )
+            .unwrap();
+        }
+        let (candidate, _) = signed_candidate_publication("miner-a", 82);
+        let pending = PendingBlockPublicationV1 {
+            schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+            candidate,
+            payout_messages: Vec::new(),
+        };
+        let path = persist_pending_block_publication(&datadir, &pending).unwrap();
+        assert_eq!(
+            pending_block_publication_files(&datadir).unwrap().len(),
+            MAX_PENDING_BLOCK_PUBLICATIONS
+        );
+
+        let displaced = directory.join(format!("block-{}.json", "ff".repeat(32)));
+        fs::rename(&path, &displaced).unwrap();
+        let error = persist_pending_block_publication(&datadir, &pending).unwrap_err();
+        assert!(error.to_string().contains("reached the limit"));
+        assert!(!path.exists());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn pending_publication_journal_removes_only_recognized_orphan_temps() {
+        let datadir = temp_dir("pending-publication-orphan");
+        let directory = pending_block_publication_dir(&datadir);
+        ensure_block_candidate_dir(&directory).unwrap();
+        let temp = directory.join(format!(
+            ".block-{}.{}.tmp",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        ));
+        fs::write(&temp, b"partial").unwrap();
+
+        assert!(pending_block_publication_files(&datadir)
+            .unwrap()
+            .is_empty());
+        assert!(!temp.exists());
+
+        let unknown = directory.join("unexpected.tmp");
+        fs::write(&unknown, b"do not delete").unwrap();
+        assert!(pending_block_publication_files(&datadir)
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected file"));
+        assert!(unknown.exists());
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn pending_publication_journal_never_overwrites_torn_final_file() {
+        let datadir = temp_dir("pending-publication-torn-final");
+        let directory = pending_block_publication_dir(&datadir);
+        ensure_block_candidate_dir(&directory).unwrap();
+        let (candidate, _) = signed_candidate_publication("miner-a", 83);
+        let pending = PendingBlockPublicationV1 {
+            schema_version: STRATUM_CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+            candidate,
+            payout_messages: Vec::new(),
+        };
+        let path = directory.join(format!(
+            "block-{}.json",
+            pending.candidate.block_hash.to_ascii_lowercase()
+        ));
+        fs::write(&path, b"{\n").unwrap();
+
+        let error = persist_pending_block_publication(&datadir, &pending).unwrap_err();
+        assert!(error.to_string().contains("differs from current evidence"));
+        assert_eq!(fs::read(&path).unwrap(), b"{\n");
+        fs::remove_dir_all(datadir).unwrap();
     }
 
     fn payout_schedule() -> PayoutSchedule {
@@ -3622,6 +5229,7 @@ mod tests {
                 idena_snapshot_proof_root: "11".repeat(32),
                 hashrate_score_delta: 1,
                 parent_share_hash: "00".repeat(32),
+                work_binding: None,
                 mining_signature_hex: String::new(),
             };
             share.bitcoin_template_hash = share.recomputed_bitcoin_template_hash().unwrap();
@@ -3908,6 +5516,7 @@ mod tests {
             &first_material,
             4,
             MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+            None,
         )
         .unwrap();
         let mut second_material = first_material.clone();
@@ -3920,6 +5529,7 @@ mod tests {
             &second_material,
             4,
             MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+            None,
         )
         .unwrap();
 
@@ -4037,6 +5647,7 @@ mod tests {
             &mining_job_material(),
             4,
             MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS,
+            None,
         )
         .unwrap();
 
@@ -4095,7 +5706,7 @@ mod tests {
     #[test]
     fn generated_coinbase_split_matches_configured_extranonce_sizes() {
         let (coinbase1, coinbase2) =
-            coinbase_split_for_extranonces(840_000, 4, None, None).unwrap();
+            coinbase_split_for_extranonces(840_000, 4, None, None, None).unwrap();
         let coinbase_hex = format!("{}{}{}{}", coinbase1, "aabbccdd", "01020304", coinbase2);
         let coinbase = hex::decode(&coinbase_hex).unwrap();
 
@@ -4117,9 +5728,14 @@ mod tests {
 
     #[test]
     fn generated_coinbase_includes_exact_required_replay_marker() {
-        let (coinbase1, coinbase2) =
-            coinbase_split_for_extranonces(840_000, 4, None, Some(POHW_REPLAY_MARKER_SCRIPT_HEX))
-                .unwrap();
+        let (coinbase1, coinbase2) = coinbase_split_for_extranonces(
+            840_000,
+            4,
+            None,
+            Some(POHW_REPLAY_MARKER_SCRIPT_HEX),
+            None,
+        )
+        .unwrap();
         let coinbase_hex = format!("{}{}{}{}", coinbase1, "aabbccdd", "01020304", coinbase2);
         let transaction: Transaction = deserialize(&hex::decode(coinbase_hex).unwrap()).unwrap();
 
@@ -4131,7 +5747,7 @@ mod tests {
 
     #[test]
     fn generated_coinbase_rejects_replay_marker_substitution() {
-        let err = coinbase_split_for_extranonces(840_000, 4, None, Some("5161")).unwrap_err();
+        let err = coinbase_split_for_extranonces(840_000, 4, None, Some("5161"), None).unwrap_err();
         assert!(err.to_string().contains("exact fork-only replay marker"));
     }
 
@@ -4744,6 +6360,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_unknown_block_requires_current_miner_eligibility() {
+        let datadir = temp_dir("pending-current-eligibility");
+        let (candidate, registration) = anchored_signed_candidate_publication("pending-miner", 91);
+        local_node::append_message(
+            &datadir,
+            SharechainMessage::MinerRegistration(registration.clone()),
+        )
+        .unwrap();
+        let (verifier, server) =
+            test_verified_idena_verifier_for_registration_state(&registration, &["Candidate"])
+                .await;
+
+        let error = verify_current_candidate_submission_authorization(
+            &datadir, &verifier, &candidate, None,
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+
+        assert!(format!("{error:#}").contains("not Newbie, Verified, or Human"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
     async fn ineligible_identity_rejects_target_block_before_any_artifact_write() {
         let root = temp_dir("ineligible-candidate-persistence");
         let datadir = root.join("sharechain");
@@ -4796,10 +6436,12 @@ mod tests {
                 derive_share_target_from_block: false,
                 require_idena_admission: true,
                 idena_anchor_verifier: Some(verifier),
+                share_work_binding_policy: None,
             },
             job: RwLock::new(ActiveStratumJob {
                 job,
                 payout_evidence: None,
+                share_work_binding: None,
             }),
             job_updates,
             mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
@@ -4909,6 +6551,7 @@ mod tests {
             derive_share_target_from_block: false,
             require_idena_admission: true,
             idena_anchor_verifier: Some(verifier),
+            share_work_binding_policy: None,
         };
         let mut adapter = tokio::spawn(run_mining_adapter(config));
         let mut stream = timeout(Duration::from_secs(1), async {
