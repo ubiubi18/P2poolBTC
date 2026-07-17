@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -46,6 +47,10 @@ class ExperimentShellEnvValidationTest(unittest.TestCase):
         )
 
     def write_env(self, path: Path, extra: str = "") -> None:
+        extra = extra.replace(
+            f"POHW_WORKDIR={REPO_ROOT}",
+            f"POHW_WORKDIR={shlex.quote(str(REPO_ROOT))}",
+        )
         path.write_text(
             "POHW_EXPERIMENT_NO_VALUE_ACK=I_UNDERSTAND_NO_VALUE\n" + extra,
             encoding="utf-8",
