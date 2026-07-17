@@ -288,6 +288,11 @@ class CiProvenanceTests(unittest.TestCase):
             "- name: Confirm governance release eligibility or inactive interlock", 1
         )[1]
         self.assertIn('Path("compatibility/stack-lock.json")', current_runtime)
+        self.assertIn(
+            'Path("compatibility/governance-day-fork-candidate-lock.json")',
+            current_runtime,
+        )
+        self.assertIn("governance candidate {name} toolchain drift", current_runtime)
         self.assertNotIn(
             'Path("compatibility/governance-fork-lock.json")', current_runtime
         )
