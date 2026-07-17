@@ -255,6 +255,22 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.LaunchPolicyError, "must remain blocked"):
             MODULE.validate(policy, POLICY, ROOT)
 
+    def test_policy_cannot_claim_bitcoin_consensus_identity_enforcement(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        policy["identity_admission_scope"]["bitcoin_block_consensus_enforced"] = True
+
+        with self.assertRaisesRegex(MODULE.LaunchPolicyError, "must not claim"):
+            MODULE.validate(policy, POLICY, ROOT)
+
+    def test_policy_cannot_disable_checkpoint_only_historical_replay(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        policy["required_runtime_gates"][
+            "historical_replay_requires_finalized_checkpoint"
+        ] = False
+
+        with self.assertRaisesRegex(MODULE.LaunchPolicyError, "runtime gate is disabled"):
+            MODULE.validate(policy, POLICY, ROOT)
+
     def test_migration_readiness_requires_a_bound_rehearsal_digest(self):
         report = self.readiness_report()
         report.update(

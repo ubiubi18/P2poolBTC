@@ -20,7 +20,7 @@ use pohw_core::commitment::{
     validate_pohw_commitment, PohwCommitment, PohwCommitmentParams, PohwCommitmentValidationContext,
 };
 use pohw_core::payout::PayoutSchedule;
-use pohw_core::sharechain::{BitcoinWorkTemplate, Share, SharechainMessage};
+use pohw_core::sharechain::{BitcoinWorkTemplate, MinerRegistration, Share, SharechainMessage};
 use pohw_core::snapshot::Snapshot;
 use pohw_core::vault::vault_script_pubkey_hex;
 use pohw_core::{Sats, DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio::time::{interval, sleep, timeout, Duration, Instant, MissedTickBehavior};
 
 const DEFAULT_STRATUM_DIFFICULTY: f64 = 1.0;
@@ -42,6 +43,7 @@ const DEFAULT_EXTRANONCE2_SIZE: usize = 4;
 const DEFAULT_MAX_LINE_BYTES: usize = 16 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_JOB_REFRESH_INTERVAL_SECONDS: u64 = 5;
+const IDENA_ELIGIBILITY_POLL_INTERVAL_SECONDS: u64 = 15;
 const MAX_IDLE_TIMEOUT_SECONDS: u64 = 86_400;
 const MAX_JOB_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 const MIN_NON_LOOPBACK_PASSWORD_BYTES: usize = 16;
@@ -161,6 +163,7 @@ pub(crate) struct MiningAdapterConfig {
     pub dynamic_pohw_payout: Option<DynamicPohwPayoutConfig>,
     pub enforce_mainnet_snapshot_quorum: bool,
     pub derive_share_target_from_block: bool,
+    pub require_idena_admission: bool,
     pub idena_anchor_verifier: Option<IdenaAnchorVerifier>,
 }
 
@@ -311,8 +314,19 @@ fn default_clean_jobs() -> bool {
     true
 }
 
+fn idena_eligibility_poll_interval() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(10)
+    } else {
+        Duration::from_secs(IDENA_ELIGIBILITY_POLL_INTERVAL_SECONDS)
+    }
+}
+
 pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Result<()> {
     validate_bind_addr(config.bind_addr, config.allow_non_loopback_stratum)?;
+    if config.require_idena_admission && config.idena_anchor_verifier.is_none() {
+        bail!("this mining profile requires an active Idena anchor policy");
+    }
     if !config.bind_addr.ip().is_loopback() && config.stratum_password_file.is_none() {
         bail!("refusing non-loopback Stratum adapter without --stratum-password-file");
     }
@@ -463,17 +477,21 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
     let mining_keypair = read_keypair_from_file(&config.mining_secret_key_file)?;
     let mining_pubkey_hex = mining_keypair.x_only_public_key().0.to_string();
     ensure_registered_miner_matches_key(&config.datadir, &config.miner_id, &mining_pubkey_hex)?;
-    if let Some(verifier) = config.idena_anchor_verifier.as_ref() {
+    let idena_eligibility_monitor = if let Some(verifier) = config.idena_anchor_verifier.as_ref() {
         let replay = local_node::replay_state(&config.datadir)?;
         let registration = replay
             .registrations()
             .get(&config.miner_id.to_ascii_lowercase())
-            .context("anchored mining requires a local miner registration")?;
+            .context("anchored mining requires a local miner registration")?
+            .clone();
         verifier
-            .verify_registration(registration)
+            .verify_registration(&registration)
             .await
             .context("local Idena miner registry rejected the configured miner")?;
-    }
+        Some((verifier.clone(), registration))
+    } else {
+        None
+    };
 
     let initial_job_id = job.job_id.clone();
     let (job_updates, _) = broadcast::channel(16);
@@ -507,20 +525,76 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         });
     }
 
-    let connections =
-        ConnectionLimiter::new(MAX_STRATUM_CONNECTIONS, MAX_STRATUM_CONNECTIONS_PER_IP);
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let Some(connection_guard) = connections.try_acquire(peer_addr.ip()) else {
-            continue;
-        };
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            let _connection_guard = connection_guard;
-            if let Err(err) = handle_stratum_connection(stream, peer_addr, state).await {
-                eprintln!("Stratum connection {peer_addr} closed: {err:#}");
+    let eligibility_monitor = async move {
+        match idena_eligibility_monitor {
+            Some((verifier, registration)) => {
+                monitor_current_miner_eligibility(
+                    verifier,
+                    registration,
+                    idena_eligibility_poll_interval(),
+                )
+                .await
             }
-        });
+            None => std::future::pending::<Result<()>>().await,
+        }
+    };
+    tokio::pin!(eligibility_monitor);
+    let connection_limiter =
+        ConnectionLimiter::new(MAX_STRATUM_CONNECTIONS, MAX_STRATUM_CONNECTIONS_PER_IP);
+    let mut connection_tasks = JoinSet::new();
+    loop {
+        while let Some(result) = connection_tasks.try_join_next() {
+            if let Err(error) = result {
+                eprintln!("Stratum connection task failed: {error}");
+            }
+        }
+        tokio::select! {
+            result = &mut eligibility_monitor => {
+                connection_tasks.abort_all();
+                while connection_tasks.join_next().await.is_some() {}
+                return result;
+            },
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = accepted?;
+                let Some(connection_guard) = connection_limiter.try_acquire(peer_addr.ip()) else {
+                    continue;
+                };
+                let state = Arc::clone(&state);
+                connection_tasks.spawn(async move {
+                    let _connection_guard = connection_guard;
+                    if let Err(err) = handle_stratum_connection(stream, peer_addr, state).await {
+                        eprintln!("Stratum connection {peer_addr} closed: {err:#}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+async fn monitor_current_miner_eligibility(
+    verifier: IdenaAnchorVerifier,
+    registration: MinerRegistration,
+    poll_interval: Duration,
+) -> Result<()> {
+    if poll_interval.is_zero() {
+        bail!("Idena eligibility poll interval must be nonzero");
+    }
+    loop {
+        sleep(poll_interval).await;
+        match verifier.current_identity_is_eligible(&registration).await {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "registered Idena identity is no longer Newbie, Verified, or Human; stopping Stratum"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).context(
+                    "failed closed while refreshing registered Idena identity eligibility",
+                );
+            }
+        }
     }
 }
 
@@ -1754,31 +1828,6 @@ async fn accept_submit(
         } else {
             None
         };
-    let block_candidate_file = submit_stage(
-        persist_target_block_candidate(
-            state.config.block_candidate_dir.as_deref(),
-            &block_candidate,
-        ),
-        "candidate-persistence",
-    )?;
-    let payout_candidate_file = match (
-        block_candidate.meets_block_target,
-        active_job.payout_evidence.as_ref(),
-    ) {
-        (true, Some(evidence)) => {
-            let candidate_dir = state
-                .config
-                .payout_candidate_dir
-                .as_deref()
-                .context("dynamic PoHW payout candidate dir is not configured")?;
-            let path = submit_stage(
-                persist_payout_confirmation_evidence(candidate_dir, &block_candidate, evidence),
-                "payout-persistence",
-            )?;
-            Some(path)
-        }
-        _ => None,
-    };
     let template_created_at = submit_stage(
         template_created_at_unix_from_header_hex(&bitcoin_header_hex),
         "template",
@@ -1804,6 +1853,31 @@ async fn accept_submit(
         ))
     } else {
         None
+    };
+    let block_candidate_file = submit_stage(
+        persist_target_block_candidate(
+            state.config.block_candidate_dir.as_deref(),
+            &block_candidate,
+        ),
+        "candidate-persistence",
+    )?;
+    let payout_candidate_file = match (
+        block_candidate.meets_block_target,
+        active_job.payout_evidence.as_ref(),
+    ) {
+        (true, Some(evidence)) => {
+            let candidate_dir = state
+                .config
+                .payout_candidate_dir
+                .as_deref()
+                .context("dynamic PoHW payout candidate dir is not configured")?;
+            let path = submit_stage(
+                persist_payout_confirmation_evidence(candidate_dir, &block_candidate, evidence),
+                "payout-persistence",
+            )?;
+            Some(path)
+        }
+        _ => None,
     };
     let mut template = submit_stage(
         match idena_anchor {
@@ -3135,12 +3209,15 @@ mod tests {
     use bitcoin::key::{Keypair, Secp256k1};
     use bitcoin::secp256k1::{Message, PublicKey, SecretKey};
     use bitcoin::{absolute, transaction, Amount, OutPoint, Sequence, TxIn, TxOut, Txid, Witness};
+    use idena_lite_indexer::rpc::IdenaRpcClient;
     use pohw_core::commitment::PohwCommitmentParams;
+    use pohw_core::idena_anchor::{IdenaAnchorPolicyV2, MinerRegistryAnchorV1};
     use pohw_core::payout::{DirectPayout, VaultAllocation};
     use pohw_core::sharechain::{MinerRegistration, SnapshotVote};
     use pohw_core::snapshot::{IdenaStatus, SnapshotLeaf};
     use pohw_core::FORMULA_VERSION;
     use tiny_keccak::{Hasher, Keccak};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn stratum_rate_window_bounds_requests_and_submits() {
@@ -3374,6 +3451,155 @@ mod tests {
         registration.mining_signature_hex =
             sign_test_schnorr(registration.signing_hash(), &mining_keypair);
         (registration, mining_keypair)
+    }
+
+    fn test_idena_anchor_policy() -> IdenaAnchorPolicyV2 {
+        IdenaAnchorPolicyV2 {
+            schema_version: 2,
+            experiment_id: "p2poolbtc-experiment-1".to_string(),
+            registry_contract_address: format!("0x{}", "11".repeat(20)),
+            registry_deployment_tx_hash: format!("0x{}", "12".repeat(32)),
+            registry_deployment_payload_sha256: "13".repeat(32),
+            registry_contract_code_hash: "14".repeat(32),
+            registry_contract_wasm_sha256: "15".repeat(32),
+            registry_ecosystem_cid: "bafyreiaabeekl424fqyy4psc7vqqvqjmgeid4lcrectvhn2lb3fbjlddmm"
+                .to_string(),
+            minimum_registration_burn_atoms: "1000".to_string(),
+            activation_idena_height: 200,
+            finality_confirmations: 6,
+            max_anchor_age_blocks: 12,
+            handoff_version_bit: 27,
+        }
+    }
+
+    fn anchored_test_registration(
+        miner_id: &str,
+        mining_key_byte: u8,
+        claim_key_byte: u8,
+        idena_key_byte: u8,
+    ) -> (MinerRegistration, Keypair) {
+        let policy = test_idena_anchor_policy();
+        let (registration, mining_keypair) =
+            signed_test_registration(miner_id, mining_key_byte, claim_key_byte, idena_key_byte);
+        let idena_secret = SecretKey::from_slice(&[idena_key_byte; 32]).unwrap();
+        let commitment = registration
+            .registry_commitment_hash(&policy.experiment_id)
+            .unwrap();
+        let mut registration = registration
+            .attach_registry_anchor(MinerRegistryAnchorV1 {
+                contract_address: policy.registry_contract_address,
+                experiment_id: policy.experiment_id,
+                registration_sequence: 1,
+                registration_block: 200,
+                registration_epoch: 10,
+                registration_timestamp: 1_700_000_000,
+                registration_commitment: commitment,
+            })
+            .unwrap();
+        registration.idena_signature_hex =
+            test_idena_signature(&registration.idena_ownership_challenge(), &idena_secret);
+        registration.mining_signature_hex =
+            sign_test_schnorr(registration.signing_hash(), &mining_keypair);
+        (registration, mining_keypair)
+    }
+
+    async fn test_idena_verifier_for_states(
+        registration: &MinerRegistration,
+        states: &[&str],
+    ) -> (IdenaAnchorVerifier, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = listener.local_addr().unwrap();
+        let address = registration.idena_address.clone();
+        let states = states
+            .iter()
+            .map(|state| (*state).to_string())
+            .collect::<Vec<_>>();
+        let server = tokio::spawn(async move {
+            for state in states {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 8 * 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response_body = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "address": address,
+                        "state": state,
+                        "pubkey": "",
+                        "delegatee": null,
+                        "isPool": false
+                    }
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = IdenaRpcClient::new(format!("http://{socket}"), "test-api-key").unwrap();
+        (
+            IdenaAnchorVerifier::new(client, test_idena_anchor_policy()).unwrap(),
+            server,
+        )
+    }
+
+    async fn test_verified_idena_verifier_for_registration_state(
+        registration: &MinerRegistration,
+        states: &[&str],
+    ) -> (IdenaAnchorVerifier, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = listener.local_addr().unwrap();
+        let address = registration.idena_address.clone();
+        let record = registration
+            .require_registry_anchor()
+            .unwrap()
+            .canonical_record_line(&registration.miner_id)
+            .unwrap();
+        let states = states
+            .iter()
+            .map(|state| (*state).to_string())
+            .collect::<Vec<_>>();
+        let server = tokio::spawn(async move {
+            let mut results = vec![Value::String(record)];
+            results.extend(states.into_iter().map(|state| {
+                json!({
+                    "address": address,
+                    "state": state,
+                    "pubkey": "",
+                    "delegatee": null,
+                    "isPool": false
+                })
+            }));
+            for result in results {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 8 * 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response_body = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": result
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = IdenaRpcClient::new(format!("http://{socket}"), "test-api-key").unwrap();
+        (
+            IdenaAnchorVerifier::new_with_verified_deployment_for_test(
+                client,
+                test_idena_anchor_policy(),
+            )
+            .unwrap(),
+            server,
+        )
     }
 
     fn test_share(miner_id: &str, mining_keypair: &Keypair) -> Share {
@@ -4515,5 +4741,233 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("write timed out"));
+    }
+
+    #[tokio::test]
+    async fn ineligible_identity_rejects_target_block_before_any_artifact_write() {
+        let root = temp_dir("ineligible-candidate-persistence");
+        let datadir = root.join("sharechain");
+        let block_candidate_dir = root.join("block-candidates");
+        let payout_candidate_dir = root.join("payout-candidates");
+        let (registration, mining_keypair) =
+            anchored_test_registration("ineligible-miner", 51, 52, 53);
+        local_node::append_message(
+            &datadir,
+            SharechainMessage::MinerRegistration(registration.clone()),
+        )
+        .unwrap();
+        let (verifier, server) =
+            test_verified_idena_verifier_for_registration_state(&registration, &["Candidate"])
+                .await;
+        let candidate = target_meeting_candidate();
+        let job = test_job();
+        let (job_updates, _) = broadcast::channel(2);
+        let state = AdapterState {
+            config: MiningAdapterConfig {
+                datadir,
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                allow_non_loopback_stratum: false,
+                allow_example_mining_job: false,
+                miner_id: registration.miner_id.clone(),
+                job_file: None,
+                share_target: None,
+                idena_snapshot_id: "2026-07-17".to_string(),
+                idena_snapshot_proof_root: "11".repeat(32),
+                mining_secret_key_file: root.join("unused-mining.key"),
+                node_secret_key_file: root.join("unused-node.key"),
+                stratum_password_file: None,
+                block_candidate_dir: Some(block_candidate_dir.clone()),
+                payout_candidate_dir: Some(payout_candidate_dir.clone()),
+                peer_addrs: Vec::new(),
+                stratum_difficulty: 1.0,
+                extranonce2_size: 4,
+                max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+                idle_timeout_seconds: DEFAULT_IDLE_TIMEOUT_SECONDS,
+                append: true,
+                bitcoin_rpc_client: None,
+                fork_chain_client: None,
+                refresh_job_from_rpc: false,
+                job_refresh_interval_seconds: DEFAULT_JOB_REFRESH_INTERVAL_SECONDS,
+                auto_submit_blocks: false,
+                payout_schedule: None,
+                pohw_commitment: None,
+                dynamic_pohw_payout: None,
+                enforce_mainnet_snapshot_quorum: false,
+                derive_share_target_from_block: false,
+                require_idena_admission: true,
+                idena_anchor_verifier: Some(verifier),
+            },
+            job: RwLock::new(ActiveStratumJob {
+                job,
+                payout_evidence: None,
+            }),
+            job_updates,
+            mining_pubkey_hex: mining_keypair.x_only_public_key().0.to_string(),
+            stratum_password: None,
+            share_target: candidate.block_target,
+            block_submission_lock: Mutex::new(()),
+            idena_anchor_submission_lock: Mutex::new(()),
+        };
+        let submit = SubmitWork {
+            worker_name: "worker".to_string(),
+            job_id: candidate.job_id,
+            extranonce2: candidate.extranonce2,
+            ntime: candidate.ntime,
+            nonce: candidate.nonce,
+        };
+
+        let active_job = state.job.read().await;
+        let error = accept_submit(&state, &active_job, &submit, "aabbccdd")
+            .await
+            .unwrap_err();
+        drop(active_job);
+        server.await.unwrap();
+
+        assert!(format!("{error:#}").contains("not Newbie, Verified, or Human"));
+        assert!(!block_candidate_dir.exists());
+        assert!(!payout_candidate_dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn eligibility_transition_closes_listener_and_connected_socket() {
+        let root = temp_dir("eligibility-socket-shutdown");
+        fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let datadir = root.join("sharechain");
+        let job_file = root.join("job.json");
+        let mining_key_file = root.join("mining.key");
+        let node_key_file = root.join("node.key");
+        let (registration, _) = anchored_test_registration("socket-miner", 61, 62, 63);
+        local_node::append_message(
+            &datadir,
+            SharechainMessage::MinerRegistration(registration.clone()),
+        )
+        .unwrap();
+        fs::write(&job_file, serde_json::to_vec_pretty(&test_job()).unwrap()).unwrap();
+        fs::write(&mining_key_file, hex::encode([61_u8; 32])).unwrap();
+        fs::write(&node_key_file, hex::encode([64_u8; 32])).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&mining_key_file, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&node_key_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let states = [
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Human",
+            "Candidate",
+        ];
+        let (verifier, server) =
+            test_verified_idena_verifier_for_registration_state(&registration, &states).await;
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = MiningAdapterConfig {
+            datadir,
+            bind_addr,
+            allow_non_loopback_stratum: false,
+            allow_example_mining_job: false,
+            miner_id: registration.miner_id,
+            job_file: Some(job_file),
+            share_target: Some(target_meeting_candidate().block_target),
+            idena_snapshot_id: "2026-07-17".to_string(),
+            idena_snapshot_proof_root: "11".repeat(32),
+            mining_secret_key_file: mining_key_file,
+            node_secret_key_file: node_key_file,
+            stratum_password_file: None,
+            block_candidate_dir: None,
+            payout_candidate_dir: None,
+            peer_addrs: Vec::new(),
+            stratum_difficulty: 1.0,
+            extranonce2_size: 4,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+            idle_timeout_seconds: DEFAULT_IDLE_TIMEOUT_SECONDS,
+            append: true,
+            bitcoin_rpc_client: None,
+            fork_chain_client: None,
+            refresh_job_from_rpc: false,
+            job_refresh_interval_seconds: DEFAULT_JOB_REFRESH_INTERVAL_SECONDS,
+            auto_submit_blocks: false,
+            payout_schedule: None,
+            pohw_commitment: None,
+            dynamic_pohw_payout: None,
+            enforce_mainnet_snapshot_quorum: false,
+            derive_share_target_from_block: false,
+            require_idena_admission: true,
+            idena_anchor_verifier: Some(verifier),
+        };
+        let mut adapter = tokio::spawn(run_mining_adapter(config));
+        let mut stream = timeout(Duration::from_secs(1), async {
+            loop {
+                match TcpStream::connect(bind_addr).await {
+                    Ok(stream) => break stream,
+                    Err(_) => sleep(Duration::from_millis(2)).await,
+                }
+            }
+        })
+        .await
+        .expect("Stratum listener did not start");
+
+        timeout(Duration::from_secs(2), &mut adapter)
+            .await
+            .expect("adapter did not stop after eligibility loss")
+            .expect("adapter task panicked")
+            .expect("ineligibility should stop the adapter cleanly");
+        server.await.unwrap();
+        let mut byte = [0_u8; 1];
+        let read = timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("connected Stratum socket remained open")
+            .expect("socket read failed");
+        assert_eq!(read, 0, "connected Stratum socket did not close");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn eligibility_monitor_observes_human_to_candidate_transition() {
+        let (registration, _) = signed_test_registration("eligibility-monitor", 41, 42, 43);
+        let (verifier, server) =
+            test_idena_verifier_for_states(&registration, &["Human", "Candidate"]).await;
+
+        timeout(
+            Duration::from_secs(1),
+            monitor_current_miner_eligibility(verifier, registration, Duration::from_millis(1)),
+        )
+        .await
+        .expect("eligibility monitor did not stop")
+        .expect("ineligible identity should produce a clean stop");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn eligibility_monitor_fails_closed_on_malformed_rpc_state() {
+        let (registration, _) = signed_test_registration("eligibility-rpc-error", 44, 45, 46);
+        let (verifier, server) =
+            test_idena_verifier_for_states(&registration, &["MalformedState"]).await;
+
+        let error = timeout(
+            Duration::from_secs(1),
+            monitor_current_miner_eligibility(verifier, registration, Duration::from_millis(1)),
+        )
+        .await
+        .expect("eligibility monitor did not fail closed")
+        .expect_err("malformed Idena identity state must stop the adapter");
+        server.await.unwrap();
+        assert!(format!("{error:#}")
+            .contains("failed closed while refreshing registered Idena identity eligibility"));
     }
 }

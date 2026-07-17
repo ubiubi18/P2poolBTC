@@ -1,7 +1,9 @@
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -28,6 +30,54 @@ def ensure_p2pool_node_binary() -> Path:
 
 
 class StratumBlockCandidateCliTest(unittest.TestCase):
+    def build_target_candidate(self, binary: Path, root: Path) -> Path:
+        job_file = root / "target-job.json"
+        candidate_file = root / "target-candidate.json"
+        job_file.write_text(
+            json.dumps(
+                {
+                    "job_id": "target-job",
+                    "version": "00000020",
+                    "prevhash": "00" * 32,
+                    "coinbase1": COINBASE1,
+                    "coinbase2": COINBASE2,
+                    "merkle_branches": [],
+                    "nbits": "ffff7f20",
+                    "ntime": "04030201",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        for nonce in range(256):
+            result = subprocess.run(
+                [
+                    str(binary),
+                    "build-stratum-block-candidate",
+                    "--job-file",
+                    str(job_file),
+                    "--candidate-out",
+                    str(candidate_file),
+                    "--replace",
+                    "--extranonce1",
+                    "aabbccdd",
+                    "--extranonce2",
+                    "01020304",
+                    "--ntime",
+                    "04030201",
+                    "--nonce",
+                    nonce.to_bytes(4, "little").hex(),
+                    "--require-block-target",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                return candidate_file
+        self.fail("failed to build a target-meeting fixture candidate")
+
     def test_builds_candidate_artifact_from_stratum_submit_tuple(self) -> None:
         binary = ensure_p2pool_node_binary()
         with tempfile.TemporaryDirectory(prefix="pohw-stratum-candidate-cli-") as temp:
@@ -207,6 +257,67 @@ class StratumBlockCandidateCliTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not meet the advertised block target", result.stderr)
         self.assertNotIn("Bitcoin RPC request", result.stderr)
+
+    def test_pohw_candidate_submission_requires_idena_policy_before_submitblock(self) -> None:
+        binary = ensure_p2pool_node_binary()
+        methods: list[str] = []
+
+        class RpcHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length))
+                methods.append(request["method"])
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "chain": "pohw",
+                        "blocks": 958200,
+                        "headers": 958200,
+                        "initialblockdownload": False,
+                        "verificationprogress": 1.0,
+                    },
+                    "error": None,
+                }
+                payload = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RpcHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="pohw-idena-submit-gate-") as temp:
+                root = Path(temp)
+                candidate_file = self.build_target_candidate(binary, root)
+                result = subprocess.run(
+                    [
+                        str(binary),
+                        "submit-stratum-block-candidate",
+                        "--candidate-file",
+                        str(candidate_file),
+                        "--rpc-url",
+                        f"http://127.0.0.1:{server.server_port}",
+                    ],
+                    cwd=REPO_ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --idena-anchor-policy", result.stderr)
+        self.assertEqual(methods, ["getblockchaininfo"])
 
 
 if __name__ == "__main__":

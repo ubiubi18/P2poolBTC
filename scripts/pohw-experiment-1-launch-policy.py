@@ -42,6 +42,13 @@ READINESS_BOOLEAN_FIELDS = (
     "immutable_v2_anchor_policy_published",
     "independent_second_node_rehearsal_passed",
 )
+IDENTITY_ADMISSION_SCOPE_FIELDS = frozenset(
+    {
+        "p2pool_runtime_enforced",
+        "bitcoin_block_consensus_enforced",
+        "successor_consensus_profile_required",
+    }
+)
 SHA256_HEX_LENGTH = 64
 CID_BYTES_PREFIX = bytes((1, 0x71, 0x12, 32))
 READINESS_REPORT_FIELDS = frozenset(
@@ -1094,11 +1101,30 @@ def validate(
         "registry_registration_identity_callback_required",
         "checkpoint_vote_identity_callback_required",
         "production_idena_wasm_runtime_gate_required",
+        "historical_replay_requires_finalized_checkpoint",
+        "candidate_submission_identity_required",
     ):
         if require_bool(runtime_gates, key) is not True:
             raise LaunchPolicyError(f"required runtime gate is disabled: {key}")
     if require_bool(runtime_gates, "bound_policy_replacement_allowed") is not False:
         raise LaunchPolicyError("bound policy replacement must remain disabled")
+
+    admission_scope = policy.get("identity_admission_scope")
+    if (
+        not isinstance(admission_scope, dict)
+        or frozenset(admission_scope) != IDENTITY_ADMISSION_SCOPE_FIELDS
+    ):
+        raise LaunchPolicyError("identity admission scope is missing or malformed")
+    if require_bool(admission_scope, "p2pool_runtime_enforced") is not True:
+        raise LaunchPolicyError("P2Pool runtime identity admission must remain enforced")
+    if require_bool(admission_scope, "bitcoin_block_consensus_enforced") is not False:
+        raise LaunchPolicyError(
+            "Experiment 1 must not claim Idena enforcement in Bitcoin block consensus"
+        )
+    if require_bool(admission_scope, "successor_consensus_profile_required") is not True:
+        raise LaunchPolicyError(
+            "strict Idena-gated Bitcoin consensus must require a successor profile"
+        )
 
     readiness = policy.get("public_join_readiness")
     if not isinstance(readiness, dict):

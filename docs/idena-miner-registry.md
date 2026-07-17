@@ -29,9 +29,16 @@ An activated P2PoolBTC node verifies all of the following:
    key, mining key, and experiment ID exactly matches the contract record.
 5. `contract_readData` on the node's local Idena RPC returns the exact canonical
    append-only record.
-6. For live admission, `dna_identity` reports the same address in state Newbie,
-   Verified, or Human. Historical replay does not reapply current eligibility,
-   so a later identity-state change cannot invalidate old accepted history.
+6. For live and uncheckpointed replay admission, `dna_identity` reports the
+   same address in state Newbie, Verified, or Human. An envelope timestamp never
+   creates a historical exception. A later identity-state change does not
+   invalidate ancestry already committed by an independently verified,
+   finalized Idena checkpoint; only that checkpoint's exact hash-linked share
+   and template dependencies may replay without current eligibility.
+   The mining adapter repeats this check every 15 seconds. If the identity loses
+   eligibility, Stratum closes cleanly; every share submission independently
+   repeats the check, so the polling interval does not create an acceptance
+   window. An unavailable or malformed RPC response fails closed.
 7. Every version-3 work template contains a finalized Idena block height/hash.
 8. Every version-3 work template commits to the complete normalized V2 anchor
    policy. Different deployment bytes, immutable parameters, finality,
@@ -61,12 +68,14 @@ This design prevents a miner from claiming work before the miner's public
 contract registration. It also prevents arbitrary anchor reuse, policy
 substitution, block-hash substitution, and live submission with stale anchors.
 
-It does not prove when every historical share was first disclosed. A miner who
-registered earlier can still withhold work and later offer a fabricated
-historical branch during historical synchronization. The target-independent
-one-share-per-anchor rule bounds the fabrication rate, but the bound grows with
-elapsed Idena blocks. `max_anchor_age_blocks` limits live admission only; it is
-not a permanent-data-availability proof.
+It does not prove when every historical share was first disclosed. A miner may
+withhold content before a checkpoint finalizes, and a finalized checkpoint is
+not a permanent-data-availability proof. A self-declared old gossip timestamp
+does not authorize replay: uncheckpointed work requires current eligibility and
+a fresh finalized anchor. A node grants historical treatment only after it has
+verified the exact checkpoint record through local Idena RPC; the checkpoint
+tip then commits every accepted parent share and work-template hash in the
+replayed ancestry.
 
 Before it creates a registration, the ownerless contract reads the caller's
 current identity through the pinned runtime's `create_get_identity_promise`
@@ -104,6 +113,16 @@ Other residual risks:
 - Every participant must verify the same policy commitment before activation.
 - Registering and rotating burns real IDNA. Contract calls and addresses are
   public and permanent.
+
+The current identity rule is P2Pool admission and payout policy, not Bitcoin
+Core consensus. The supported gossip mesh, Stratum adapter, and standalone
+`chain=pohw` candidate-submission command all fail closed without the active
+policy and stop accepting work when the configured miner becomes ineligible.
+Nevertheless, an independently modified miner can still construct a block that
+the Experiment 1 Bitcoin Core fork accepts under proof of work. Making identity
+eligibility a block-consensus rule would require a separately versioned
+successor profile with deterministic Idena proofs, replay vectors, activation,
+and migration tests. Existing Experiment 1 history must not be reinterpreted.
 
 Never place an Idena node key, wallet backup, password, Bitcoin private key,
 RPC cookie, or API key in a contract argument, policy file, issue, or repository.
@@ -345,7 +364,12 @@ POHW_IDENA_RPC_ALLOW_REMOTE=false
 
 The gossip mesh and mining adapter both fail closed if the policy is configured
 without the API-key file. Remote Idena RPC is rejected unless separately and
-explicitly enabled. Prefer a local synchronized node.
+explicitly enabled. Prefer a local synchronized node. Mining services use
+`Restart=on-failure` with a bounded systemd start rate: an eligibility loss is a
+clean stop and is not restarted automatically, while repeated RPC failures
+cannot create an unbounded retry loop. Restoring an eligible state still
+requires the operator to perform a fresh preflight and explicitly restart
+mining.
 
 Do not activate until all existing miners have version-2 registrations and all
 participants have compared the policy commitment. Legacy sharechain history is

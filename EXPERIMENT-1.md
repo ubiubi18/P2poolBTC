@@ -70,6 +70,28 @@ nonstandard script is relayed by the default mempool or created by the wallet.
 Experiment 0 remains coinbase-only. Its activation and existing history are
 not upgraded or reinterpreted.
 
+### Idena Admission Scope
+
+The supported Experiment 1 gossip mesh, Stratum adapter, and standalone
+`chain=pohw` block-submission command require the active ownerless Idena anchor
+policy. They verify the configured miner is currently Newbie, Verified, or
+Human. The adapter polls every 15 seconds, stops cleanly on an ineligible state,
+closes connected Stratum sockets, and repeats the check before writing a target
+block or payout artifact. Peer synchronization never treats an envelope as
+historical merely because its signer chose an old timestamp. Only ancestry
+cryptographically committed by a finalized checkpoint record read from local
+Idena RPC gets historical replay treatment.
+
+This is P2Pool admission and payout policy. The pinned Bitcoin Core v31.1 fork
+does not query Idena while validating a block. A modified miner outside the
+supported adapter can therefore still produce a proof-of-work-valid Experiment
+1 block without an eligible identity, although it cannot obtain an admitted
+P2Pool share or payout through conforming nodes. Strict identity-gated block
+consensus is not implemented. It would require a separately identified
+successor profile with deterministic Idena proof verification, activation and
+migration rules, and cross-node replay tests; it must not silently reinterpret
+this chain.
+
 ## Replay Isolation
 
 The marker consensus rule activates at height `958018`, not at the first fork

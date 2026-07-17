@@ -952,6 +952,10 @@ enum Command {
         require_block_target: bool,
     },
     SubmitStratumBlockCandidate {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        miner_id: Option<String>,
         #[arg(long)]
         candidate_file: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
@@ -966,14 +970,22 @@ enum Command {
         rpc_password: Option<String>,
         #[arg(long, env = "BITCOIN_RPC_COOKIE_FILE")]
         rpc_cookie_file: Option<PathBuf>,
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
     },
     SubmitForkChainBlockCandidate {
+        #[arg(long, default_value = ".pohw-p2pool")]
+        datadir: PathBuf,
+        #[arg(long)]
+        miner_id: Option<String>,
         #[arg(long)]
         candidate_file: PathBuf,
         #[arg(long)]
         activation_manifest: PathBuf,
         #[arg(long, default_value = "127.0.0.1:40408")]
         rpc_addr: SocketAddr,
+        #[command(flatten)]
+        idena_anchor: IdenaAnchorCliArgs,
     },
     SubmitForkTransaction {
         #[arg(long, conflicts_with = "transaction_file")]
@@ -2253,6 +2265,16 @@ async fn main() -> Result<()> {
                     "--expected-header-merkle-root-hex cannot be combined with --allow-unverified-merkle-root"
                 );
             }
+            let fork_chain_requires_idena_admission = match (
+                fork_chain_rpc_addr,
+                fork_chain_activation_manifest.as_deref(),
+            ) {
+                (Some(_), Some(path)) => {
+                    let manifest = fork_chain::read_activation_manifest(path)?;
+                    chain_name_requires_idena_admission(&manifest.config.chain_name)
+                }
+                _ => false,
+            };
             let fork_chain_client = fork_chain_client_from_options(
                 fork_chain_rpc_addr,
                 fork_chain_activation_manifest,
@@ -2277,6 +2299,25 @@ async fn main() -> Result<()> {
                 } else {
                     None
                 };
+                let bitcoin_chain_requires_idena_admission =
+                    if let Some(client) = bitcoin_rpc_client.as_ref() {
+                        let chain_info = client.get_blockchain_info().await?;
+                        if chain_name_requires_idena_admission(&chain_info.chain) {
+                            ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                if (fork_chain_requires_idena_admission || bitcoin_chain_requires_idena_admission)
+                    && idena_anchor_verifier.is_none()
+                {
+                    bail!(
+                        "the active PoHW Experiment 1 chain requires --idena-anchor-policy for peer work admission"
+                    );
+                }
                 let allow_pohw_time_dependent_bits = detect_pohw_time_dependent_bits_admission(
                     bitcoin_rpc_client.as_ref(),
                     allow_mutable_time,
@@ -2933,19 +2974,24 @@ async fn main() -> Result<()> {
             idena_anchor,
         } => {
             let idena_anchor_verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
-            let fork_chain_client = match (
+            let (fork_chain_client, fork_chain_requires_idena_admission) = match (
                 fork_chain_rpc_addr,
                 fork_chain_activation_manifest,
             ) {
                 (Some(addr), Some(path)) => {
                     let manifest = fork_chain::read_activation_manifest(&path)?;
-                    Some(fork_chain::ForkChainClient::new(
-                        addr,
-                        manifest.activation_id,
-                        false,
-                    )?)
+                    let requires_idena_admission =
+                        chain_name_requires_idena_admission(&manifest.config.chain_name);
+                    (
+                        Some(fork_chain::ForkChainClient::new(
+                            addr,
+                            manifest.activation_id,
+                            false,
+                        )?),
+                        requires_idena_admission,
+                    )
                 }
-                (None, None) => None,
+                (None, None) => (None, false),
                 _ => bail!(
                     "--fork-chain-rpc-addr and --fork-chain-activation-manifest must be supplied together"
                 ),
@@ -2966,11 +3012,18 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            let mut require_idena_admission = fork_chain_requires_idena_admission
+                || expected_rpc_chain
+                    .as_deref()
+                    .map(chain_name_requires_idena_admission)
+                    .unwrap_or(false);
             let (enforce_mainnet_snapshot_quorum, derive_share_target_from_block) =
                 if let Some(client) = bitcoin_rpc_client.as_ref() {
                     let chain_info = client.get_blockchain_info().await?;
                     ensure_expected_rpc_chain(&chain_info, expected_rpc_chain.as_deref())?;
                     ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
+                    require_idena_admission |=
+                        chain_name_requires_idena_admission(&chain_info.chain);
                     if auto_submit_blocks {
                         ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
                     }
@@ -2981,6 +3034,9 @@ async fn main() -> Result<()> {
                 } else {
                     (false, false)
                 };
+            if require_idena_admission && idena_anchor_verifier.is_none() {
+                bail!("the active PoHW Experiment 1 chain requires --idena-anchor-policy");
+            }
             let (payout_schedule, pohw_commitment, dynamic_pohw_payout) =
                 if derive_pohw_payouts_from_state {
                     if payout_schedule_file.is_some() {
@@ -3051,6 +3107,7 @@ async fn main() -> Result<()> {
                 dynamic_pohw_payout,
                 enforce_mainnet_snapshot_quorum,
                 derive_share_target_from_block,
+                require_idena_admission,
                 idena_anchor_verifier,
             })
             .await?;
@@ -3276,6 +3333,8 @@ async fn main() -> Result<()> {
             }
         }
         Command::SubmitStratumBlockCandidate {
+            datadir,
+            miner_id,
             candidate_file,
             rpc_url,
             allow_remote_rpc,
@@ -3283,6 +3342,7 @@ async fn main() -> Result<()> {
             rpc_user,
             rpc_password,
             rpc_cookie_file,
+            idena_anchor,
         } => {
             let candidate = read_stratum_block_candidate_file(&candidate_file)?;
             let block_hex = block_hex_for_stratum_candidate_submission(&candidate)?;
@@ -3295,6 +3355,14 @@ async fn main() -> Result<()> {
             )?;
             let chain_info = client.get_blockchain_info().await?;
             ensure_candidate_submit_chain_allowed(&chain_info, allow_mainnet_submit)?;
+            let verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
+            verify_current_idena_submission_authorization(
+                &datadir,
+                miner_id.as_deref(),
+                verifier.as_ref(),
+                chain_name_requires_idena_admission(&chain_info.chain),
+            )
+            .await?;
             let outcome = client.submit_block(block_hex).await?;
             if let Some(reason) = outcome.reject_reason {
                 return Err(anyhow!(
@@ -3318,13 +3386,24 @@ async fn main() -> Result<()> {
             );
         }
         Command::SubmitForkChainBlockCandidate {
+            datadir,
+            miner_id,
             candidate_file,
             activation_manifest,
             rpc_addr,
+            idena_anchor,
         } => {
             let candidate = read_stratum_block_candidate_file(&candidate_file)?;
             let block_hex = block_hex_for_stratum_candidate_submission(&candidate)?;
             let manifest = fork_chain::read_activation_manifest(&activation_manifest)?;
+            let verifier = idena_anchor_verifier_from_options(&idena_anchor)?;
+            verify_current_idena_submission_authorization(
+                &datadir,
+                miner_id.as_deref(),
+                verifier.as_ref(),
+                chain_name_requires_idena_admission(&manifest.config.chain_name),
+            )
+            .await?;
             let client = fork_chain::ForkChainClient::new(rpc_addr, manifest.activation_id, false)?;
             let outcome = client.submit_block(block_hex).await?;
             println!(
@@ -6276,6 +6355,42 @@ fn idena_anchor_verifier_from_options(
     )?))
 }
 
+fn chain_name_requires_idena_admission(chain_name: &str) -> bool {
+    let normalized = chain_name.trim().to_ascii_lowercase();
+    normalized == "pohw" || normalized.starts_with("pohw-experiment-1")
+}
+
+async fn verify_current_idena_submission_authorization(
+    datadir: &Path,
+    miner_id: Option<&str>,
+    verifier: Option<&idena_anchor_verifier::IdenaAnchorVerifier>,
+    required: bool,
+) -> Result<()> {
+    if !required && verifier.is_none() {
+        return Ok(());
+    }
+    let verifier = verifier.context("this fork profile requires --idena-anchor-policy")?;
+    let miner_id = miner_id.context("this fork profile requires --miner-id")?;
+    verifier
+        .verify_registry_deployment()
+        .await
+        .context("Idena miner registry deployment verification failed")?;
+    local_node::bind_idena_anchor_policy(datadir, verifier.policy())
+        .context("failed to bind Idena anchor policy to submission datadir")?;
+    let replay = local_node::replay_state(datadir)
+        .context("failed to replay the local miner registration")?;
+    let registration = replay
+        .registrations()
+        .get(&miner_id.to_ascii_lowercase())
+        .context("configured miner is not registered in the local sharechain")?
+        .clone();
+    drop(replay);
+    verifier
+        .verify_registration(&registration)
+        .await
+        .context("registered Idena identity is not currently eligible for block submission")
+}
+
 fn fork_chain_client_from_options(
     rpc_addr: Option<SocketAddr>,
     activation_manifest: Option<PathBuf>,
@@ -8722,5 +8837,15 @@ mod tests {
         assert_eq!(unix_mode(&nested), 0o700);
         assert_eq!(unix_mode(&key_path), 0o600);
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn experiment_one_chain_names_require_idena_admission() {
+        for chain_name in ["pohw", "POHW", "pohw-experiment-1-full-consensus"] {
+            assert!(chain_name_requires_idena_admission(chain_name));
+        }
+        for chain_name in ["main", "regtest", "pohw-experiment-0"] {
+            assert!(!chain_name_requires_idena_admission(chain_name));
+        }
     }
 }

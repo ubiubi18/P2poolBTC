@@ -421,7 +421,11 @@ or callback URL into chats, screenshots, or issue reports. Never send the
 generated key files or Idena backup to another participant.
 Registration is eligible only while the live Idena state is `Newbie`,
 `Verified`, or `Human`; registration does not transfer custody of the identity
-or its stake to P2poolBTC.
+or its stake to P2poolBTC. The installed adapter checks this before startup,
+every share, and every 15 seconds while running. Losing eligibility closes
+Stratum and is a clean, non-restarting stop. An old peer envelope timestamp does
+not bypass the rule; only exact ancestry already committed by a finalized Idena
+checkpoint can be replayed historically.
 
 ## 5. Start P2Pool And Mine
 
@@ -1193,6 +1197,13 @@ Point your miner at your own adapter. Keep Stratum on loopback unless you have
 configured its protected password file and firewall. The local endpoint is
 `stratum+tcp://127.0.0.1:3333`; use the credentials configured for your own
 adapter rather than sharing another operator's Stratum secret.
+
+This identity gate controls conforming P2Pool admission and payouts. It is not
+part of the pinned Bitcoin Core block-consensus rules: a modified external
+miner may still produce a proof-of-work-valid fork block without receiving an
+admitted share or payout. Do not describe Experiment 1 as identity-gated
+Bitcoin consensus unless a separately activated successor profile implements
+and independently verifies that rule.
 
 The adapter serves jobs and waits idle when no miner is connected. It is not a
 continuous CPU miner. The repository smoke miner is a bounded acceptance tool

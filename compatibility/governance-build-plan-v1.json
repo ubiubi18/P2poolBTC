@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreih4oelgprkf5p4pzdlnehstatrvrp3kwr3e64dwsnvs2xmced52xy",
-          "expectedSha256": "fc711667c545ebf8fc8d6d21e5304e358bf6ab4764f7076936b2d5d8220fbabe",
-          "expectedSize": 50138
+          "expectedCid": "bafkreiccrmx4vtshnlgwnlmip45ovturpqq22tzfmioo6ec62s6qlsciyu",
+          "expectedSha256": "428b2fcace476acd66ad887f3aeace917c21ad4f25621cef105ed4bd05c848c5",
+          "expectedSize": 51315
         },
         {
           "name": "experiment-1-full-consensus.json",
@@ -138,9 +138,9 @@
           "platform": "all",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiauk2wbidp75ngn5e5j4ig4ruouvabgeeclasmz66yqw4fncdracm",
-          "expectedSha256": "1456ac140dffeb4cde93a9e20dc8d1d4a80262104b04999f7b10b70ad10e2013",
-          "expectedSize": 3678
+          "expectedCid": "bafkreiep2pf2dmzogac3q6r64npwe2zge2u23tuberrzkhvijy3pfbl5aq",
+          "expectedSha256": "8fd3cba1b32e3005b87a3ee35f626b2626a9adce812463951ea84e36f2857d04",
+          "expectedSize": 3961
         },
         {
           "name": "experiment-1-miner-registry-candidate.json",
@@ -174,9 +174,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreiejtj7rezakapvcedc23n5q4jquyo7lznwmacbsnobxox6up4c2a4",
-          "expectedSha256": "899a7f12640a03ea220c5adb7b0e2614c3bebcb6cc008326b83775fd47f05a07",
-          "expectedSize": 1212
+          "expectedCid": "bafkreidgpmextoxgvcuk3r65egvqegyvgzh44ypoj5egrali2z4g44qc7q",
+          "expectedSha256": "667b0979bae6a8a8adc7dd21ab021b15364fce61ee4f48688168d6786e7202fc",
+          "expectedSize": 1261
         },
         {
           "name": "pohw-gossip-mesh.service",

@@ -92,9 +92,16 @@ RUNTIME_GATE_FIELDS = frozenset(
         "registry_registration_identity_callback_required",
         "checkpoint_vote_identity_callback_required",
         "production_idena_wasm_runtime_gate_required",
+        "historical_replay_requires_finalized_checkpoint",
+        "candidate_submission_identity_required",
         "bound_policy_replacement_allowed",
     }
 )
+IDENTITY_ADMISSION_SCOPE = {
+    "p2pool_runtime_enforced": True,
+    "bitcoin_block_consensus_enforced": False,
+    "successor_consensus_profile_required": True,
+}
 PRIVACY_FLAGS = {
     "contains_identity_address": False,
     "contains_miner_id": False,
@@ -1423,6 +1430,8 @@ def _static_policy_bindings_verified(
             runtime_gates.get(field) is not True
             for field in RUNTIME_GATE_FIELDS - {"bound_policy_replacement_allowed"}
         ):
+            return False
+        if policy.get("identity_admission_scope") != IDENTITY_ADMISSION_SCOPE:
             return False
         readiness = policy.get("public_join_readiness")
         if not isinstance(readiness, dict) or frozenset(readiness) != READINESS_FIELDS:

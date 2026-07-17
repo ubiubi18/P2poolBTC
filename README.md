@@ -346,6 +346,9 @@ Working prototype pieces:
   signature-domain replay isolation, revision-specific network identity, and a
   permanent difficulty-handoff marker,
 - live fork templates and fork-only block submission wired into the Stratum adapter,
+- fail-closed Experiment 1 identity checks inside the Rust gossip, Stratum, and
+  standalone block-submission paths, including continuous eligibility shutdown,
+  pre-persistence share checks, and checkpoint-authorized historical replay,
 - local append-only sharechain replay,
 - signed miner registrations, shares, snapshot votes, payout schedules, withdrawal requests, and withdrawal batches,
 - signed TCP gossip mesh with inventory sync, peer exchange, rebroadcast, rate limits, and private-network defaults,
@@ -382,6 +385,9 @@ Working prototype pieces:
 Not done yet:
 
 - independent external review and multi-node soak testing of Experiment 1,
+- a separately activated successor consensus profile if the experiment requires
+  Bitcoin block validity itself, rather than P2Pool admission and payouts, to
+  depend on deterministic Idena eligibility proofs,
 - an exact public source release descriptor and a complete evidence-bound
   fresh-host service installation path,
 - two independent matching miner-registry builds, a verified ownerless Idena
@@ -1008,7 +1014,12 @@ cargo run -p p2pool-node -- submit-stratum-block-candidate \
   --rpc-cookie-file ~/.bitcoin/.cookie
 ```
 
-The submit command refuses incomplete artifacts, candidates that do not meet the advertised block target, and Bitcoin mainnet RPC unless `--allow-mainnet-submit` is explicitly set.
+The submit command refuses incomplete artifacts, candidates that do not meet the
+advertised block target, and Bitcoin mainnet RPC unless
+`--allow-mainnet-submit` is explicitly set. When RPC reports Experiment 1
+`chain=pohw`, it additionally requires `--datadir`, `--miner-id`,
+`--idena-anchor-policy`, and `--idena-api-key-file`; it verifies the ownerless
+registry and current Newbie/Verified/Human state before calling `submitblock`.
 
 For a LAN miner or rented hashrate endpoint, bind to the node IP and require a password file:
 

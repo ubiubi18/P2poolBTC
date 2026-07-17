@@ -34,6 +34,19 @@ impl IdenaAnchorVerifier {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_verified_deployment_for_test(
+        client: IdenaRpcClient,
+        policy: IdenaAnchorPolicyV2,
+    ) -> Result<Self> {
+        let verifier = Self::new(client, policy)?;
+        verifier
+            .deployment_verified
+            .set(())
+            .map_err(|_| anyhow!("failed to seed test deployment verification"))?;
+        Ok(verifier)
+    }
+
     pub(crate) fn policy(&self) -> &IdenaAnchorPolicyV2 {
         &self.policy
     }
@@ -141,6 +154,18 @@ impl IdenaAnchorVerifier {
             .await
     }
 
+    pub(crate) async fn current_identity_is_eligible(
+        &self,
+        registration: &MinerRegistration,
+    ) -> Result<bool> {
+        let identity = self
+            .client
+            .identity(&registration.idena_address)
+            .await
+            .context("failed to read registered Idena identity state")?;
+        identity_response_is_currently_eligible(&registration.idena_address, &identity)
+    }
+
     async fn verify_registration_with_eligibility(
         &self,
         registration: &MinerRegistration,
@@ -171,13 +196,8 @@ impl IdenaAnchorVerifier {
             .canonical_record_line(&registration.miner_id)
             .context("invalid miner registry record fields")?;
         verify_contract_record(&actual_record, &expected_record)?;
-        if require_current_eligibility {
-            let identity = self
-                .client
-                .identity(&registration.idena_address)
-                .await
-                .context("failed to read registered Idena identity state")?;
-            ensure_current_identity_eligible(&registration.idena_address, &identity)?;
+        if require_current_eligibility && !self.current_identity_is_eligible(registration).await? {
+            bail!("registered Idena identity is not Newbie, Verified, or Human");
         }
         Ok(())
     }
@@ -552,17 +572,14 @@ fn ensure_idena_ready(syncing: &SyncingResponse) -> Result<()> {
     Ok(())
 }
 
-fn ensure_current_identity_eligible(
+fn identity_response_is_currently_eligible(
     expected_address: &str,
     identity: &IdentityResponse,
-) -> Result<()> {
+) -> Result<bool> {
     if !identity.address.eq_ignore_ascii_case(expected_address) {
         bail!("Idena RPC returned a different identity address");
     }
-    if !identity.state.is_block_eligible() {
-        bail!("registered Idena identity is not Newbie, Verified, or Human");
-    }
-    Ok(())
+    Ok(identity.state.is_block_eligible())
 }
 
 fn anchor_from_block(block: &BlockResponse) -> Result<IdenaBlockAnchorV1> {
@@ -614,8 +631,11 @@ fn verify_exact_contract_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use idena_lite_indexer::rpc::IdenaRpcClient;
     use pohw_core::snapshot::IdenaStatus;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn policy() -> IdenaAnchorPolicyV2 {
         IdenaAnchorPolicyV2 {
@@ -634,6 +654,57 @@ mod tests {
             max_anchor_age_blocks: 12,
             handoff_version_bit: 27,
         }
+    }
+
+    fn registration(address: String) -> MinerRegistration {
+        MinerRegistration {
+            version: pohw_core::sharechain::LEGACY_MINER_REGISTRATION_VERSION,
+            miner_id: "eligibility-test".to_string(),
+            idena_address: address,
+            btc_payout_script_hex: "6a".to_string(),
+            claim_owner_pubkey_hex: "11".repeat(32),
+            mining_pubkey_hex: "22".repeat(32),
+            registry_anchor: None,
+            idena_signature_hex: String::new(),
+            mining_signature_hex: String::new(),
+        }
+    }
+
+    async fn current_eligibility_from_mock_rpc(state: IdenaStatus) -> bool {
+        let address = format!("0x{}", "11".repeat(20));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = listener.local_addr().unwrap();
+        let response_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "address": address.clone(),
+                "state": state,
+                "pubkey": "",
+                "delegatee": null,
+                "isPool": false
+            }
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8 * 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = IdenaRpcClient::new(format!("http://{socket}"), "test-api-key").unwrap();
+        let verifier = IdenaAnchorVerifier::new(client, policy()).unwrap();
+        let result = verifier
+            .current_identity_is_eligible(&registration(address))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        result
     }
 
     fn append_protobuf_bytes_field(payload: &mut Vec<u8>, field: u8, value: &[u8]) {
@@ -676,7 +747,7 @@ mod tests {
                 delegatee: None,
                 is_pool: false,
             };
-            ensure_current_identity_eligible(&address, &identity).unwrap();
+            assert!(identity_response_is_currently_eligible(&address, &identity).unwrap());
         }
         for state in [
             IdenaStatus::Invite,
@@ -693,7 +764,7 @@ mod tests {
                 delegatee: None,
                 is_pool: false,
             };
-            assert!(ensure_current_identity_eligible(&address, &identity).is_err());
+            assert!(!identity_response_is_currently_eligible(&address, &identity).unwrap());
         }
         let wrong_address = IdentityResponse {
             address: format!("0x{}", "22".repeat(20)),
@@ -702,7 +773,13 @@ mod tests {
             delegatee: None,
             is_pool: false,
         };
-        assert!(ensure_current_identity_eligible(&address, &wrong_address).is_err());
+        assert!(identity_response_is_currently_eligible(&address, &wrong_address).is_err());
+    }
+
+    #[tokio::test]
+    async fn live_identity_rpc_reports_eligibility_transitions() {
+        assert!(current_eligibility_from_mock_rpc(IdenaStatus::Human).await);
+        assert!(!current_eligibility_from_mock_rpc(IdenaStatus::Candidate).await);
     }
 
     #[test]
