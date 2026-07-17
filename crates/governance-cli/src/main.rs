@@ -7,14 +7,16 @@ use governance_core::{
     agent_attestation_commitment_fields, attestation_authentication_request,
     build_attestation_commitment, build_attestation_commitment_fields, checkout_source_car,
     cid_for, create_source_patch, data_availability_commitment_fields, effective_vote_weight,
-    evaluate_deployment_readiness_evidence, flip_trust_bps, package_agent_review_attestation,
-    package_build_attestation, package_change_proposal_with_scope, package_dag_cbor,
-    package_data_availability_attestation, package_deployment_readiness_evidence,
-    package_development_policy, package_ecosystem_manifest, package_ecosystem_patch_manifest,
-    package_external_audit_attestation, package_governance_parameters,
-    package_identity_metrics_attestation, package_identity_metrics_snapshot,
+    evaluate_deployment_readiness_evidence, flip_trust_bps, migration_rehearsal_digest,
+    package_agent_review_attestation, package_build_attestation,
+    package_change_proposal_with_scope, package_dag_cbor, package_data_availability_attestation,
+    package_deployment_readiness_evidence, package_development_policy, package_ecosystem_manifest,
+    package_ecosystem_patch_manifest, package_external_audit_attestation,
+    package_governance_parameters, package_identity_metrics_attestation,
+    package_identity_metrics_snapshot, package_migration_rehearsal_attestation,
     package_pinset_manifest_for_transition_with_additional, package_proposal_scope_evidence,
-    package_release_manifest, package_source_tree_with_artifact_exclusions,
+    package_release_manifest, package_source_commit_receipt,
+    package_source_files_with_artifact_exclusions, package_source_tree_with_artifact_exclusions,
     package_toolchain_manifest_for_ecosystem, run_local_governance_day_protocol_demo, sha256_hex,
     signature_attestation_authentication, stake_score, validate_epoch_governance_parameters,
     validate_proposal_scope_evidence, verify_agent_review_attestation_car,
@@ -25,25 +27,32 @@ use governance_core::{
     verify_ecosystem_patch_manifest_car, verify_ecosystem_transition,
     verify_external_audit_attestation_car, verify_governance_parameters_car,
     verify_identity_metrics_attestation_car, verify_identity_metrics_snapshot_car,
-    verify_pinset_manifest_car, verify_pinset_manifest_for_transition,
-    verify_proposal_scope_evidence_car, verify_release_manifest_car, verify_source_car,
+    verify_migration_rehearsal_attestation_car, verify_pinset_manifest_car,
+    verify_pinset_manifest_for_transition, verify_proposal_scope_evidence_car,
+    verify_release_manifest_car, verify_source_car, verify_source_commit_receipt_car,
     verify_source_patch, verify_toolchain_manifest_car,
     verify_tree_matches_car_with_artifact_exclusions, AcceptanceEvidence, AddressedAttestationV1,
-    AgentReviewAttestationV1, AttestationAuthenticationRequestV1, AttestationAuthenticationV1,
-    AttestationCommitmentEntryV1, BuildAttestationV1, ChangeProposalContentV1,
-    DataAvailabilityAttestationV1, DeploymentReadinessEvidenceV1, DevelopmentPolicyBundleV1,
-    EcosystemManifestV1, EcosystemPatchManifestV1, EpochGovernanceParameterSetV1,
-    ExternalAuditAttestationV1, ExternalAuditVerdictV1, GateResults, GovernanceParameterSetV1,
-    IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1, IdentityState, PinsetManifestV1,
-    ProposalScopeEvidenceV1, ReleaseManifestV1, RepositoryScopeEvidenceV1, RiskClass,
-    ScopeChangeV1, SourcePatchV1, SourceTreeManifestV1, ToolchainManifestV1,
+    AddressedSourceCommitReceiptV1, AgentReviewAttestationV1, AttestationAuthenticationRequestV1,
+    AttestationAuthenticationV1, AttestationCommitmentEntryV1, BuildAttestationV1,
+    ChangeProposalContentV1, DataAvailabilityAttestationV1, DeploymentReadinessEvidenceV1,
+    DevelopmentPolicyBundleV1, EcosystemManifestV1, EcosystemPatchManifestV1,
+    EpochGovernanceParameterSetV1, ExternalAuditAttestationV1, ExternalAuditVerdictV1, GateResults,
+    GovernanceParameterSetV1, IdentityMetricsAttestationV1, IdentityMetricsSnapshotV1,
+    IdentityState, MigrationRehearsalAttestationV1, PinsetManifestV1, ProposalScopeEvidenceV1,
+    ReleaseManifestV1, RepositoryScopeEvidenceV1, RiskClass, ScopeChangeV1, SourceCommitReceiptV1,
+    SourceInputFile, SourcePatchV1, SourceTreeManifestV1, ToolchainManifestV1,
     AGENT_REVIEW_COMMITMENT_DOMAIN, BUILD_ATTESTATION_COMMITMENT_DOMAIN,
-    DATA_AVAILABILITY_COMMITMENT_DOMAIN, EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
+    DATA_AVAILABILITY_COMMITMENT_DOMAIN, EXTERNAL_AUDIT_ATTESTATION_DOMAIN, MAX_SOURCE_FILES,
+    MAX_SOURCE_FILE_BYTES, MIGRATION_REHEARSAL_ATTESTATION_DOMAIN,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha1::{Digest as _, Sha1};
+use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::ipfs::{
     fetch_car_from_gateways, http_client, import_to_public_kubo, parse_external_provider,
@@ -69,6 +78,21 @@ enum Command {
     Package {
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Strict JSON policy listing tracked binary artifacts omitted from the source CID.
+        #[arg(long)]
+        artifact_exclusions: Option<PathBuf>,
+    },
+    /// Package files directly from one exact Git commit without using the worktree.
+    PackageCommit {
+        #[arg(long)]
+        git_repository: PathBuf,
+        /// Full lowercase SHA-1 or SHA-256 commit object id; branches and tags are rejected.
+        #[arg(long)]
+        commit: String,
         #[arg(long)]
         repository: String,
         #[arg(long)]
@@ -288,6 +312,16 @@ enum Command {
         #[arg(long)]
         output_dir: PathBuf,
     },
+    /// Package one independently observed deployed migration and rollback rehearsal.
+    MigrationRehearsalAttestation {
+        #[arg(long)]
+        input: PathBuf,
+        /// Replace rehearsalDigest with the deterministic digest derived from the payload.
+        #[arg(long)]
+        derive_rehearsal_digest: bool,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
     /// Fail unless independent build, public-pin, and external-audit evidence is complete.
     DeploymentReadinessVerify {
         #[arg(long)]
@@ -424,6 +458,7 @@ enum CliAttestationKind {
     Build,
     DataAvailability,
     ExternalAudit,
+    MigrationRehearsal,
 }
 
 impl CliAttestationKind {
@@ -433,6 +468,7 @@ impl CliAttestationKind {
             Self::Build => BUILD_ATTESTATION_COMMITMENT_DOMAIN,
             Self::DataAvailability => DATA_AVAILABILITY_COMMITMENT_DOMAIN,
             Self::ExternalAudit => EXTERNAL_AUDIT_ATTESTATION_DOMAIN,
+            Self::MigrationRehearsal => MIGRATION_REHEARSAL_ATTESTATION_DOMAIN,
         }
     }
 
@@ -442,6 +478,7 @@ impl CliAttestationKind {
             Self::Build => "build-attestation",
             Self::DataAvailability => "data-availability-attestation",
             Self::ExternalAudit => "external-audit-attestation",
+            Self::MigrationRehearsal => "migration-rehearsal-attestation",
         }
     }
 }
@@ -464,6 +501,25 @@ struct SourceView {
     source_tree_sha256: String,
     car_sha256: String,
     manifest: SourceTreeManifestV1,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceCommitView {
+    schema_version: u16,
+    receipt_cid: String,
+    receipt_sha256: String,
+    receipt_car_sha256: String,
+    receipt: SourceCommitReceiptV1,
+    source: SourceView,
+}
+
+#[derive(Debug)]
+struct GitTreeEntry {
+    path: String,
+    mode: u32,
+    object_id: String,
+    size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -547,10 +603,20 @@ struct ScopeRepositoryInputV1 {
 struct DeploymentReadinessInputV1 {
     schema_version: u16,
     scope_car: PathBuf,
+    #[serde(default)]
+    source_commit_receipts: Vec<SourceCommitReceiptInputV1>,
     build_attestations: Vec<AuthenticatedAttestationInputV1>,
     data_availability_attestations: Vec<AuthenticatedAttestationInputV1>,
     external_audit_attestations: Vec<AuthenticatedAttestationInputV1>,
+    #[serde(default)]
+    migration_rehearsal_attestations: Vec<AuthenticatedAttestationInputV1>,
     required_availability_through_block: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourceCommitReceiptInputV1 {
+    car: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -786,6 +852,19 @@ async fn main() -> Result<()> {
             &output_dir,
             artifact_exclusions.as_deref(),
         ),
+        Command::PackageCommit {
+            git_repository,
+            commit,
+            repository,
+            output_dir,
+            artifact_exclusions,
+        } => package_commit_command(
+            &git_repository,
+            &commit,
+            &repository,
+            &output_dir,
+            artifact_exclusions.as_deref(),
+        ),
         Command::Inspect { car } => inspect_command(&car),
         Command::Verify {
             car,
@@ -891,6 +970,11 @@ async fn main() -> Result<()> {
         Command::ExternalAuditAttestation { input, output_dir } => {
             external_audit_attestation_command(&input, &output_dir)
         }
+        Command::MigrationRehearsalAttestation {
+            input,
+            derive_rehearsal_digest,
+            output_dir,
+        } => migration_rehearsal_attestation_command(&input, derive_rehearsal_digest, &output_dir),
         Command::DeploymentReadinessVerify { input, output_dir } => {
             deployment_readiness_verify_command(&input, output_dir.as_deref())
         }
@@ -1000,6 +1084,318 @@ fn package_command(
     let output = secure_output_directory(output_dir)?;
     write_source_artifacts(&output, repository, &package.car_bytes, &view)?;
     print_json(&view)
+}
+
+fn package_commit_command(
+    git_repository: &Path,
+    commit: &str,
+    repository: &str,
+    output_dir: &Path,
+    artifact_exclusions: Option<&Path>,
+) -> Result<()> {
+    require_absolute(git_repository, "Git repository")?;
+    let metadata = fs::symlink_metadata(git_repository)
+        .with_context(|| format!("cannot inspect Git repository {}", git_repository.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("Git repository must be a non-symlink directory");
+    }
+    let object_format = git_text(git_repository, &["rev-parse", "--show-object-format"])?;
+    let oid_length = match object_format.as_str() {
+        "sha1" => 40,
+        "sha256" => 64,
+        _ => bail!("Git repository uses unsupported object format {object_format}"),
+    };
+    validate_exact_git_oid(commit, oid_length, "commit")?;
+    let commit_expression = format!("{commit}^{{commit}}");
+    let resolved_commit = git_text(
+        git_repository,
+        &["rev-parse", "--verify", commit_expression.as_str()],
+    )?;
+    if resolved_commit != commit {
+        bail!("Git commit did not resolve to the exact requested object id");
+    }
+    let tree_expression = format!("{commit}^{{tree}}");
+    let git_tree = git_text(
+        git_repository,
+        &["rev-parse", "--verify", tree_expression.as_str()],
+    )?;
+    validate_exact_git_oid(&git_tree, oid_length, "tree")?;
+
+    let entries = read_git_tree(git_repository, commit, oid_length)?;
+    let tracked_file_count = u32::try_from(entries.len())
+        .context("Git tree contains too many tracked files for a portable receipt")?;
+    let files = read_git_blobs(git_repository, &object_format, &entries)?;
+    let exclusions = read_artifact_exclusions(artifact_exclusions)?;
+    let package =
+        package_source_files_with_artifact_exclusions(repository, files.clone(), &exclusions)?;
+    let repeated = package_source_files_with_artifact_exclusions(repository, files, &exclusions)?;
+    if package.root_cid != repeated.root_cid || package.car_bytes != repeated.car_bytes {
+        bail!("exact-commit source packaging was not byte-for-byte deterministic");
+    }
+    let car_sha256 = sha256_hex(&package.car_bytes);
+    let receipt_package = package_source_commit_receipt(SourceCommitReceiptV1 {
+        schema_version: 1,
+        repository: repository.to_string(),
+        git_object_format: object_format,
+        git_commit: resolved_commit,
+        git_tree,
+        source_tree_cid: package.root_cid.to_string(),
+        source_tree_sha256: package.source_tree_sha256.clone(),
+        car_sha256: car_sha256.clone(),
+        tracked_file_count,
+        packaged_file_count: u32::try_from(package.manifest.files.len())
+            .context("source package contains too many files for a portable receipt")?,
+    })?;
+    let source = SourceView {
+        schema_version: 1,
+        source_tree_cid: package.root_cid.to_string(),
+        source_tree_sha256: package.source_tree_sha256.clone(),
+        car_sha256,
+        manifest: package.manifest,
+    };
+    let view = SourceCommitView {
+        schema_version: 1,
+        receipt_cid: receipt_package.root_cid.to_string(),
+        receipt_sha256: receipt_package.root_sha256.clone(),
+        receipt_car_sha256: sha256_hex(&receipt_package.car_bytes),
+        receipt: receipt_package.value,
+        source,
+    };
+    let output = secure_output_directory(output_dir)?;
+    write_source_artifacts(&output, repository, &package.car_bytes, &view.source)?;
+    write_new(
+        &output.join(format!("{repository}.source-commit-receipt.car")),
+        &receipt_package.car_bytes,
+    )?;
+    write_new(
+        &output.join(format!("{repository}.source-commit-receipt.json")),
+        &deterministic_json(&view)?,
+    )?;
+    write_new(
+        &output.join(format!("{repository}.source-commit-receipt.cid")),
+        format!("{}\n", view.receipt_cid).as_bytes(),
+    )?;
+    write_new(
+        &output.join(format!("{repository}.source-commit-receipt.sha256")),
+        format!(
+            "{}  {}.source-commit-receipt.car\n",
+            view.receipt_car_sha256, repository
+        )
+        .as_bytes(),
+    )?;
+    print_json(&view)
+}
+
+fn read_git_tree(
+    git_repository: &Path,
+    commit: &str,
+    oid_length: usize,
+) -> Result<Vec<GitTreeEntry>> {
+    let output = git_output(
+        git_repository,
+        &["ls-tree", "-r", "-z", "--full-tree", "--long", commit],
+    )?;
+    let mut entries = Vec::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        if entries.len() >= MAX_SOURCE_FILES {
+            bail!("Git tree exceeds the {MAX_SOURCE_FILES}-file source limit");
+        }
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("Git tree record is missing its path separator")?;
+        let header =
+            std::str::from_utf8(&record[..separator]).context("Git tree metadata is not UTF-8")?;
+        let path = std::str::from_utf8(&record[separator + 1..])
+            .context("Git source paths must be UTF-8")?
+            .to_string();
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 4 {
+            bail!("Git tree record has a noncanonical field count");
+        }
+        if fields[1] != "blob" {
+            bail!("Git tree contains a non-blob entry at {path}");
+        }
+        let mode = match fields[0] {
+            "100644" => 0o644,
+            "100755" => 0o755,
+            "120000" => bail!("Git source symlinks are rejected: {path}"),
+            "160000" => bail!("Git submodules are rejected: {path}"),
+            _ => bail!("Git source entry has an unsupported mode at {path}"),
+        };
+        validate_exact_git_oid(fields[2], oid_length, "blob")?;
+        let size = fields[3]
+            .parse::<u64>()
+            .with_context(|| format!("Git blob size is invalid at {path}"))?;
+        if size > MAX_SOURCE_FILE_BYTES {
+            bail!("Git blob exceeds the source file limit at {path}");
+        }
+        entries.push(GitTreeEntry {
+            path,
+            mode,
+            object_id: fields[2].to_string(),
+            size,
+        });
+    }
+    Ok(entries)
+}
+
+fn read_git_blobs(
+    git_repository: &Path,
+    object_format: &str,
+    entries: &[GitTreeEntry],
+) -> Result<Vec<SourceInputFile>> {
+    let mut child = git_process(git_repository)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot start Git object reader")?;
+    let mut input = child
+        .stdin
+        .take()
+        .context("Git object reader has no stdin")?;
+    let output = child
+        .stdout
+        .take()
+        .context("Git object reader has no stdout")?;
+    let mut output = BufReader::new(output);
+    let result = (|| -> Result<Vec<SourceInputFile>> {
+        let mut files = Vec::with_capacity(entries.len());
+        for entry in entries {
+            writeln!(input, "{}", entry.object_id).context("cannot request Git blob")?;
+            input.flush().context("cannot flush Git blob request")?;
+            let mut header = String::new();
+            if output
+                .read_line(&mut header)
+                .context("cannot read Git blob header")?
+                == 0
+            {
+                bail!("Git object reader ended before returning every blob");
+            }
+            let fields = header.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3 || fields[0] != entry.object_id || fields[1] != "blob" {
+                bail!("Git object reader returned a mismatched blob header");
+            }
+            let size = fields[2]
+                .parse::<u64>()
+                .context("Git object reader returned an invalid blob size")?;
+            if size != entry.size || size > MAX_SOURCE_FILE_BYTES {
+                bail!(
+                    "Git blob size disagrees with the committed tree at {}",
+                    entry.path
+                );
+            }
+            let size = usize::try_from(size).context("Git blob is too large for this platform")?;
+            let mut bytes = vec![0u8; size];
+            output
+                .read_exact(&mut bytes)
+                .with_context(|| format!("cannot read Git blob at {}", entry.path))?;
+            let mut terminator = [0u8; 1];
+            output
+                .read_exact(&mut terminator)
+                .context("Git blob response is missing its terminator")?;
+            if terminator != *b"\n" {
+                bail!("Git blob response has a noncanonical terminator");
+            }
+            if git_blob_object_id(object_format, &bytes)? != entry.object_id {
+                bail!("Git blob hash verification failed at {}", entry.path);
+            }
+            files.push(SourceInputFile {
+                path: entry.path.clone(),
+                mode: entry.mode,
+                bytes,
+            });
+        }
+        Ok(files)
+    })();
+    drop(input);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().context("cannot wait for Git object reader")?;
+    if !status.success() && result.is_ok() {
+        bail!("Git object reader failed");
+    }
+    result
+}
+
+fn git_blob_object_id(object_format: &str, bytes: &[u8]) -> Result<String> {
+    let header = format!("blob {}\0", bytes.len());
+    match object_format {
+        "sha1" => {
+            let mut digest = Sha1::new();
+            digest.update(header.as_bytes());
+            digest.update(bytes);
+            Ok(hex::encode(digest.finalize()))
+        }
+        "sha256" => {
+            let mut digest = Sha256::new();
+            digest.update(header.as_bytes());
+            digest.update(bytes);
+            Ok(hex::encode(digest.finalize()))
+        }
+        _ => bail!("unsupported Git object format"),
+    }
+}
+
+fn validate_exact_git_oid(value: &str, expected_length: usize, label: &str) -> Result<()> {
+    if value.len() != expected_length
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be a full lowercase Git object id");
+    }
+    Ok(())
+}
+
+fn git_text(git_repository: &Path, arguments: &[&str]) -> Result<String> {
+    let output = git_output(git_repository, arguments)?;
+    let value = String::from_utf8(output).context("Git output is not UTF-8")?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.contains(['\r', '\n']) {
+        bail!("Git returned a noncanonical single-line value");
+    }
+    Ok(value.to_string())
+}
+
+fn git_output(git_repository: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
+    let output = git_process(git_repository)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .context("cannot run Git")?;
+    if !output.status.success() {
+        bail!("Git command failed while reading committed source objects");
+    }
+    Ok(output.stdout)
+}
+
+fn git_process(git_repository: &Path) -> ProcessCommand {
+    let mut command = ProcessCommand::new("git");
+    command
+        .arg("--no-replace-objects")
+        .arg("-C")
+        .arg(git_repository)
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_REPLACE_REF_BASE")
+        .env_remove("GIT_WORK_TREE")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C");
+    command
 }
 
 fn inspect_command(car: &Path) -> Result<()> {
@@ -1858,6 +2254,38 @@ fn external_audit_attestation_command(input: &Path, output_dir: &Path) -> Result
     )
 }
 
+fn migration_rehearsal_attestation_command(
+    input: &Path,
+    derive_rehearsal_digest: bool,
+    output_dir: &Path,
+) -> Result<()> {
+    let mut payload: MigrationRehearsalAttestationV1 =
+        read_json_file(input, "migration rehearsal attestation")?;
+    if derive_rehearsal_digest {
+        payload.rehearsal_digest = migration_rehearsal_digest(&payload)?;
+    }
+    let package = package_migration_rehearsal_attestation(payload)?;
+    let fields = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        package.root_cid,
+        package.value.candidate_ecosystem_cid,
+        package.value.scope_evidence_cid,
+        package.value.rehearsal_digest,
+        package.value.runtime_family,
+        package.value.architecture,
+        package.value.operator_identity,
+        package.value.tests_passed,
+    );
+    write_attestation_artifacts(
+        CliAttestationKind::MigrationRehearsal,
+        output_dir,
+        &package,
+        fields,
+        &package.value.candidate_ecosystem_cid,
+        &package.value.operator_identity,
+    )
+}
+
 fn attestation_authenticate_command(
     kind: CliAttestationKind,
     car: &Path,
@@ -1888,9 +2316,11 @@ fn deployment_readiness_verify_command(input_path: &Path, output_dir: Option<&Pa
     if input.schema_version != 1 {
         bail!("deployment readiness schemaVersion must be 1");
     }
-    if input.build_attestations.len() > 256
+    if input.source_commit_receipts.len() > 64
+        || input.build_attestations.len() > 256
         || input.data_availability_attestations.len() > 256
         || input.external_audit_attestations.len() > 64
+        || input.migration_rehearsal_attestations.len() > 64
     {
         bail!("deployment readiness evidence list exceeds its deterministic limit");
     }
@@ -1904,6 +2334,18 @@ fn deployment_readiness_verify_command(input_path: &Path, output_dir: Option<&Pa
     };
     let scope_bytes = read_regular_file(&resolve(&input.scope_car), "scope evidence CAR")?;
     let scope = verify_proposal_scope_evidence_car(&scope_bytes)?;
+    let source_commit_receipts = input
+        .source_commit_receipts
+        .iter()
+        .map(|evidence| {
+            let bytes = read_regular_file(&resolve(&evidence.car), "source commit receipt CAR")?;
+            let package = verify_source_commit_receipt_car(&bytes)?;
+            Ok(AddressedSourceCommitReceiptV1 {
+                cid: package.root_cid.to_string(),
+                value: package.value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let builds = input
         .build_attestations
         .iter()
@@ -1956,13 +2398,35 @@ fn deployment_readiness_verify_command(input_path: &Path, output_dir: Option<&Pa
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let migration_rehearsals = input
+        .migration_rehearsal_attestations
+        .iter()
+        .map(|evidence| {
+            let bytes = read_regular_file(
+                &resolve(&evidence.car),
+                "migration rehearsal attestation CAR",
+            )?;
+            let package = verify_migration_rehearsal_attestation_car(&bytes)?;
+            let authentication = read_json_file(
+                &resolve(&evidence.authentication),
+                "migration rehearsal attestation authentication",
+            )?;
+            Ok(AddressedAttestationV1 {
+                cid: package.root_cid.to_string(),
+                value: package.value,
+                authentication: Some(authentication),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let evidence = DeploymentReadinessEvidenceV1 {
         schema_version: 1,
         scope_evidence_cid: scope.root_cid.to_string(),
         scope: scope.value,
+        source_commit_receipts,
         build_attestations: builds,
         data_availability_attestations: availability,
         external_audit_attestations: audits,
+        migration_rehearsal_attestations: migration_rehearsals,
         required_availability_through_block: input.required_availability_through_block,
     };
     let evidence_package = package_deployment_readiness_evidence(evidence)?;
@@ -2183,6 +2647,20 @@ fn attestation_verify_command(
                 payload: package.value,
             })
         }
+        CliAttestationKind::MigrationRehearsal => {
+            let package = verify_migration_rehearsal_attestation_car(&bytes)?;
+            print_json(&AttestationVerificationView {
+                schema_version: 1,
+                attestation_kind: kind.domain(),
+                attestation_cid: package.root_cid.to_string(),
+                attestation_sha256: package.root_sha256,
+                car_sha256: sha256_hex(&bytes),
+                content_verified: true,
+                authentication_verified,
+                authenticated_identity,
+                payload: package.value,
+            })
+        }
     }
 }
 
@@ -2232,6 +2710,17 @@ fn attestation_authentication_context(
                 &package.root_sha256,
                 &package.value.candidate_ecosystem_cid,
                 &package.value.auditor_identity,
+            )?;
+            (request, package.value.authentication)
+        }
+        CliAttestationKind::MigrationRehearsal => {
+            let package = verify_migration_rehearsal_attestation_car(bytes)?;
+            let request = attestation_authentication_request(
+                kind.domain(),
+                &package.root_cid.to_string(),
+                &package.root_sha256,
+                &package.value.candidate_ecosystem_cid,
+                &package.value.operator_identity,
             )?;
             (request, package.value.authentication)
         }
@@ -2781,6 +3270,69 @@ mod scenario_tests {
     }
 
     #[test]
+    fn exact_commit_packaging_ignores_dirty_state_and_rejects_moving_refs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        for arguments in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Governance Test"],
+            vec!["config", "user.email", "governance-test@example.invalid"],
+        ] {
+            assert!(ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(repository.join("README.md"), "committed source\n").unwrap();
+        assert!(ProcessCommand::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(ProcessCommand::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["commit", "--quiet", "-m", "fixture"])
+            .status()
+            .unwrap()
+            .success());
+        let commit = git_text(&repository, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(repository.join("README.md"), "dirty source\n").unwrap();
+        fs::write(repository.join(".env"), "TOKEN=never-package\n").unwrap();
+
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        package_commit_command(&repository, &commit, "fixture", &first, None).unwrap();
+        package_commit_command(&repository, &commit, "fixture", &second, None).unwrap();
+        let first_car = fs::read(first.join("fixture.source.car")).unwrap();
+        let second_car = fs::read(second.join("fixture.source.car")).unwrap();
+        assert_eq!(first_car, second_car);
+        let source = verify_source_car(&first_car).unwrap();
+        assert_eq!(source.manifest.files.len(), 1);
+        assert_eq!(source.manifest.files[0].path, "README.md");
+        let receipt = verify_source_commit_receipt_car(
+            &fs::read(first.join("fixture.source-commit-receipt.car")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.value.git_commit, commit);
+        assert_eq!(receipt.value.source_tree_cid, source.root_cid.to_string());
+
+        let moving_ref = temporary.path().join("moving-ref");
+        assert!(
+            package_commit_command(&repository, "HEAD", "fixture", &moving_ref, None)
+                .unwrap_err()
+                .to_string()
+                .contains("full lowercase Git object id")
+        );
+    }
+
+    #[test]
     fn fixed_capture_scenarios_expose_independent_failures() {
         let report = build_scenario_report().unwrap();
         assert_eq!(report.stake_scenarios.len(), 6);
@@ -2874,6 +3426,27 @@ mod scenario_tests {
             Command::AttestationVerify {
                 kind: CliAttestationKind::ExternalAudit,
                 authentication: Some(_),
+                ..
+            }
+        ));
+
+        let rehearsal = Cli::try_parse_from([
+            "pohw-governance",
+            "attestation-authenticate",
+            "--kind",
+            "migration-rehearsal",
+            "--car",
+            "/tmp/rehearsal.car",
+            "--signature-file",
+            "/tmp/rehearsal.signature",
+            "--output-dir",
+            "/tmp/rehearsal-auth",
+        ])
+        .unwrap();
+        assert!(matches!(
+            rehearsal.command,
+            Command::AttestationAuthenticate {
+                kind: CliAttestationKind::MigrationRehearsal,
                 ..
             }
         ));

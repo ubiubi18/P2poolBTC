@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pohw.example/schemas/governance/SourceCommitReceiptV1.schema.json",
+  "title": "SourceCommitReceiptV1",
+  "description": "Audit metadata recording that the deterministic source CAR was generated directly from one exact Git commit object. Independent reproduction is still required; the source CID, not the Git commit, remains canonical.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repository",
+    "gitObjectFormat",
+    "gitCommit",
+    "gitTree",
+    "sourceTreeCid",
+    "sourceTreeSha256",
+    "carSha256",
+    "trackedFileCount",
+    "packagedFileCount"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+    "gitObjectFormat": {"enum": ["sha1", "sha256"]},
+    "gitCommit": {
+      "type": "string",
+      "oneOf": [
+        {"pattern": "^[0-9a-f]{40}$"},
+        {"pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "gitTree": {
+      "type": "string",
+      "oneOf": [
+        {"pattern": "^[0-9a-f]{40}$"},
+        {"pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "sourceTreeCid": {"$ref": "common.schema.json#/$defs/DagCborCid"},
+    "sourceTreeSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "carSha256": {"$ref": "common.schema.json#/$defs/Sha256"},
+    "trackedFileCount": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "packagedFileCount": {"type": "integer", "minimum": 0, "maximum": 100000}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"gitObjectFormat": {"const": "sha1"}}},
+      "then": {
+        "properties": {
+          "gitCommit": {"pattern": "^[0-9a-f]{40}$"},
+          "gitTree": {"pattern": "^[0-9a-f]{40}$"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"gitObjectFormat": {"const": "sha256"}}},
+      "then": {
+        "properties": {
+          "gitCommit": {"pattern": "^[0-9a-f]{64}$"},
+          "gitTree": {"pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  ]
+}

@@ -100,6 +100,8 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
             "scopeEvidenceCid": self.DAG_CBOR_CID,
             "riskClass": "normal",
             "ready": True,
+            "sourceCommitReceiptThreshold": 1,
+            "verifiedSourceCommitReceiptCount": 1,
             "builderThreshold": 2,
             "matchingBuilderCount": 2,
             "builderPlatformThreshold": 1,
@@ -109,6 +111,11 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
             "completeAvailabilityCount": 2,
             "externalAuditThreshold": 1,
             "passingExternalAuditCount": 1,
+            "migrationRehearsalThreshold": 0,
+            "matchingMigrationRehearsalCount": 0,
+            "migrationRehearsalPlatformThreshold": 0,
+            "matchingMigrationRehearsalPlatformCount": 0,
+            "selectedMigrationRehearsalDigest": None,
             "requiredContentCidCount": 12,
             "failureCodes": [],
         }
@@ -247,6 +254,31 @@ class Experiment1LaunchPolicyTests(unittest.TestCase):
         policy["status"] = MODULE.READY_STATUS
         with self.assertRaisesRegex(MODULE.LaunchPolicyError, "must remain blocked"):
             MODULE.validate(policy, POLICY, ROOT)
+
+    def test_migration_readiness_requires_a_bound_rehearsal_digest(self):
+        report = self.readiness_report()
+        report.update(
+            {
+                "riskClass": "migration",
+                "migrationRehearsalThreshold": 2,
+                "matchingMigrationRehearsalCount": 2,
+                "migrationRehearsalPlatformThreshold": 2,
+                "matchingMigrationRehearsalPlatformCount": 2,
+            }
+        )
+        with self.assertRaisesRegex(MODULE.LaunchPolicyError, "rehearsal digest"):
+            MODULE.validate_readiness_report(report, self.DAG_CBOR_CID)
+
+        report["selectedMigrationRehearsalDigest"] = "cd" * 32
+        MODULE.validate_readiness_report(report, self.DAG_CBOR_CID)
+
+        report["riskClass"] = "normal"
+        report["migrationRehearsalThreshold"] = 0
+        report["matchingMigrationRehearsalCount"] = 0
+        report["migrationRehearsalPlatformThreshold"] = 0
+        report["matchingMigrationRehearsalPlatformCount"] = 0
+        with self.assertRaisesRegex(MODULE.LaunchPolicyError, "unexpected.*digest"):
+            MODULE.validate_readiness_report(report, self.DAG_CBOR_CID)
 
     def test_complete_strict_evidence_can_satisfy_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:

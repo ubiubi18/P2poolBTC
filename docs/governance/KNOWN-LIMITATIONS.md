@@ -156,6 +156,12 @@ This implementation is safe only for local, no-value testing.
   profile.
 - Source CIDs for the five legacy-pinned components are exact, but public CAR
   replication and independent availability attestations have not been run.
+- Exact-commit packaging now verifies immutable Git commit/tree/blob objects,
+  reproduces the source CAR twice, and emits `SourceCommitReceiptV1` for each
+  affected repository. A receipt is still corroborating metadata, not proof
+  that Git is canonical or that an independent builder actually used those
+  bytes. Deployment readiness therefore also requires matching build evidence
+  and public retrieval of every receipt CID.
 - `governance-fork-lock.json` is a historical inactive prototype lock. The
   current contract and host-ABI patches are instead bound by the separate
   `governance-day-fork-candidate-lock.json`; that candidate has no commits,
@@ -180,6 +186,14 @@ This implementation is safe only for local, no-value testing.
   counts, but it does not make the underlying builders, pin operators, or
   auditors independent; their eligibility and signatures still require
   external evidence and review.
+- Migration and consensus readiness additionally requires two matching
+  `MigrationRehearsalAttestationV1` objects from distinct Idena-authenticated
+  operators on two platform families. Each object records an observed governed
+  parent-to-candidate execution and candidate-to-parent rollback plus public
+  evidence CIDs. This closes the previous local-simulator-only gap, but signed
+  operator claims do not cryptographically prove infrastructure independence,
+  public-chain truth, or permanent availability. No real deployed rehearsal
+  attestations are bundled yet, so those scopes remain blocked.
 - Desktop renderer output can be deterministic, but signed/notarized installers
   may retain platform-specific nondeterminism and centralized signing
   constraints.

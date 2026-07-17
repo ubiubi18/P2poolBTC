@@ -16,6 +16,12 @@
   "properties": {
     "schemaVersion": {"const": 1},
     "scopeCar": {"type": "string", "minLength": 1},
+    "sourceCommitReceipts": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/SourceCommitReceiptInput"}
+    },
     "buildAttestations": {
       "type": "array",
       "maxItems": 256,
@@ -34,9 +40,23 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/AuthenticatedAttestationInput"}
     },
+    "migrationRehearsalAttestations": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/AuthenticatedAttestationInput"}
+    },
     "requiredAvailabilityThroughBlock": {"type": "integer", "minimum": 0}
   },
   "$defs": {
+    "SourceCommitReceiptInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["car"],
+      "properties": {
+        "car": {"type": "string", "minLength": 1}
+      }
+    },
     "AuthenticatedAttestationInput": {
       "type": "object",
       "additionalProperties": false,

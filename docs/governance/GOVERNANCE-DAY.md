@@ -150,8 +150,9 @@ Canonical history is queried in deterministic pages of at most 64 entries;
 older entries remain immutable and addressable.
 
 Deployment has a second, off-chain fail-closed readiness check. It verifies the
-typed scope CAR, all independent build CARs, all public availability CARs, and
-content-addressed external audit CARs. Each role identity counts only when a
+typed scope CAR, one exact-commit source receipt for every affected repository,
+all independent build CARs, all public availability CARs, and content-addressed
+external audit CARs. Each role identity counts only when a
 detached Idena signature binds that identity to
 the exact attestation kind, CID/content, and candidate; the literal
 authentication intent in the payload is not sufficient. Verification is
@@ -160,7 +161,10 @@ candidate needs two matching builders, two complete availability operators,
 and one passing external audit.
 A critical, migration, or consensus candidate needs three matching builders on
 at least two platform families, three availability operators, and two passing
-external audits. Local duplicate evidence cannot satisfy those thresholds.
+external audits. Migration and consensus additionally need two independently
+authenticated deployed execute-and-rollback rehearsal attestations on two
+platform families with one matching transition digest. Local duplicate evidence
+cannot satisfy those thresholds.
 
 ## AI-First User Flow
 

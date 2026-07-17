@@ -21,7 +21,7 @@
         {
           "repository": "P2poolBTC",
           "path": "Cargo.lock",
-          "sha256": "fc7ca6f055f0da8ca179028d230efca31c67049f0416b354abef1dfcf0cc7e86",
+          "sha256": "6ad4d2c63f7f5b6d988b439912c3436c875aa0162cc5b87721e3d34ab851bc49",
           "format": "cargo-lock"
         }
       ],
@@ -114,9 +114,9 @@
           "platform": "linux",
           "architecture": "any",
           "deterministic": true,
-          "expectedCid": "bafkreihnlj5vjfqodjhxayzia3fqrul32ml5kmnoujexfpojwpnqd45sf4",
-          "expectedSha256": "ed5a7b54960e1a4f70632806cb08d17bd317d531aea24972bdc9b3db01f3b22f",
-          "expectedSize": 47974
+          "expectedCid": "bafkreih4oelgprkf5p4pzdlnehstatrvrp3kwr3e64dwsnvs2xmced52xy",
+          "expectedSha256": "fc711667c545ebf8fc8d6d21e5304e358bf6ab4764f7076936b2d5d8220fbabe",
+          "expectedSize": 50138
         },
         {
           "name": "experiment-1-full-consensus.json",

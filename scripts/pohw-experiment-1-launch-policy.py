@@ -52,6 +52,8 @@ READINESS_REPORT_FIELDS = frozenset(
         "scopeEvidenceCid",
         "riskClass",
         "ready",
+        "sourceCommitReceiptThreshold",
+        "verifiedSourceCommitReceiptCount",
         "builderThreshold",
         "matchingBuilderCount",
         "builderPlatformThreshold",
@@ -61,6 +63,11 @@ READINESS_REPORT_FIELDS = frozenset(
         "completeAvailabilityCount",
         "externalAuditThreshold",
         "passingExternalAuditCount",
+        "migrationRehearsalThreshold",
+        "matchingMigrationRehearsalCount",
+        "migrationRehearsalPlatformThreshold",
+        "matchingMigrationRehearsalPlatformCount",
+        "selectedMigrationRehearsalDigest",
         "requiredContentCidCount",
         "failureCodes",
     }
@@ -724,6 +731,7 @@ def validate_readiness_report(report: dict[str, Any], expected_candidate: str) -
         raise LaunchPolicyError("deployment-readiness report is not ready")
 
     thresholds = (
+        ("sourceCommitReceiptThreshold", "verifiedSourceCommitReceiptCount"),
         ("builderThreshold", "matchingBuilderCount"),
         ("builderPlatformThreshold", "matchingBuilderPlatformCount"),
         ("availabilityThreshold", "completeAvailabilityCount"),
@@ -736,6 +744,44 @@ def validate_readiness_report(report: dict[str, Any], expected_candidate: str) -
             raise LaunchPolicyError(
                 f"deployment-readiness report {count_key} is below {threshold_key}"
             )
+    migration_threshold = require_bounded_uint(
+        report, "migrationRehearsalThreshold", (1 << 32) - 1
+    )
+    migration_count = require_bounded_uint(
+        report, "matchingMigrationRehearsalCount", (1 << 32) - 1
+    )
+    migration_platform_threshold = require_bounded_uint(
+        report, "migrationRehearsalPlatformThreshold", (1 << 32) - 1
+    )
+    migration_platform_count = require_bounded_uint(
+        report, "matchingMigrationRehearsalPlatformCount", (1 << 32) - 1
+    )
+    migration_risk = report["riskClass"] in {"consensus", "migration"}
+    if migration_risk:
+        if migration_threshold < 2 or migration_platform_threshold < 2:
+            raise LaunchPolicyError(
+                "migration/consensus readiness requires two independent rehearsal operators and platforms"
+            )
+        require_sha256(
+            report.get("selectedMigrationRehearsalDigest"),
+            "deployment-readiness selected migration rehearsal digest",
+        )
+    elif migration_threshold != 0 or migration_platform_threshold != 0:
+        raise LaunchPolicyError(
+            "non-migration readiness has an unexpected migration rehearsal threshold"
+        )
+    elif report.get("selectedMigrationRehearsalDigest") is not None:
+        raise LaunchPolicyError(
+            "non-migration readiness has an unexpected migration rehearsal digest"
+        )
+    if migration_count < migration_threshold:
+        raise LaunchPolicyError(
+            "deployment-readiness report matchingMigrationRehearsalCount is below its threshold"
+        )
+    if migration_platform_count < migration_platform_threshold:
+        raise LaunchPolicyError(
+            "deployment-readiness report matchingMigrationRehearsalPlatformCount is below its threshold"
+        )
     require_bounded_uint(
         report, "requiredContentCidCount", (1 << 32) - 1, positive=True
     )

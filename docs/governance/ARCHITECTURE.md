@@ -25,8 +25,8 @@ authorize deployment or installation.
 
 1. `governance-core` implements canonical schemas, deterministic integer
    voting math, CID verification, proposal gates, and a local contract model.
-2. `governance-cli` packages sorted source trees into deterministic DAG-CBOR
-   manifests and CARv1 files, creates multi-repository proposals, verifies
+2. `governance-cli` packages exact Git commit objects into deterministic source
+   CARs and source-commit receipts, creates multi-repository proposals, verifies
    patches, interacts with a separate public Kubo sidecar, and runs simulations.
 3. `contracts/idena-code-governance` is a non-upgradeable AssemblyScript WASM
    contract with stake, bond, permissionless review-round, vote, attestation,
@@ -93,6 +93,14 @@ zero builder conflicts. It still requires critical PoS/PoHW thresholds,
 challenge, timelock, and permissionless execution. The migration changes the
 canonical ecosystem CID to a separately audited successor; it grants no
 deployer, maintainer, or emergency privilege.
+
+Offline deployment readiness binds the objective scope, one exact source-commit
+receipt per affected repository, independently authenticated build and public
+availability evidence, and external audits in one canonical evidence CAR. A
+migration or consensus scope additionally requires two authenticated operators
+on two platform families to report the same deployed execute-and-governed-
+rollback digest. These signatures corroborate evidence; they do not prove
+organizational independence or replace external audit.
 
 ## Public IPFS Boundary
 

@@ -17,6 +17,11 @@
     "schemaVersion": {"const": 1},
     "scopeEvidenceCid": {"$ref": "#/$defs/DagCborCid"},
     "scope": {"$ref": "ProposalScopeEvidenceV1.schema.json"},
+    "sourceCommitReceipts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/AddressedSourceCommitReceipt"}
+    },
     "buildAttestations": {
       "type": "array",
       "maxItems": 256,
@@ -38,12 +43,26 @@
         "$ref": "#/$defs/AuthenticatedExternalAuditAttestation"
       }
     },
+    "migrationRehearsalAttestations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/AuthenticatedMigrationRehearsalAttestation"}
+    },
     "requiredAvailabilityThroughBlock": {"type": "integer", "minimum": 0}
   },
   "$defs": {
     "DagCborCid": {
       "type": "string",
       "pattern": "^bafyrei[a-z2-7]{52}$"
+    },
+    "AddressedSourceCommitReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "value"],
+      "properties": {
+        "cid": {"$ref": "#/$defs/DagCborCid"},
+        "value": {"$ref": "SourceCommitReceiptV1.schema.json"}
+      }
     },
     "AuthenticatedBuildAttestation": {
       "type": "object",
@@ -72,6 +91,16 @@
       "properties": {
         "cid": {"$ref": "#/$defs/DagCborCid"},
         "value": {"$ref": "ExternalAuditAttestationV1.schema.json"},
+        "authentication": {"$ref": "AttestationAuthenticationV1.schema.json"}
+      }
+    },
+    "AuthenticatedMigrationRehearsalAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid", "value", "authentication"],
+      "properties": {
+        "cid": {"$ref": "#/$defs/DagCborCid"},
+        "value": {"$ref": "MigrationRehearsalAttestationV1.schema.json"},
         "authentication": {"$ref": "AttestationAuthenticationV1.schema.json"}
       }
     }

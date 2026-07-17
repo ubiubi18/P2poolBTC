@@ -11,6 +11,8 @@
     "scopeEvidenceCid",
     "riskClass",
     "ready",
+    "sourceCommitReceiptThreshold",
+    "verifiedSourceCommitReceiptCount",
     "builderThreshold",
     "matchingBuilderCount",
     "builderPlatformThreshold",
@@ -20,6 +22,11 @@
     "completeAvailabilityCount",
     "externalAuditThreshold",
     "passingExternalAuditCount",
+    "migrationRehearsalThreshold",
+    "matchingMigrationRehearsalCount",
+    "migrationRehearsalPlatformThreshold",
+    "matchingMigrationRehearsalPlatformCount",
+    "selectedMigrationRehearsalDigest",
     "requiredContentCidCount",
     "failureCodes"
   ],
@@ -30,6 +37,8 @@
     "scopeEvidenceCid": {"$ref": "#/$defs/DagCborCid"},
     "riskClass": {"enum": ["normal", "critical", "consensus", "migration"]},
     "ready": {"type": "boolean"},
+    "sourceCommitReceiptThreshold": {"$ref": "#/$defs/Count"},
+    "verifiedSourceCommitReceiptCount": {"$ref": "#/$defs/Count"},
     "builderThreshold": {"$ref": "#/$defs/Count"},
     "matchingBuilderCount": {"$ref": "#/$defs/Count"},
     "builderPlatformThreshold": {"$ref": "#/$defs/Count"},
@@ -44,6 +53,16 @@
     "completeAvailabilityCount": {"$ref": "#/$defs/Count"},
     "externalAuditThreshold": {"$ref": "#/$defs/Count"},
     "passingExternalAuditCount": {"$ref": "#/$defs/Count"},
+    "migrationRehearsalThreshold": {"$ref": "#/$defs/Count"},
+    "matchingMigrationRehearsalCount": {"$ref": "#/$defs/Count"},
+    "migrationRehearsalPlatformThreshold": {"$ref": "#/$defs/Count"},
+    "matchingMigrationRehearsalPlatformCount": {"$ref": "#/$defs/Count"},
+    "selectedMigrationRehearsalDigest": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/Sha256"}
+      ]
+    },
     "requiredContentCidCount": {"$ref": "#/$defs/Count"},
     "failureCodes": {
       "type": "array",

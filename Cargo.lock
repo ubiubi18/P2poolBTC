@@ -858,6 +858,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1389,7 +1390,7 @@ dependencies = [
  "digest 0.11.3",
  "multihash-derive",
  "ripemd",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "sha3",
 ]
@@ -2017,6 +2018,17 @@ checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
