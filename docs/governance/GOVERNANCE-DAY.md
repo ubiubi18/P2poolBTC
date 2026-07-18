@@ -159,6 +159,11 @@ authentication intent in the payload is not sufficient. Verification is
 deterministic and offline from the CARs and detached proof files. A normal
 candidate needs two matching builders, two complete availability operators,
 and one passing external audit.
+
+Operators pass the exact UTF-8 authentication challenge to Idena's `dna_sign`
+method with the `doubleHash` format (or omit the format, which defaults to
+`doubleHash`). They must not pre-hash it or use `prefix`.
+
 A critical, migration, or consensus candidate needs three matching builders on
 at least two platform families, three availability operators, and two passing
 external audits. Migration and consensus additionally need two independently

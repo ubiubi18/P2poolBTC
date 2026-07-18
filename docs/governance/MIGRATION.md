@@ -86,10 +86,12 @@ families must independently observe the same public-testnet sequence:
 
 Each operator packages `MigrationRehearsalAttestationV1`, derives its shared
 transition digest, signs the generated authentication challenge with the
-declared Idena identity, and publishes the CAR and proof. Operator-specific
-command and compatibility report CIDs may differ. The network, contract,
-transactions, blocks, observed CIDs, state snapshot, and event log must produce
-the same rehearsal digest.
+declared Idena identity, and publishes the CAR and proof. Pass the exact UTF-8
+challenge to Idena's `dna_sign` method with the `doubleHash` format (or omit the
+format, which defaults to `doubleHash`); do not pre-hash it or use `prefix`.
+Operator-specific command and compatibility report CIDs may differ. The
+network, contract, transactions, blocks, observed CIDs, state snapshot, and
+event log must produce the same rehearsal digest.
 
 ```sh
 cargo run --locked -p governance-cli -- migration-rehearsal-attestation \
@@ -97,7 +99,7 @@ cargo run --locked -p governance-cli -- migration-rehearsal-attestation \
   --derive-rehearsal-digest \
   --output-dir /absolute/path/to/rehearsal-a
 
-# Sign only the public challenge from the generated authentication request.
+# Sign only the exact public challenge as dna_sign doubleHash input.
 cargo run --locked -p governance-cli -- attestation-authenticate \
   --kind migration-rehearsal \
   --car /absolute/path/to/rehearsal-a/migration-rehearsal-attestation.car \

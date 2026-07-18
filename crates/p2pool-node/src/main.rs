@@ -76,6 +76,10 @@ const MAX_FORK_TIMESTAMP_SEARCH_WINDOW_BLOCKS: u64 = 50_000;
 const MAX_OPTIONAL_SECRET_BYTES: usize = 512;
 const MAX_OPTIONAL_SECRET_FILE_BYTES: u64 = MAX_OPTIONAL_SECRET_BYTES as u64 + 2;
 const MAX_SECRET_KEY_FILE_BYTES: u64 = 68;
+const IDENA_SIGNING_RPC_METHOD: &str = "dna_sign";
+const IDENA_SIGNING_FORMAT: &str = "doubleHash";
+const IDENA_SIGNING_HASH: &str = "Keccak-256(Keccak-256(UTF-8 challenge bytes))";
+const IDENA_SIGNING_NEXT_STEP: &str = "Pass the exact UTF-8 idena_ownership_challenge to Idena dna_sign with format doubleHash (or omit the format to use that default); do not pre-hash it or use prefix. Then rerun with --idena-signature-hex.";
 pub(crate) const MAINNET_HANDOFF_PARTICIPANT_THRESHOLD: usize = 20;
 pub(crate) const MAINNET_HANDOFF_MAX_SNAPSHOT_AGE_DAYS: u64 = 2;
 pub(crate) const MAINNET_HANDOFF_MIN_SNAPSHOT_VOTERS: usize = 3;
@@ -2707,7 +2711,11 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "idena_ownership_challenge": registration.idena_ownership_challenge(),
                     "registration_binding_hash": hex::encode(registration.signing_hash()),
-                    "signature_field": "idena_signature_hex"
+                    "signature_field": "idena_signature_hex",
+                    "idena_signing_rpc_method": IDENA_SIGNING_RPC_METHOD,
+                    "idena_signing_format": IDENA_SIGNING_FORMAT,
+                    "idena_signing_hash": IDENA_SIGNING_HASH,
+                    "next_step": IDENA_SIGNING_NEXT_STEP
                 }))?
             );
         }
@@ -5731,13 +5739,16 @@ async fn prepare_miner_registration(
             "idena_ownership_challenge": idena_ownership_challenge,
             "registration_binding_hash": registration_binding_hash,
             "signature_field": "idena_signature_hex",
+            "idena_signing_rpc_method": IDENA_SIGNING_RPC_METHOD,
+            "idena_signing_format": IDENA_SIGNING_FORMAT,
+            "idena_signing_hash": IDENA_SIGNING_HASH,
             "registration_version": registration.version,
             "registry_anchor": registration.registry_anchor,
             "mining_pubkey_hex": registration.mining_pubkey_hex,
             "claim_owner_pubkey_hex": registration.claim_owner_pubkey_hex,
             "btc_payout_script_hex": registration.btc_payout_script_hex,
             "key_files": key_material_summary(&mining_key, &claim_owner_key, &node_key),
-            "next_step": "Sign idena_ownership_challenge with the Idena address, then rerun with --idena-signature-hex."
+            "next_step": IDENA_SIGNING_NEXT_STEP
         }));
     }
 
@@ -5803,6 +5814,9 @@ async fn prepare_miner_registration(
         "envelope_hash": envelope_hash,
         "idena_ownership_challenge": idena_ownership_challenge,
         "registration_binding_hash": registration_binding_hash,
+        "idena_signing_rpc_method": IDENA_SIGNING_RPC_METHOD,
+        "idena_signing_format": IDENA_SIGNING_FORMAT,
+        "idena_signing_hash": IDENA_SIGNING_HASH,
         "registration_version": registration.version,
         "registry_anchor": registration.registry_anchor,
         "mining_pubkey_hex": registration.mining_pubkey_hex,
@@ -7963,6 +7977,41 @@ mod tests {
 
         std::fs::remove_dir_all(base).expect("cleanup commitment test");
         std::fs::remove_dir_all(rejected_base).expect("cleanup rejected test");
+    }
+
+    #[tokio::test]
+    async fn registration_challenge_declares_idena_double_hash_contract() {
+        let base = test_dir("pohw-idena-signing-contract");
+        let result = prepare_miner_registration(PrepareMinerRegistrationInput {
+            datadir: base.join("state"),
+            miner_id: "Miner-1".to_string(),
+            idena_address: format!("0x{}", "11".repeat(20)),
+            key_dir: Some(base.join("keys")),
+            mining_secret_key_file: None,
+            claim_owner_secret_key_file: None,
+            node_secret_key_file: None,
+            btc_payout_script_hex: None,
+            idena_signature_hex: None,
+            registry_experiment_id: None,
+            registry_anchor_file: None,
+            message_out: None,
+            envelope_out: None,
+            append: false,
+            peer_addrs: Vec::new(),
+        })
+        .await
+        .expect("prepare unsigned registration");
+
+        assert_eq!(result["status"], "needs_idena_signature");
+        assert_eq!(result["idena_signing_rpc_method"], IDENA_SIGNING_RPC_METHOD);
+        assert_eq!(result["idena_signing_format"], IDENA_SIGNING_FORMAT);
+        assert_eq!(result["idena_signing_hash"], IDENA_SIGNING_HASH);
+        assert!(result["idena_ownership_challenge"]
+            .as_str()
+            .is_some_and(|challenge| !challenge.is_empty()));
+        assert_eq!(result["next_step"], IDENA_SIGNING_NEXT_STEP);
+
+        std::fs::remove_dir_all(base).expect("cleanup signing contract test");
     }
 
     #[test]

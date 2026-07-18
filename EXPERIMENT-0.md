@@ -401,7 +401,11 @@ scripts/pohw-experiment-register-miner.sh \
   --idena-address 0x...
 ```
 
-The script prints a redacted public view and stores the raw local output under `output/`. Sign `idena_ownership_challenge` in Idena.
+The script prints a redacted public view and stores the raw local output under
+`output/`. Pass the exact UTF-8 `idena_ownership_challenge` to Idena's
+`dna_sign` method with the `doubleHash` format (or omit the format, which
+defaults to `doubleHash`). Do not pre-hash the value and do not use the
+incompatible `prefix` format.
 
 After signing the challenge in Idena, append and gossip the signed registration:
 

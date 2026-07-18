@@ -190,6 +190,9 @@ The deployment-readiness count also requires each builder's address-bound
 detached Idena signature over the exact attestation CID,
 content digest, candidate, and builder identity. A self-declared builder
 address or `on-chain-submitter` string does not count.
+Sign the generated authentication challenge as exact UTF-8 input to Idena's
+`dna_sign` method with the `doubleHash` format (or omit the format, which
+defaults to `doubleHash`); do not pre-hash it or use `prefix`.
 
 Deployment readiness also requires one exact source-commit receipt matching
 each affected repository in the objective proposal scope. Every qualifying
