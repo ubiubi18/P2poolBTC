@@ -111,7 +111,10 @@ scripts/pohw-experiment-register-miner.sh \
   --idena-address 0x...
 ```
 
-The script prints a challenge. Sign that challenge in Idena, then publish the signed registration:
+The script prints an `idena_ownership_challenge`. Pass that exact UTF-8 value
+to Idena's `dna_sign` method with the `doubleHash` format (or omit the format,
+which defaults to `doubleHash`). Do not pre-hash the value and do not use the
+incompatible `prefix` format. Then publish the signed registration:
 
 ```sh
 scripts/pohw-experiment-register-miner.sh \

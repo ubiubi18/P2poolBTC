@@ -292,8 +292,10 @@ scripts/pohw-experiment-register-miner.sh .pohw-experiment.env \
   --registry-anchor-file ./miner-registry-anchor.json
 ```
 
-The status must be `needs_idena_signature`. Sign the exact
-`idena_ownership_challenge` in Idena.
+The status must be `needs_idena_signature`. Pass the exact UTF-8
+`idena_ownership_challenge` to Idena's `dna_sign` method with the `doubleHash`
+format (or omit the format, which defaults to `doubleHash`). Do not pre-hash
+the value and do not use the incompatible `prefix` format.
 
 ### 5. Publish the anchored registration
 
