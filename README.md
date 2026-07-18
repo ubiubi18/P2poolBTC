@@ -780,7 +780,13 @@ cargo run -p p2pool-node -- prepare-miner-registration \
   --idena-address 0x...
 ```
 
-The first run creates protected local keys, derives a default Taproot payout script, and prints the Idena ownership challenge. After signing that challenge in Idena, rerun with `--idena-signature-hex`, plus `--append` or `--peer-addr` when ready to publish the registration.
+The first run creates protected local keys, derives a default Taproot payout
+script, and prints the Idena ownership challenge. Sign that exact UTF-8 value
+with Idena's `dna_sign` `doubleHash` format, which computes
+`Keccak-256(Keccak-256(challenge))`. Omitting the RPC format selects
+`doubleHash`; do not pre-hash the challenge and do not use the incompatible
+`prefix` format. Rerun with `--idena-signature-hex`, plus `--append` or
+`--peer-addr` when ready to publish the registration.
 
 An experimental ownerless Idena miner-registry profile is also implemented but
 not deployed or activated. It replaces developer-signed admission packets with

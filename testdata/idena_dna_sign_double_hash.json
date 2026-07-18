@@ -1,0 +1,8 @@
+{
+  "format": "doubleHash",
+  "value": "pohw-idena-doublehash-compatibility-v1",
+  "first_hash_hex": "213e1a59cf9ebf89146a7c93cec12236c295643695842080924f687c8aeb11d8",
+  "signing_hash_hex": "914d56511782174bc1598b042825aa544f5a573df346944d81ced6c7b78b47ca",
+  "signature_hex": "20ff5cf668424336fd0c45c7aeebd83c3c81a945d826573b24a64c06100dd3923e2300be6e797f08f6f548587b8b150f4395a96998de0d10324d3aac894948ff00",
+  "address": "0x970e8128ab834e8eac17ab8e3812f010678cf791"
+}
