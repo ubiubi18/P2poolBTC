@@ -1079,7 +1079,10 @@ class RunWrapperValidationTest(unittest.TestCase):
                     "POHW_DASHBOARD_UI_DIR": str(ui_dir),
                     "POHW_DATADIR": str(root / "datadir"),
                     "POHW_DASHBOARD_API_TOKEN_FILE": str(token_file),
-                    "POHW_DASHBOARD_UI_HTTP_SERVER_BIN": str(fake_http_server),
+                    "POHW_DASHBOARD_UI_PROXY_SERVER": str(
+                        REPO_ROOT / "scripts" / "pohw-dashboard-ui-server.py"
+                    ),
+                    "POHW_DASHBOARD_UI_PROXY_SERVER_BIN": str(fake_http_server),
                     "POHW_FAKE_HTTP_OUT": str(out),
                 }
             )
@@ -1097,9 +1100,60 @@ class RunWrapperValidationTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"cwd={root / 'datadir' / 'dashboard-ui-cache' / 'www'}", rendered)
-        self.assertIn("args=-m http.server 5176 --bind 127.0.0.1", rendered)
-        self.assertIn('apiUrl: "http://127.0.0.1:40407/dashboard.json"', rendered)
-        self.assertIn('apiToken: "secret-dashboard-token"', rendered)
+        self.assertIn("--bind-host 127.0.0.1 --port 5176", rendered)
+        self.assertIn(f"--token-file {token_file}", rendered)
+        self.assertIn('apiUrl: "/dashboard.json"', rendered)
+        self.assertIn('explorerApiBase: "/api/v1"', rendered)
+        self.assertIn('apiToken: ""', rendered)
+        self.assertNotIn("secret-dashboard-token", rendered)
+
+    def test_dashboard_ui_prefers_systemd_credential_token(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pohw-dashboard-ui-credential-") as temp:
+            root = Path(temp)
+            ui_dir = root / "ui"
+            dist_dir = ui_dir / "dist"
+            dist_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text(
+                '<!doctype html>\n<div id="root"></div>\n'
+                '<script type="module" src="/assets/index.js"></script>\n',
+                encoding="utf-8",
+            )
+            credential_dir = root / "credentials"
+            credential_dir.mkdir()
+            credential_token = credential_dir / "dashboard-api.token"
+            credential_token.write_text("credential-dashboard-token\n", encoding="utf-8")
+            out = root / "http.txt"
+            fake_proxy_server = self.write_fake_http_server(root)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "POHW_DASHBOARD_UI_DIR": str(ui_dir),
+                    "POHW_DATADIR": str(root / "datadir"),
+                    "POHW_DASHBOARD_API_TOKEN_FILE": "/unreadable/source/token",
+                    "CREDENTIALS_DIRECTORY": str(credential_dir),
+                    "POHW_DASHBOARD_UI_PROXY_SERVER": str(
+                        REPO_ROOT / "scripts" / "pohw-dashboard-ui-server.py"
+                    ),
+                    "POHW_DASHBOARD_UI_PROXY_SERVER_BIN": str(fake_proxy_server),
+                    "POHW_FAKE_HTTP_OUT": str(out),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_UI_WRAPPER)],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            rendered = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"--token-file {credential_token}", rendered)
+        self.assertIn('apiToken: ""', rendered)
+        self.assertNotIn("credential-dashboard-token", rendered)
+        self.assertNotIn("/unreadable/source/token", rendered)
 
     def test_dashboard_api_prefers_systemd_credential_token(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-dashboard-api-credential-") as temp:
@@ -1303,7 +1357,7 @@ class RunWrapperValidationTest(unittest.TestCase):
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("browser config contains the dashboard token", result.stderr)
+        self.assertIn("authenticated proxy exposes private dashboard data", result.stderr)
 
     def test_public_explorer_ui_never_embeds_dashboard_token(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pohw-explorer-ui-wrapper-") as temp:

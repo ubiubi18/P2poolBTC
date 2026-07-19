@@ -25,7 +25,7 @@
       "live_join": true,
       "minimum_cpu_cores": 4,
       "minimum_memory_gib": 16,
-      "minimum_free_storage_gib": 100,
+      "minimum_free_storage_gib": 90,
       "requires_linux": true,
       "requires_systemd": true,
       "requires_ssd": true,

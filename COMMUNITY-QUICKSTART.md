@@ -93,11 +93,15 @@ not by itself a builder, audit, availability, or deployment attestation.
 | Role | Minimum checked by the tool | What it does now |
 | --- | --- | --- |
 | `observer` | 2 CPU cores, 4 GiB RAM, 5 GiB free | Performs static source/policy checks; never executes repository tests or joins the network |
-| `pruned-miner` | Linux, systemd, SSD, 4 cores, 16 GiB RAM, 100 GiB free | Checks readiness for the future pruned live-node path |
+| `pruned-miner` | Linux, systemd, SSD, 4 cores, 16 GiB RAM, 90 GiB free on a nominal 100 GiB volume | Checks readiness for the future pruned live-node path |
 | `archive-operator` | Linux, systemd, SSD, 4 cores, 16 GiB RAM, 900 GiB free | Checks readiness for the future archival-node path |
 
 The Raspberry Pi without an SSD should use `observer`. Do not run Experiment 1
 Core, Stratum, gossip, or mining on its SD card.
+
+The pruned-miner threshold accounts for filesystem metadata and reserved blocks:
+a freshly formatted nominal 100 GiB volume commonly exposes less than 100 GiB
+as free space. The check still requires 90 GiB to remain available before setup.
 
 ## 2. Obtain The Exact Source Candidate
 

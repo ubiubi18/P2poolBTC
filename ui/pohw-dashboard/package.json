@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5176 --strictPort",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 5176 --strictPort"
+    "preview": "vite preview --host 127.0.0.1 --port 5176 --strictPort",
+    "test": "node --test tests/miningEconomics.test.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.3",

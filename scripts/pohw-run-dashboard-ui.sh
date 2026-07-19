@@ -15,7 +15,17 @@ TOKEN_FILE="${POHW_DASHBOARD_API_TOKEN_FILE:-}"
 CACHE_DIR="${POHW_DASHBOARD_UI_CACHE_DIR:-$DATADIR/dashboard-ui-cache}"
 PYTHON_BIN="${POHW_DASHBOARD_UI_PYTHON_BIN:-python3}"
 HTTP_SERVER_BIN="${POHW_DASHBOARD_UI_HTTP_SERVER_BIN:-$PYTHON_BIN}"
+PROXY_SERVER_BIN="${POHW_DASHBOARD_UI_PROXY_SERVER_BIN:-$PYTHON_BIN}"
+PROXY_SERVER="${POHW_DASHBOARD_UI_PROXY_SERVER:-$WORKDIR/scripts/pohw-dashboard-ui-server.py}"
+PROXY_API_ORIGIN="${POHW_DASHBOARD_UI_PROXY_API_ORIGIN:-http://127.0.0.1:40407}"
 NON_LOOPBACK_BIND=false
+
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" ]]; then
+  credential_token_file="$CREDENTIALS_DIRECTORY/dashboard-api.token"
+  if [[ -f "$credential_token_file" && ! -L "$credential_token_file" ]]; then
+    TOKEN_FILE="$credential_token_file"
+  fi
+fi
 
 case "$BIND_HOST" in
   127.*|localhost|::1)
@@ -31,7 +41,7 @@ case "$BIND_HOST" in
 esac
 
 if [[ "$NON_LOOPBACK_BIND" == "true" && "$PARTICIPANT_DASHBOARD" == "true" ]]; then
-  echo "Refusing a non-loopback participant dashboard because its browser config contains the dashboard token." >&2
+  echo "Refusing a non-loopback participant dashboard because its authenticated proxy exposes private dashboard data." >&2
   echo "Keep the participant UI on loopback and use SSH forwarding, or disable participant mode for a public explorer." >&2
   exit 1
 fi
@@ -80,7 +90,7 @@ if ! command -v "$HTTP_SERVER_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-token=""
+token_available=false
 if [[ "$PARTICIPANT_DASHBOARD" == "true" && -n "$TOKEN_FILE" ]]; then
   if [[ ! -f "$TOKEN_FILE" || -L "$TOKEN_FILE" ]]; then
     echo "Dashboard API token file must be a regular file: $TOKEN_FILE" >&2
@@ -91,11 +101,7 @@ if [[ "$PARTICIPANT_DASHBOARD" == "true" && -n "$TOKEN_FILE" ]]; then
     echo "Dashboard API token file has an unsafe size: $TOKEN_FILE" >&2
     exit 1
   fi
-  token="$(tr -d '\r\n' < "$TOKEN_FILE")"
-  if [[ -z "$token" ]] || printf '%s' "$token" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-    echo "Dashboard API token file is empty or contains control characters." >&2
-    exit 1
-  fi
+  token_available=true
 fi
 
 mkdir -p "$CACHE_DIR"
@@ -104,10 +110,23 @@ json_escape() {
   "$PYTHON_BIN" -c 'import json, sys; print(json.dumps(sys.stdin.read()))'
 }
 
+if [[ "$PARTICIPANT_DASHBOARD" == "true" ]]; then
+  if [[ "$token_available" != "true" ]]; then
+    echo "Participant dashboard requires a dashboard API token credential." >&2
+    exit 1
+  fi
+  if [[ ! -f "$PROXY_SERVER" || -L "$PROXY_SERVER" ]]; then
+    echo "Dashboard same-origin proxy is missing or symlinked: $PROXY_SERVER" >&2
+    exit 1
+  fi
+  API_URL="/dashboard.json"
+  EXPLORER_API_BASE="/api/v1"
+fi
+
 api_url_json="$(printf '%s' "$API_URL" | json_escape)"
 explorer_api_base_json="$(printf '%s' "$EXPLORER_API_BASE" | json_escape)"
 default_view_json="$(printf '%s' "$DEFAULT_VIEW" | json_escape)"
-token_json="$(printf '%s' "$token" | json_escape)"
+token_json="$(printf '%s' "" | json_escape)"
 demo_json="$(printf '%s' "${POHW_DASHBOARD_UI_DEMO:-}" | json_escape)"
 
 www_dir="$CACHE_DIR/www"
@@ -147,4 +166,12 @@ rm -rf "$www_dir"
 mv "$next_www_dir" "$www_dir"
 
 cd "$www_dir"
+if [[ "$PARTICIPANT_DASHBOARD" == "true" ]]; then
+  exec "$PROXY_SERVER_BIN" "$PROXY_SERVER" \
+    --root "$www_dir" \
+    --bind-host "$BIND_HOST" \
+    --port "$PORT" \
+    --api-origin "$PROXY_API_ORIGIN" \
+    --token-file "$TOKEN_FILE"
+fi
 exec "$HTTP_SERVER_BIN" -m http.server "$PORT" --bind "$BIND_HOST"

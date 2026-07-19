@@ -184,7 +184,7 @@ EXPECTED_ROLE_REQUIREMENTS = {
         "live_join": True,
         "minimum_cpu_cores": 4,
         "minimum_memory_gib": 16,
-        "minimum_free_storage_gib": 100,
+        "minimum_free_storage_gib": 90,
         "requires_linux": True,
         "requires_systemd": True,
         "requires_ssd": True,
