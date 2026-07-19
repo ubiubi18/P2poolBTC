@@ -20,6 +20,10 @@ use bitcoin_rpc::{BitcoinRpcClient, BlockchainInfoResponse};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use pohw_core::commitment::PohwCommitment;
+use pohw_core::consensus_identity::{
+    ConsensusIdentityActivationManifestV1, ConsensusIdentityAuthorizationV1,
+    ConsensusIdentityPolicyV1,
+};
 use pohw_core::dkg_transport::{
     decrypt_round2_package, dkg_package_hash, encrypt_round2_package, DkgMessageBody,
     DkgMessageEnvelope, DkgPeerIdentity, DkgRound1BroadcastBody, DkgSessionId,
@@ -107,6 +111,7 @@ struct IdenaAnchorCliArgs {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     Run {
         #[arg(long, default_value = ".pohw-p2pool")]
@@ -843,6 +848,7 @@ enum Command {
         auto_submit_blocks: bool,
         #[arg(long)]
         allow_mainnet_submit: bool,
+        /// Exact Bitcoin RPC chain: pohw, pohw2, or explicitly armed main.
         #[arg(long)]
         expected_rpc_chain: Option<String>,
         #[arg(long)]
@@ -859,6 +865,18 @@ enum Command {
         share_work_binding_policy: Option<PathBuf>,
         #[arg(long)]
         share_work_binding_activation_manifest: Option<PathBuf>,
+        /// Pinned finalized-Idena authorization policy required by a pohw2 Core node.
+        #[arg(long)]
+        consensus_identity_policy: Option<PathBuf>,
+        /// Activation manifest binding the exact Core source, patch series, and consensus policy.
+        #[arg(long)]
+        consensus_identity_activation_manifest: Option<PathBuf>,
+        /// Public leaf and Merkle proof matching --consensus-identity-policy.
+        #[arg(long)]
+        consensus_identity_authorization: Option<PathBuf>,
+        /// Permit the checked inactive fixture only for isolated interoperability tests.
+        #[arg(long)]
+        allow_inactive_consensus_identity_candidate: bool,
         #[arg(long, default_value = "http://127.0.0.1:8332", env = "BITCOIN_RPC_URL")]
         rpc_url: String,
         #[arg(long)]
@@ -3036,6 +3054,10 @@ async fn main() -> Result<()> {
             snapshot_dir,
             share_work_binding_policy,
             share_work_binding_activation_manifest,
+            consensus_identity_policy,
+            consensus_identity_activation_manifest,
+            consensus_identity_authorization,
+            allow_inactive_consensus_identity_candidate,
             rpc_url,
             allow_remote_rpc,
             rpc_user,
@@ -3049,6 +3071,43 @@ async fn main() -> Result<()> {
                 share_work_binding_policy.as_deref(),
                 share_work_binding_activation_manifest.as_deref(),
             )?;
+            let consensus_identity = match (
+                consensus_identity_activation_manifest.as_deref(),
+                consensus_identity_policy.as_deref(),
+                consensus_identity_authorization.as_deref(),
+            ) {
+                (Some(manifest_path), Some(policy_path), Some(authorization_path)) => {
+                    let activation: ConsensusIdentityActivationManifestV1 =
+                        read_strict_json_file(manifest_path)?;
+                    let policy: ConsensusIdentityPolicyV1 = read_strict_json_file(policy_path)?;
+                    let authorization: ConsensusIdentityAuthorizationV1 =
+                        read_strict_json_file(authorization_path)?;
+                    activation
+                        .validate_policy(&policy)
+                        .context("invalid consensus identity activation or policy")?;
+                    if allow_inactive_consensus_identity_candidate {
+                        activation.validate().context(
+                            "inactive consensus identity candidate manifest is invalid",
+                        )?;
+                    } else {
+                        activation.validate_for_launch().context(
+                            "consensus identity activation is not enabled for launch",
+                        )?;
+                    }
+                    authorization
+                        .validate_membership(&policy)
+                        .context("invalid consensus identity authorization")?;
+                    Some(mining_adapter::ConsensusIdentityMiningConfig {
+                        activation,
+                        policy,
+                        authorization,
+                    })
+                }
+                (None, None, None) if !allow_inactive_consensus_identity_candidate => None,
+                _ => bail!(
+                    "--consensus-identity-activation-manifest, --consensus-identity-policy, and --consensus-identity-authorization must be supplied together; the inactive override is valid only with all three"
+                ),
+            };
             let (fork_chain_client, fork_chain_requires_idena_admission) = match (
                 fork_chain_rpc_addr,
                 fork_chain_activation_manifest,
@@ -3096,6 +3155,10 @@ async fn main() -> Result<()> {
                 if let Some(client) = bitcoin_rpc_client.as_ref() {
                     let chain_info = client.get_blockchain_info().await?;
                     ensure_expected_rpc_chain(&chain_info, expected_rpc_chain.as_deref())?;
+                    ensure_consensus_identity_rpc_binding(
+                        &chain_info,
+                        consensus_identity.as_ref(),
+                    )?;
                     ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
                     require_idena_admission |=
                         chain_name_requires_idena_admission(&chain_info.chain);
@@ -3104,13 +3167,13 @@ async fn main() -> Result<()> {
                     }
                     (
                         chain_info.chain.eq_ignore_ascii_case("main"),
-                        chain_info.chain.eq_ignore_ascii_case("pohw"),
+                        is_pohw_rpc_chain(&chain_info.chain),
                     )
                 } else {
                     (false, false)
                 };
             if require_idena_admission && idena_anchor_verifier.is_none() {
-                bail!("the active PoHW Experiment 1 chain requires --idena-anchor-policy");
+                bail!("the active PoHW chain requires --idena-anchor-policy");
             }
             let (payout_schedule, pohw_commitment, dynamic_pohw_payout) =
                 if derive_pohw_payouts_from_state {
@@ -3185,6 +3248,7 @@ async fn main() -> Result<()> {
                 require_idena_admission,
                 idena_anchor_verifier,
                 share_work_binding_policy,
+                consensus_identity,
             })
             .await?;
         }
@@ -6390,6 +6454,12 @@ fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&json).with_context(|| format!("failed to parse JSON {}", path.display()))
 }
 
+fn read_strict_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let json = read_bounded_regular_text_file(path, "strict JSON file", MAX_JSON_INPUT_FILE_BYTES)?;
+    strict_json::from_str(&json)
+        .with_context(|| format!("failed to parse strict JSON {}", path.display()))
+}
+
 fn read_private_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     validate_protected_secret_file(path, "private JSON")?;
     read_json_file(path)
@@ -6503,7 +6573,7 @@ fn idena_anchor_verifier_from_options(
 
 fn chain_name_requires_idena_admission(chain_name: &str) -> bool {
     let normalized = chain_name.trim().to_ascii_lowercase();
-    normalized == "pohw" || normalized.starts_with("pohw-experiment-1")
+    normalized == "pohw" || normalized == "pohw2" || normalized.starts_with("pohw-experiment-1")
 }
 
 async fn verify_current_idena_submission_authorization(
@@ -6628,10 +6698,10 @@ fn ensure_expected_rpc_chain(
     expected_rpc_chain: Option<&str>,
 ) -> Result<()> {
     let expected = expected_rpc_chain.context(
-        "Bitcoin RPC mining requires --expected-rpc-chain (use 'pohw' for Experiment 1 or 'main' only for an explicitly armed mainnet handoff)",
+        "Bitcoin RPC mining requires --expected-rpc-chain (use 'pohw' for Experiment 1, 'pohw2' for the inactive consensus-identity successor, or 'main' only for an explicitly armed mainnet handoff)",
     )?;
-    if expected != "pohw" && expected != "main" {
-        bail!("--expected-rpc-chain must be 'pohw' or 'main'");
+    if expected != "pohw" && expected != "pohw2" && expected != "main" {
+        bail!("--expected-rpc-chain must be 'pohw', 'pohw2', or 'main'");
     }
     if !chain_info.chain.eq_ignore_ascii_case(expected) {
         bail!(
@@ -6641,6 +6711,55 @@ fn ensure_expected_rpc_chain(
         );
     }
     Ok(())
+}
+
+fn ensure_consensus_identity_rpc_binding(
+    chain_info: &BlockchainInfoResponse,
+    configured: Option<&mining_adapter::ConsensusIdentityMiningConfig>,
+) -> Result<()> {
+    if !chain_info.chain.eq_ignore_ascii_case("pohw2") {
+        if configured.is_some() {
+            bail!("consensus identity configuration is valid only with the pohw2 RPC chain");
+        }
+        return Ok(());
+    }
+    let configured = configured.context(
+        "pohw2 mining requires an activation manifest, consensus identity policy, and authorization proof",
+    )?;
+    configured
+        .activation
+        .validate_policy(&configured.policy)
+        .context("local consensus identity activation does not match its policy")?;
+    let profile = chain_info
+        .pohw_experiment
+        .as_ref()
+        .context("pohw2 RPC is missing fork consensus metadata")?;
+    let expected_parent_height = configured.activation.authorization_parent_height;
+    if profile.idena_authorization_activation_id.as_deref()
+        != Some(configured.activation.activation_id.as_str())
+        || profile.idena_authorization_parent_height != Some(expected_parent_height)
+        || profile.idena_authorization_parent_hash.as_deref()
+            != Some(configured.activation.authorization_parent_hash.as_str())
+        || profile.idena_authorization_activation_height
+            != Some(configured.policy.bitcoin_activation_height)
+        || profile.idena_authorization_expiry_height
+            != Some(configured.policy.bitcoin_expiry_height)
+        || profile.idena_authorization_expiry_mtp != Some(configured.policy.bitcoin_expiry_mtp)
+        || profile.idena_authorization_policy_hash.as_deref()
+            != Some(configured.activation.consensus_policy_hash.as_str())
+        || profile.idena_authorization_root.as_deref()
+            != Some(configured.policy.authorization_root.as_str())
+        || profile.idena_authorized_identity_count
+            != Some(configured.policy.authorized_identity_count)
+        || profile.idena_authorization_max_proof_depth != Some(configured.policy.max_proof_depth)
+    {
+        bail!("pohw2 RPC consensus metadata does not match the supplied activation manifest and policy");
+    }
+    Ok(())
+}
+
+fn is_pohw_rpc_chain(chain: &str) -> bool {
+    chain.eq_ignore_ascii_case("pohw") || chain.eq_ignore_ascii_case("pohw2")
 }
 
 async fn detect_pohw_time_dependent_bits_admission(
@@ -6654,7 +6773,7 @@ async fn detect_pohw_time_dependent_bits_admission(
         return Ok(false);
     };
     let chain_info = client.get_blockchain_info().await?;
-    if !chain_info.chain.eq_ignore_ascii_case("pohw") {
+    if !is_pohw_rpc_chain(&chain_info.chain) {
         return Ok(false);
     }
     ensure_bitcoin_mining_ready_with_rpc(client, &chain_info).await?;
@@ -6666,7 +6785,7 @@ async fn ensure_bitcoin_mining_ready_with_rpc(
     chain_info: &BlockchainInfoResponse,
 ) -> Result<()> {
     ensure_bitcoin_mining_ready(chain_info)?;
-    if chain_info.chain.eq_ignore_ascii_case("pohw") {
+    if is_pohw_rpc_chain(&chain_info.chain) {
         let checkpoint_height = bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT - 1;
         let checkpoint_hash = client.get_block_hash(checkpoint_height).await?;
         ensure_pohw_active_chain_checkpoint_hash(&checkpoint_hash)?;
@@ -6694,11 +6813,9 @@ fn ensure_pohw_active_chain_checkpoint_hash(checkpoint_hash: &str) -> Result<()>
 }
 
 fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()> {
-    if !chain_info.chain.eq_ignore_ascii_case("main")
-        && !chain_info.chain.eq_ignore_ascii_case("pohw")
-    {
+    if !chain_info.chain.eq_ignore_ascii_case("main") && !is_pohw_rpc_chain(&chain_info.chain) {
         bail!(
-            "Bitcoin mining requires the explicit main or pohw RPC chain; got '{}'",
+            "Bitcoin mining requires the explicit main, pohw, or pohw2 RPC chain; got '{}'",
             chain_info.chain
         );
     }
@@ -6724,11 +6841,11 @@ fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()
             chain_info.verificationprogress
         );
     }
-    if chain_info.chain.eq_ignore_ascii_case("pohw") {
+    if is_pohw_rpc_chain(&chain_info.chain) {
         let profile = chain_info
             .pohw_experiment
             .as_ref()
-            .context("pohw RPC is missing Experiment 1 consensus metadata")?;
+            .context("PoHW RPC is missing fork consensus metadata")?;
         let required_checkpoint_height =
             bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_ACTIVATION_HEIGHT - 1;
         if chain_info.blocks < required_checkpoint_height {
@@ -6750,7 +6867,7 @@ fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()
                 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
                 || value != value.to_ascii_lowercase()
             {
-                bail!("pohw RPC {label} is not canonical");
+                bail!("PoHW RPC {label} is not canonical");
             }
         }
         if profile.fork_height != bitcoin_rpc::POHW_EXPERIMENT_1_FORK_HEIGHT
@@ -6770,7 +6887,37 @@ fn ensure_bitcoin_mining_ready(chain_info: &BlockchainInfoResponse) -> Result<()
             || profile.bootstrap_handoff_hashrate_hps
                 != bitcoin_rpc::POHW_EXPERIMENT_1_BOOTSTRAP_HANDOFF_HASHRATE_HPS
         {
-            bail!("pohw RPC consensus metadata does not match the required mining profile");
+            bail!("PoHW RPC consensus metadata does not match the required mining profile");
+        }
+        if chain_info.chain.eq_ignore_ascii_case("pohw")
+            && (profile.idena_authorization_consensus_enforced
+                || profile.idena_authorization_activation_id.is_some()
+                || profile.idena_authorization_activation_height.is_some()
+                || profile.idena_authorization_expiry_height.is_some()
+                || profile.idena_authorization_expiry_mtp.is_some()
+                || profile.idena_authorization_parent_height.is_some()
+                || profile.idena_authorization_parent_hash.is_some()
+                || profile.idena_authorization_policy_hash.is_some()
+                || profile.idena_authorization_root.is_some()
+                || profile.idena_authorized_identity_count.is_some()
+                || profile.idena_authorization_max_proof_depth.is_some())
+        {
+            bail!("pohw RPC unexpectedly advertises successor identity consensus metadata");
+        }
+        if chain_info.chain.eq_ignore_ascii_case("pohw2")
+            && (!profile.idena_authorization_consensus_enforced
+                || profile.idena_authorization_activation_id.is_none()
+                || profile.idena_authorization_activation_height.is_none()
+                || profile.idena_authorization_expiry_height.is_none()
+                || profile.idena_authorization_expiry_mtp.is_none()
+                || profile.idena_authorization_parent_height.is_none()
+                || profile.idena_authorization_parent_hash.is_none()
+                || profile.idena_authorization_policy_hash.is_none()
+                || profile.idena_authorization_root.is_none()
+                || profile.idena_authorized_identity_count.is_none()
+                || profile.idena_authorization_max_proof_depth.is_none())
+        {
+            bail!("pohw2 RPC identity consensus metadata is incomplete");
         }
     }
     Ok(())
@@ -8312,6 +8459,7 @@ mod tests {
             transactions: Vec::new(),
             default_witness_commitment: None,
             pohw_replay_marker: None,
+            pohw_idena_authorization: None,
         };
         mining_adapter::build_stratum_job_from_template(&material, 4)
             .expect("build test Stratum job")
@@ -8408,6 +8556,9 @@ mod tests {
         };
 
         assert!(ensure_expected_rpc_chain(&pohw, Some("pohw")).is_ok());
+        let mut pohw2 = pohw.clone();
+        pohw2.chain = "pohw2".to_string();
+        assert!(ensure_expected_rpc_chain(&pohw2, Some("pohw2")).is_ok());
         assert!(ensure_expected_rpc_chain(&pohw, None)
             .unwrap_err()
             .to_string()
@@ -8419,7 +8570,7 @@ mod tests {
         assert!(ensure_expected_rpc_chain(&pohw, Some("regtest"))
             .unwrap_err()
             .to_string()
-            .contains("must be 'pohw' or 'main'"));
+            .contains("must be 'pohw', 'pohw2', or 'main'"));
     }
 
     #[test]
@@ -8454,7 +8605,7 @@ mod tests {
         assert!(ensure_bitcoin_mining_ready(&wrong_network)
             .unwrap_err()
             .to_string()
-            .contains("explicit main or pohw RPC chain"));
+            .contains("explicit main, pohw, or pohw2 RPC chain"));
     }
 
     #[test]
@@ -8482,6 +8633,17 @@ mod tests {
                     .to_string(),
                 bootstrap_handoff_hashrate_hps: 1_000_000_000_000_000,
                 handoff_active: false,
+                idena_authorization_consensus_enforced: false,
+                idena_authorization_activation_id: None,
+                idena_authorization_activation_height: None,
+                idena_authorization_expiry_height: None,
+                idena_authorization_expiry_mtp: None,
+                idena_authorization_parent_height: None,
+                idena_authorization_parent_hash: None,
+                idena_authorization_policy_hash: None,
+                idena_authorization_root: None,
+                idena_authorized_identity_count: None,
+                idena_authorization_max_proof_depth: None,
             }),
         };
 
@@ -8500,7 +8662,7 @@ mod tests {
         assert!(ensure_bitcoin_mining_ready(&missing_profile)
             .unwrap_err()
             .to_string()
-            .contains("missing Experiment 1"));
+            .contains("missing fork consensus metadata"));
 
         let mut wrong_replay = ready.clone();
         wrong_replay
@@ -8513,7 +8675,7 @@ mod tests {
             .to_string()
             .contains("consensus metadata"));
 
-        let mut noncanonical_hash = ready;
+        let mut noncanonical_hash = ready.clone();
         noncanonical_hash
             .pohw_experiment
             .as_mut()
@@ -8523,6 +8685,33 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not canonical"));
+
+        let mut successor = ready;
+        successor.chain = "pohw2".to_string();
+        let profile = successor.pohw_experiment.as_mut().unwrap();
+        profile.idena_authorization_consensus_enforced = true;
+        profile.idena_authorization_activation_id = Some("11".repeat(32));
+        profile.idena_authorization_activation_height = Some(958_176);
+        profile.idena_authorization_expiry_height = Some(959_184);
+        profile.idena_authorization_expiry_mtp = Some(1_786_219_200);
+        profile.idena_authorization_parent_height = Some(958_175);
+        profile.idena_authorization_parent_hash =
+            Some(bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH.to_string());
+        profile.idena_authorization_policy_hash = Some("22".repeat(32));
+        profile.idena_authorization_root = Some("33".repeat(32));
+        profile.idena_authorized_identity_count = Some(3);
+        profile.idena_authorization_max_proof_depth = Some(2);
+        assert!(ensure_bitcoin_mining_ready(&successor).is_ok());
+
+        successor
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .idena_authorization_root = None;
+        assert!(ensure_bitcoin_mining_ready(&successor)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete"));
     }
 
     #[test]
@@ -8535,6 +8724,86 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("active chain"));
+    }
+
+    #[test]
+    fn pohw2_rpc_profile_must_match_the_immutable_local_activation() {
+        let configured = mining_adapter::ConsensusIdentityMiningConfig {
+            activation: serde_json::from_str(include_str!(
+                "../../../compatibility/experiment-2-consensus-identity-candidate.json"
+            ))
+            .unwrap(),
+            policy: serde_json::from_str(include_str!(
+                "../../../compatibility/experiment-2-consensus-identity-policy.fixture.json"
+            ))
+            .unwrap(),
+            authorization: serde_json::from_str(include_str!(
+                "../../../compatibility/experiment-2-consensus-identity-authorization.fixture.json"
+            ))
+            .unwrap(),
+        };
+        let activation = &configured.activation;
+        let policy = &configured.policy;
+        let profile = bitcoin_rpc::PohwExperimentInfoResponse {
+            fork_height: 958_016,
+            fork_hash: bitcoin_rpc::POHW_EXPERIMENT_1_FORK_HASH.to_string(),
+            first_fork_hash: bitcoin_rpc::POHW_EXPERIMENT_1_FIRST_FORK_HASH.to_string(),
+            inherited_utxo_spending: true,
+            replay_protection: bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_PROTECTION_RULE.to_string(),
+            replay_marker_activation_height: 958_018,
+            replay_sighash_activation_height: 958_176,
+            replay_sighash_parent_hash: bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH
+                .to_string(),
+            replay_sighash_version_bit: 1 << 30,
+            replay_sighash_domain: bitcoin_rpc::POHW_EXPERIMENT_1_REPLAY_SIGHASH_DOMAIN.to_string(),
+            bootstrap_handoff_hashrate_hps: 1_000_000_000_000_000,
+            handoff_active: false,
+            idena_authorization_consensus_enforced: true,
+            idena_authorization_activation_id: Some(activation.activation_id.clone()),
+            idena_authorization_activation_height: Some(policy.bitcoin_activation_height),
+            idena_authorization_expiry_height: Some(policy.bitcoin_expiry_height),
+            idena_authorization_expiry_mtp: Some(policy.bitcoin_expiry_mtp),
+            idena_authorization_parent_height: Some(activation.authorization_parent_height),
+            idena_authorization_parent_hash: Some(activation.authorization_parent_hash.clone()),
+            idena_authorization_policy_hash: Some(activation.consensus_policy_hash.clone()),
+            idena_authorization_root: Some(policy.authorization_root.clone()),
+            idena_authorized_identity_count: Some(policy.authorized_identity_count),
+            idena_authorization_max_proof_depth: Some(policy.max_proof_depth),
+        };
+        let mut chain_info = BlockchainInfoResponse {
+            chain: "pohw2".to_string(),
+            blocks: policy.bitcoin_activation_height,
+            headers: policy.bitcoin_activation_height,
+            initial_block_download: false,
+            verificationprogress: 1.0,
+            pruned: false,
+            pohw_experiment: Some(profile),
+        };
+        ensure_consensus_identity_rpc_binding(&chain_info, Some(&configured)).unwrap();
+
+        chain_info
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .idena_authorization_activation_id = Some("ff".repeat(32));
+        assert!(
+            ensure_consensus_identity_rpc_binding(&chain_info, Some(&configured))
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+
+        chain_info
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .idena_authorization_activation_id = Some(activation.activation_id.clone());
+        chain_info
+            .pohw_experiment
+            .as_mut()
+            .unwrap()
+            .idena_authorization_expiry_mtp = Some(policy.bitcoin_expiry_mtp - 1);
+        assert!(ensure_consensus_identity_rpc_binding(&chain_info, Some(&configured)).is_err());
     }
 
     #[test]
@@ -9142,7 +9411,13 @@ mod tests {
 
     #[test]
     fn experiment_one_chain_names_require_idena_admission() {
-        for chain_name in ["pohw", "POHW", "pohw-experiment-1-full-consensus"] {
+        for chain_name in [
+            "pohw",
+            "POHW",
+            "pohw2",
+            "POHW2",
+            "pohw-experiment-1-full-consensus",
+        ] {
             assert!(chain_name_requires_idena_admission(chain_name));
         }
         for chain_name in ["main", "regtest", "pohw-experiment-0"] {

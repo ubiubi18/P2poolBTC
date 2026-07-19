@@ -101,13 +101,13 @@ ship its own policy and activation. Do not edit Experiment 1 to print
 A separate inactive share-work successor candidate is available for source
 review. It commits each header to the selected parent, target, Idena snapshot,
 and finalized anchor through a coinbase `P2SW1` output and verifies the Merkle
-proof during replay and peer admission. It deliberately uses a new sharechain
-network and fresh datadir, and it does not reinterpret Experiment 1 history.
-Run the inspection commands in
-[docs/share-work-binding.md](docs/share-work-binding.md); the launchable check
-must fail while the profile remains `experimental-candidate`. This P2Pool-layer
-fix is necessary but does not supply the missing Bitcoin-consensus identity
-rule.
+proof during replay and peer admission. Experiment 2 composes that commitment
+with a Bitcoin-consensus `P2IA1` authorization proof on the separate `pohw2`
+network. Both profiles require fresh datadirs and neither reinterprets
+Experiment 1 history. Run the inspection commands in
+[docs/share-work-binding.md](docs/share-work-binding.md) and the offline checks
+in [EXPERIMENT-2.md](EXPERIMENT-2.md); all launchable checks must fail while the
+profiles remain `experimental-candidate` fixtures.
 
 The remaining sections are a successor implementation template and isolated
 source-review reference. They are not an executable invitation to join

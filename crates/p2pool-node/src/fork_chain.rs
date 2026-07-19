@@ -614,6 +614,7 @@ impl ForkChainStore {
             transactions,
             default_witness_commitment,
             pohw_replay_marker: None,
+            pohw_idena_authorization: None,
         })
     }
 

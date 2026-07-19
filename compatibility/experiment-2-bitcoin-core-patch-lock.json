@@ -1,0 +1,160 @@
+{
+  "schema_version": "pohw-bitcoin-core-patch-series-lock/v1",
+  "release_id": "p2poolbtc-experiment-2-consensus-idena-candidate-1",
+  "status": "experimental-candidate-inactive",
+  "launch_enabled": false,
+  "patch_series_sha256": "5ea5540993adcbd5953b6c2b70bc0c4798bf1e4b19db56580240a93fd0a92810",
+  "upstream": {
+    "repository": "https://github.com/bitcoin/bitcoin.git",
+    "tag": "v31.1",
+    "commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+  },
+  "profile_inputs": {
+    "activation_manifest": {
+      "path": "compatibility/experiment-2-consensus-identity-candidate.json",
+      "sha256": "b3d6474ac7e5ecb93e495286f8fba7ec800d21d60d4ce24cc50a47d1b7d83e02"
+    },
+    "authorization_fixture": {
+      "path": "compatibility/experiment-2-consensus-identity-authorization.fixture.json",
+      "sha256": "fa950136bae2dad4b7137c1c0d431d46eceb00914a1a0bb2e57affa9bfd43ee2"
+    },
+    "authorization_schema": {
+      "path": "schemas/pohw/ConsensusIdentityAuthorizationV1.schema.json",
+      "sha256": "f7c12172c9a6a365a8f934d0a4464a58b18c82edcad7e4ae8d1fa38b62e03aa1"
+    },
+    "activation_schema": {
+      "path": "schemas/pohw/ConsensusIdentityActivationManifestV1.schema.json",
+      "sha256": "b1777f430dd553fa2c48a0127e3af84e8afd54190f73942d1537d06889ceb076"
+    },
+    "policy": {
+      "path": "compatibility/experiment-2-consensus-identity-policy.fixture.json",
+      "sha256": "f2bae6fc2762f57494f02131126c8788c9aa676d9c8096d8adc3f1a117fed864"
+    },
+    "policy_schema": {
+      "path": "schemas/pohw/ConsensusIdentityPolicyV1.schema.json",
+      "sha256": "339905471bb8e47b78c0357ff67b4b188caf622d08d3bae41ffefcb68ffaf8fc"
+    },
+    "snapshot_input_schema": {
+      "path": "schemas/pohw/ConsensusIdentitySnapshotInputV1.schema.json",
+      "sha256": "b1d76d55c958be25559fbaea94550e9d760372b5771a4300f6101b8b4b9edf24"
+    },
+    "snapshot_bundle_schema": {
+      "path": "schemas/pohw/ConsensusIdentitySnapshotBundleV1.schema.json",
+      "sha256": "a3b839ff7ca632cd0242d03e54fa6e497f0a3bcdb31065906ce2a95ce097e951"
+    },
+    "snapshot_verification_schema": {
+      "path": "schemas/pohw/ConsensusIdentitySnapshotVerificationV1.schema.json",
+      "sha256": "bef381251103abfc48a10ad105b3d703b21436e5260a952b26901595cd2f5616"
+    },
+    "snapshot_comparison_schema": {
+      "path": "schemas/pohw/ConsensusIdentitySnapshotComparisonV1.schema.json",
+      "sha256": "7253420aebcba1e12acfffdddae88bec4f30f0a9a308ab15d221daad7dd6d5d8"
+    },
+    "build_comparison_schema": {
+      "path": "schemas/pohw/Experiment2BuildComparisonV1.schema.json",
+      "sha256": "45251d91ca2a58125748894fde014478916936714f0e10dd45b791230d5d343b"
+    },
+    "snapshot_comparison_tool": {
+      "path": "scripts/pohw-compare-idena-snapshots.py",
+      "sha256": "f2525af3cb2654c41f365cbceb3f123e2c2ad3b46379a2988ab35577311c44e0"
+    },
+    "build_comparison_tool": {
+      "path": "scripts/pohw-compare-bitcoin-core-builds.py",
+      "sha256": "b00ff3e22222900bbfed64f3f5ab881f027615755ceab3667031839904945d9c"
+    },
+    "build_evidence_tool": {
+      "path": "scripts/pohw-bitcoin-core-build-evidence.py",
+      "sha256": "f5cefbcccda3eee150e0e60165b0d81e83d11825bc8c9dd82fde2a138ef06223"
+    },
+    "clean_room_builder": {
+      "path": "scripts/pohw-build-bitcoin-core-fork.sh",
+      "sha256": "93faff800d1148b644818c39f3e45b6a36fd76f8108b45f16a14c7618cd80d3d"
+    },
+    "source_verifier": {
+      "path": "scripts/pohw-verify-bitcoin-core-source.sh",
+      "sha256": "d96a1f65fcfaf44ddd189039762e59ddb67e681dcf904dc763973df802982b95"
+    }
+  },
+  "patch_series": [
+    {
+      "order": 1,
+      "path": "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-1.patch",
+      "sha256": "d5b2534a894d3193b72867741a191203a005cd18f050d372efbc209a0d6ee9bb",
+      "purpose": "Existing Experiment 1 full-consensus and replay-protection baseline"
+    },
+    {
+      "order": 2,
+      "path": "vendor/bitcoin-core/patches/bitcoin-core-v31.1-pohw-experiment-2-consensus-idena.patch",
+      "sha256": "303af88be10661c94dc7a733a0cef3327c66445dd19ade89ccd850022de970e4",
+      "purpose": "Distinct pohw2 network and consensus-enforced finalized-Idena miner authorization"
+    }
+  ],
+  "network": {
+    "chain_argument": "pohw2",
+    "data_subdirectory": "pohw-experiment-2",
+    "message_start_hex": "f2b1d4c3",
+    "p2p_port": 40422,
+    "rpc_port": 40424,
+    "require_fresh_datadir": true,
+    "predecessor_activation_id": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
+    "candidate_activation_id": "194a60f81ecf2719d4c47b129311a181b81172d3e1742b2b3f4c53707d2d499f",
+    "authorization_parent_height": 958175,
+    "authorization_parent_hash": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6"
+  },
+  "consensus": {
+    "authorization_magic": "P2IA1",
+    "share_work_magic": "P2SW1",
+    "policy_hash": "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3",
+    "authorization_root": "2430c7f7ab395c27c67ed7d4bfc6e55f4db2cbd72ce8dc1876b1c5ebc9411e38",
+    "activation_height": 958176,
+    "expiry_height": 959184,
+    "expiry_mtp": 1786219200,
+    "fixture_keys_only": true
+  },
+  "build": {
+    "configure": "cmake -B build -DBUILD_GUI=OFF -DBUILD_TESTS=ON -DBUILD_BENCH=OFF -DENABLE_IPC=OFF -DPOHW2_ACTIVATION_ID=194a60f81ecf2719d4c47b129311a181b81172d3e1742b2b3f4c53707d2d499f",
+    "compile": "cmake --build build --target test_bitcoin bitcoind bitcoin-cli -j4",
+    "test": "build/bin/test_bitcoin --run_test=pohw_identity_auth_tests --log_level=message"
+  },
+  "snapshot_assurance": {
+    "capture_schema": "pohw-consensus-identity-snapshot-input/v1",
+    "bundle_schema": "pohw-consensus-identity-snapshot-bundle/v1",
+    "verification_schema": "pohw-consensus-identity-snapshot-verification/v1",
+    "comparison_schema": "pohw-consensus-identity-snapshot-comparison/v1",
+    "minimum_finality_confirmations": 6,
+    "maximum_finality_confirmations": 120,
+    "minimum_matching_captures": 3,
+    "minimum_authenticated_operators": 3,
+    "require_matching_source_input_hash": true,
+    "require_complete_identity_export": true,
+    "require_complete_registry_export": true,
+    "identity_rows_assurance": "compatible-rpc-unproven",
+    "identity_rows_cryptographically_bound_to_root": false,
+    "require_finalized_state_replay_or_row_proofs_for_active_manifest": true,
+    "active_release_allowed": false,
+    "operator_independence_verified_by_comparator": false,
+    "comparison_release_authorized": false
+  },
+  "independent_builds": {
+    "evidence_schema": "pohw-bitcoin-core-build-evidence/v4",
+    "comparison_schema": "pohw-experiment-2-build-comparison/v1",
+    "minimum_matching_builds": 3,
+    "minimum_authenticated_operators": 3,
+    "minimum_platform_families": 2,
+    "require_exact_source_snapshot": true,
+    "require_exact_artifact_set": true,
+    "require_complete_consensus_test_set": true,
+    "operator_independence_verified_by_comparator": false,
+    "comparison_release_authorized": false
+  },
+  "artifact_status": "source-patch-only-no-release-artifacts",
+  "public_launch_blockers": [
+    "replace fixture Idena height, block hash, contract address, authorization root, and public test keys",
+    "cryptographically bind every identity-state row to the finalized identity root through deterministic state replay or row proofs; compatible-rpc-unproven captures cannot activate",
+    "obtain three matching finalized Idena captures authenticated by three distinct eligible operators",
+    "obtain three matching clean-room builds authenticated by three distinct eligible operators across at least two platform families",
+    "review and approve a new immutable active manifest",
+    "run cross-implementation and inherited-chain migration rehearsals",
+    "obtain independent security review"
+  ]
+}
