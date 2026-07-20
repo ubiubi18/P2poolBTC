@@ -2014,7 +2014,7 @@ tr:last-child td {
   font-weight: 620;
 }
 
-@media (max-width: 1240px) {
+@media (max-width: 1400px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);
   }

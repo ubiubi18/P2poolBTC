@@ -7,6 +7,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -82,6 +83,55 @@ class DashboardUiServerTest(unittest.TestCase):
             FakeDashboardApiHandler.received_token, "test-dashboard-token"
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def request_with_headers(self, path: str, headers: dict[str, str]) -> tuple[int, dict]:
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def test_rejects_dns_rebinding_host_before_proxying(self) -> None:
+        FakeDashboardApiHandler.received_token = None
+
+        status, payload = self.request_with_headers(
+            "/dashboard.json", {"Host": "attacker.example"}
+        )
+
+        self.assertEqual(status, 421)
+        self.assertEqual(payload, {"error": "request authority is not local"})
+        self.assertIsNone(FakeDashboardApiHandler.received_token)
+
+    def test_accepts_explicit_loopback_authorities(self) -> None:
+        for host in (
+            f"127.0.0.1:{self.server.server_port}",
+            f"localhost:{self.server.server_port}",
+        ):
+            with self.subTest(host=host):
+                status, payload = self.request_with_headers(
+                    "/dashboard.json", {"Host": host, "Origin": f"http://{host}"}
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(payload, {"source": "live-test"})
+
+    def test_rejects_cross_origin_api_fetch_before_proxying(self) -> None:
+        FakeDashboardApiHandler.received_token = None
+        host = f"127.0.0.1:{self.server.server_port}"
+
+        status, payload = self.request_with_headers(
+            "/dashboard.json",
+            {
+                "Host": host,
+                "Origin": "http://attacker.example",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        )
+
+        self.assertEqual(status, 403)
+        self.assertEqual(payload, {"error": "cross-origin API request rejected"})
+        self.assertIsNone(FakeDashboardApiHandler.received_token)
 
     def test_serves_static_ui_with_restrictive_headers(self) -> None:
         with urllib.request.urlopen(f"{self.origin}/", timeout=2) as response:

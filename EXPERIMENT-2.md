@@ -165,7 +165,7 @@ Use a disposable checkout at the exact upstream commit with no wallet,
 credentials, or live peer configuration. The builder verifies the lock, creates
 a read-only patched source snapshot from a separate Git index, builds with the
 pinned `depends` toolchain, runs both Experiment 1 and Experiment 2 consensus
-tests, installs the deterministic core artifacts, and emits evidence v4.
+tests, installs the deterministic core artifacts, and emits evidence v5.
 
 ```sh
 git clone https://github.com/bitcoin/bitcoin.git bitcoin-core-pohw2
@@ -174,11 +174,13 @@ git -C bitcoin-core-pohw2 checkout --detach \
 
 python3 scripts/pohw-experiment-2-consensus-identity.py
 
+TARGET_TRIPLET=x86_64-pc-linux-gnu
 scripts/pohw-build-bitcoin-core-fork.sh \
   --source-dir "$PWD/bitcoin-core-pohw2" \
   --manifest "$PWD/compatibility/experiment-2-bitcoin-core-patch-lock.json" \
   --build-dir /secure/builds/pohw2-core \
   --snapshot-dir /secure/builds/pohw2-core-source \
+  --target "$TARGET_TRIPLET" \
   --jobs 4
 
 python3 scripts/pohw-bitcoin-core-build-evidence.py verify \
@@ -190,23 +192,28 @@ python3 scripts/pohw-bitcoin-core-build-evidence.py verify \
   --evidence /secure/builds/pohw2-core/pohw-build-evidence.json
 ```
 
-Run that flow in at least three clean rooms controlled by three distinct
-eligible Idena owners and spanning at least two independently verifiable
-platform families. Compare all evidence files:
+Run that flow at least twice for each of two explicit target platform families.
+Use `--target TRIPLET` so every builder records the exact target; each target
+group must contain byte-identical artifacts from two clean rooms. The complete
+set therefore contains at least four builds controlled by at least three
+distinct eligible Idena owners. Compare all evidence files:
 
 ```sh
 python3 scripts/pohw-compare-bitcoin-core-builds.py \
   --evidence /builds/operator-a/pohw-build-evidence.json \
   --evidence /builds/operator-b/pohw-build-evidence.json \
   --evidence /builds/operator-c/pohw-build-evidence.json \
+  --evidence /builds/operator-d/pohw-build-evidence.json \
   --output /builds/pohw2-build-comparison.json
 ```
 
 This comparison proves only matching declared source snapshots, required test
-records, and artifact sets. It cannot infer who operated a builder, so its
-output is always non-authorizing. Package every evidence file as a
-`BuildAttestationV1`, authenticate its exact CID with a distinct eligible Idena
-owner, publish the artifacts/SBOM/log CIDs, and pass the DAO build gate.
+records, and target-specific artifact sets. It cannot infer who operated a
+builder, so its output is always non-authorizing. Authenticate every evidence
+CID with an eligible Idena owner and publish the artifacts/SBOM/log CIDs.
+Current governance V1 cannot authorize critical platform-specific artifact
+groups, so Experiment 2 remains inactive until a separately governed successor
+contract implements and audits that capability.
 
 The normal startup refusal is another required test:
 

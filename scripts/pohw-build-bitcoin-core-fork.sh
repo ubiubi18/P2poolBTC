@@ -8,6 +8,7 @@ SOURCE_DIR=
 BUILD_DIR=
 SNAPSHOT_DIR=
 JOBS=
+TARGET=
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,7 @@ Options:
   --build-dir DIR    New or empty build directory (default: SOURCE_DIR/build-pohw)
   --snapshot-dir DIR New snapshot destination (default: BUILD_DIR.source-snapshot)
   --manifest FILE    Activation manifest
+  --target TRIPLET   Exact Bitcoin Core depends target (default: native target)
   --jobs N           Parallel build jobs
 EOF
 }
@@ -33,6 +35,7 @@ while (($#)); do
     --build-dir) BUILD_DIR=${2:?}; shift 2 ;;
     --snapshot-dir) SNAPSHOT_DIR=${2:?}; shift 2 ;;
     --manifest) MANIFEST=${2:?}; shift 2 ;;
+    --target) TARGET=${2:?}; shift 2 ;;
     --jobs) JOBS=${2:?}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -196,7 +199,8 @@ CONFIG_SUB="$DEPENDS_SOURCE/config.sub"
   echo "verified source snapshot is missing executable depends host tools" >&2
   exit 1
 }
-DEPENDS_HOST=$("$CONFIG_SUB" "$("$CONFIG_GUESS")")
+NATIVE_HOST=$("$CONFIG_SUB" "$("$CONFIG_GUESS")")
+DEPENDS_HOST=$("$CONFIG_SUB" "${TARGET:-$NATIVE_HOST}")
 [[ "$DEPENDS_HOST" =~ ^[A-Za-z0-9_.+]+-[A-Za-z0-9_.+]+-[A-Za-z0-9_.+-]+$ ]] || {
   echo "depends host triplet is invalid: $DEPENDS_HOST" >&2
   exit 1

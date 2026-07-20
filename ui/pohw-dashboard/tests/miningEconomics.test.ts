@@ -45,6 +45,19 @@ test("vault fees are deducted from the actual block claim before probability wei
   assert.equal(expected.netSats, Math.round(3_029 * expectedBlocksForChancePercent(0.84)));
 });
 
+test("vault net value stays unknown until a withdrawal fee is available", () => {
+  const view = calculateRewardView({
+    ...directInput,
+    directPayoutEligible: false,
+    estimatedWithdrawalFeeSats: null
+  }, "block-now");
+
+  assert.equal(view.direct, false);
+  assert.equal(view.feeSats, null);
+  assert.equal(view.netSats, null);
+  assert.equal(view.grossSats, 1_250_000);
+});
+
 test("Poisson chance windows preserve the supplied 30 day chance", () => {
   assert.ok(Math.abs(chancePercentForDays(0.84, 30) - 0.84) < 1e-10);
   assert.ok(chancePercentForDays(0.84, 1) < chancePercentForDays(0.84, 7));

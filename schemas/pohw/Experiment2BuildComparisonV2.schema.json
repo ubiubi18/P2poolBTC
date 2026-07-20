@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/Experiment2BuildComparisonV2.schema.json",
+  "title": "Experiment2BuildComparisonV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "experiment_id",
+    "activation_id",
+    "lock_sha256",
+    "source_snapshot_sha256",
+    "matching_build_count",
+    "minimum_matching_builds",
+    "minimum_matching_builds_per_target",
+    "minimum_platform_families",
+    "platform_families",
+    "target_groups",
+    "evidence_sha256",
+    "operator_independence_verified",
+    "release_authorized",
+    "next_gate"
+  ],
+  "properties": {
+    "schema_version": { "const": "pohw-experiment-2-build-comparison/v2" },
+    "status": { "const": "matching-build-evidence-unattributed" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2-consensus-idena-candidate-1" },
+    "activation_id": { "$ref": "#/$defs/hash" },
+    "lock_sha256": { "$ref": "#/$defs/hash" },
+    "source_snapshot_sha256": { "$ref": "#/$defs/hash" },
+    "matching_build_count": { "type": "integer", "minimum": 4 },
+    "minimum_matching_builds": { "type": "integer", "minimum": 4 },
+    "minimum_matching_builds_per_target": { "type": "integer", "minimum": 2 },
+    "minimum_platform_families": { "type": "integer", "minimum": 2 },
+    "platform_families": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/label" }
+    },
+    "target_groups": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_triple",
+          "platform_family",
+          "artifact_set_sha256",
+          "matching_build_count",
+          "evidence_sha256"
+        ],
+        "properties": {
+          "target_triple": { "type": "string", "pattern": "^[A-Za-z0-9_.+]+-[A-Za-z0-9_.+]+-[A-Za-z0-9_.+-]+$" },
+          "platform_family": { "$ref": "#/$defs/label" },
+          "artifact_set_sha256": { "$ref": "#/$defs/hash" },
+          "matching_build_count": { "type": "integer", "minimum": 2 },
+          "evidence_sha256": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/hash" }
+          }
+        }
+      }
+    },
+    "evidence_sha256": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hash" }
+    },
+    "operator_independence_verified": { "const": false },
+    "release_authorized": { "const": false },
+    "next_gate": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "label": { "type": "string", "pattern": "^[a-z0-9._-]{1,31}$" }
+  }
+}

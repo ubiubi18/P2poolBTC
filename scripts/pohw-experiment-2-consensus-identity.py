@@ -35,7 +35,7 @@ EXPECTED_INPUT_PATHS = {
     "snapshot_bundle_schema": "schemas/pohw/ConsensusIdentitySnapshotBundleV1.schema.json",
     "snapshot_verification_schema": "schemas/pohw/ConsensusIdentitySnapshotVerificationV1.schema.json",
     "snapshot_comparison_schema": "schemas/pohw/ConsensusIdentitySnapshotComparisonV1.schema.json",
-    "build_comparison_schema": "schemas/pohw/Experiment2BuildComparisonV1.schema.json",
+    "build_comparison_schema": "schemas/pohw/Experiment2BuildComparisonV2.schema.json",
     "snapshot_comparison_tool": "scripts/pohw-compare-idena-snapshots.py",
     "build_comparison_tool": "scripts/pohw-compare-bitcoin-core-builds.py",
     "build_evidence_tool": "scripts/pohw-bitcoin-core-build-evidence.py",
@@ -417,6 +417,7 @@ def verify_lock(root: Path, lock: dict[str, Any], policy: dict[str, Any], manife
         independent_builds,
         {
             "evidence_schema", "comparison_schema", "minimum_matching_builds",
+            "minimum_matching_builds_per_target",
             "minimum_authenticated_operators", "minimum_platform_families",
             "require_exact_source_snapshot", "require_exact_artifact_set",
             "require_complete_consensus_test_set",
@@ -426,9 +427,10 @@ def verify_lock(root: Path, lock: dict[str, Any], policy: dict[str, Any], manife
     )
     require(
         independent_builds == {
-            "evidence_schema": "pohw-bitcoin-core-build-evidence/v4",
-            "comparison_schema": "pohw-experiment-2-build-comparison/v1",
-            "minimum_matching_builds": 3,
+            "evidence_schema": "pohw-bitcoin-core-build-evidence/v5",
+            "comparison_schema": "pohw-experiment-2-build-comparison/v2",
+            "minimum_matching_builds": 4,
+            "minimum_matching_builds_per_target": 2,
             "minimum_authenticated_operators": 3,
             "minimum_platform_families": 2,
             "require_exact_source_snapshot": True,

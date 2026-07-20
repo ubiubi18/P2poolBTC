@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "pohw-bitcoin-core-build-evidence/v4"
+SCHEMA = "pohw-bitcoin-core-build-evidence/v5"
 RUN_SCHEMA = "pohw-bitcoin-core-build-run/v4"
 SNAPSHOT_SCHEMA = "pohw-bitcoin-core-source-snapshot/v1"
 SNAPSHOT_HASH_SCHEMA = b"pohw-bitcoin-core-source-snapshot-sha256/v1\0"
@@ -122,6 +122,24 @@ DEPENDS_VARIABLES = (
 
 class EvidenceError(ValueError):
     pass
+
+
+def platform_family_for_triplet(host: str) -> str:
+    if HOST_TRIPLET_RE.fullmatch(host) is None:
+        raise EvidenceError("target host must be a canonical triplet")
+    lowered = host.lower()
+    families = (
+        ("linux", "linux"),
+        ("darwin", "macos"),
+        ("mingw", "windows"),
+        ("windows", "windows"),
+        ("freebsd", "freebsd"),
+        ("openbsd", "openbsd"),
+    )
+    matches = {family for marker, family in families if marker in lowered}
+    if len(matches) != 1:
+        raise EvidenceError(f"target host has an unsupported platform family: {host}")
+    return matches.pop()
 
 
 def manifest_profile(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -927,6 +945,10 @@ def expected_evidence(
         "manifest_sha256": sha256_file(manifest_path),
         "upstream_commit": profile["upstream_commit"],
         "patch_sha256": profile["patch_sha256"],
+        "target": {
+            "triple": depends["host"],
+            "platform_family": platform_family_for_triplet(depends["host"]),
+        },
         "source_snapshot": snapshot,
         "build": {
             "generator": "Ninja",

@@ -11,19 +11,19 @@ export interface RewardEconomicsInput {
   directRank: number;
   directLimit: number;
   minPayoutSats: number;
-  estimatedWithdrawalFeeSats: number;
+  estimatedWithdrawalFeeSats: number | null;
 }
 
 export interface RewardView {
   blockValueBtc: number;
   blockValueSats: number;
   blockGrossSats: number;
-  blockFeeSats: number;
-  blockNetSats: number;
+  blockFeeSats: number | null;
+  blockNetSats: number | null;
   direct: boolean;
-  feeSats: number;
+  feeSats: number | null;
   grossSats: number;
-  netSats: number;
+  netSats: number | null;
   vaultSats: number;
 }
 
@@ -45,10 +45,20 @@ export function calculateRewardView(
     input.directRank <= input.directLimit &&
     blockGrossSats >= input.minPayoutSats;
   const blockVaultSats = direct ? 0 : blockGrossSats;
-  const blockFeeSats = blockVaultSats > 0
-    ? Math.min(Math.max(0, input.estimatedWithdrawalFeeSats), blockVaultSats)
-    : 0;
-  const blockNetSats = direct ? blockGrossSats : Math.max(0, blockVaultSats - blockFeeSats);
+  const hasFeeEstimate = input.estimatedWithdrawalFeeSats !== null
+    && Number.isFinite(input.estimatedWithdrawalFeeSats);
+  const blockFeeSats = direct
+    ? 0
+    : blockVaultSats > 0 && hasFeeEstimate
+      ? Math.min(Math.max(0, input.estimatedWithdrawalFeeSats ?? 0), blockVaultSats)
+      : blockVaultSats > 0
+        ? null
+        : 0;
+  const blockNetSats = blockFeeSats === null
+    ? null
+    : direct
+      ? blockGrossSats
+      : Math.max(0, blockVaultSats - blockFeeSats);
   const expectedBlocks30d = Number.isFinite(input.expectedBlocks30d)
     ? Math.max(0, input.expectedBlocks30d)
     : 0;
@@ -61,9 +71,9 @@ export function calculateRewardView(
     blockFeeSats,
     blockNetSats,
     direct,
-    feeSats: Math.round(blockFeeSats * multiplier),
+    feeSats: blockFeeSats === null ? null : Math.round(blockFeeSats * multiplier),
     grossSats: Math.round(blockGrossSats * multiplier),
-    netSats: Math.round(blockNetSats * multiplier),
+    netSats: blockNetSats === null ? null : Math.round(blockNetSats * multiplier),
     vaultSats: Math.round(blockVaultSats * multiplier)
   };
 }

@@ -17,11 +17,12 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "pohw-experiment-2-build-comparison/v1"
-EVIDENCE_SCHEMA = "pohw-bitcoin-core-build-evidence/v4"
+SCHEMA = "pohw-experiment-2-build-comparison/v2"
+EVIDENCE_SCHEMA = "pohw-bitcoin-core-build-evidence/v5"
 LOCK_SCHEMA = "pohw-bitcoin-core-patch-series-lock/v1"
 MAX_JSON_BYTES = 64 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TARGET_TRIPLET_RE = re.compile(r"^[A-Za-z0-9_.+]+-[A-Za-z0-9_.+]+-[A-Za-z0-9_.+-]+$")
 ARTIFACT_SET_TAG = b"P2POOLBTC_EXPERIMENT_2_CORE_ARTIFACT_SET_V1\0"
 ROOT_KEYS = {
     "schema_version",
@@ -29,6 +30,7 @@ ROOT_KEYS = {
     "manifest_sha256",
     "upstream_commit",
     "patch_sha256",
+    "target",
     "source_snapshot",
     "build",
     "tests",
@@ -61,6 +63,28 @@ class ComparisonError(ValueError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ComparisonError(message)
+
+
+def platform_family_for_triplet(host: str) -> str:
+    require(
+        TARGET_TRIPLET_RE.fullmatch(host) is not None,
+        "build evidence target host must be a canonical triplet",
+    )
+    lowered = host.lower()
+    families = (
+        ("linux", "linux"),
+        ("darwin", "macos"),
+        ("mingw", "windows"),
+        ("windows", "windows"),
+        ("freebsd", "freebsd"),
+        ("openbsd", "openbsd"),
+    )
+    matches = {family for marker, family in families if marker in lowered}
+    require(
+        len(matches) == 1,
+        f"build evidence target has an unsupported platform family: {host}",
+    )
+    return matches.pop()
 
 
 def duplicate_safe_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -184,7 +208,7 @@ def validate_evidence(
     lock: dict[str, Any],
     lock_sha256: str,
     profile: dict[str, Any],
-) -> tuple[str, tuple[tuple[str, str, int], ...], str]:
+) -> tuple[str, tuple[tuple[str, str, int], ...], str, str, str]:
     require(set(evidence) == ROOT_KEYS, "build evidence root fields differ")
     require(evidence.get("schema_version") == EVIDENCE_SCHEMA, "unsupported build evidence schema")
     require(evidence.get("activation_id") == profile["activation_id"], "build evidence activation ID mismatch")
@@ -230,37 +254,96 @@ def validate_evidence(
         )
     require(labels == list(profile["required_steps"]), "build evidence command sequence is incomplete")
     require(isinstance(evidence.get("toolchain"), dict) and evidence["toolchain"], "build evidence has no toolchain record")
-    return (*artifact_set(evidence), snapshot_digest(evidence))
+    target = evidence.get("target")
+    require(
+        isinstance(target, dict) and set(target) == {"triple", "platform_family"},
+        "build evidence target fields differ",
+    )
+    target_triple = target.get("triple")
+    platform_family = target.get("platform_family")
+    require(isinstance(target_triple, str), "build evidence target triple is invalid")
+    expected_family = platform_family_for_triplet(target_triple)
+    require(platform_family == expected_family, "build evidence target platform family mismatch")
+    require(
+        build["depends"].get("host") == target_triple,
+        "build evidence target does not match the sealed depends toolchain",
+    )
+    return (*artifact_set(evidence), snapshot_digest(evidence), target_triple, platform_family)
 
 
 def compare(root: Path, lock_path: Path, evidence_paths: list[Path], minimum: int) -> dict[str, Any]:
-    require(minimum >= 3, "consensus-critical comparison requires at least three builds")
-    require(len(evidence_paths) >= minimum, f"at least {minimum} build evidence files are required")
     lock, lock_raw = verify_lock(root, lock_path)
+    policy = lock["independent_builds"]
+    locked_minimum = policy["minimum_matching_builds"]
+    minimum_per_target = policy["minimum_matching_builds_per_target"]
+    minimum_platform_families = policy["minimum_platform_families"]
+    require(
+        minimum >= locked_minimum,
+        f"consensus-critical comparison requires at least {locked_minimum} builds",
+    )
+    require(len(evidence_paths) >= minimum, f"at least {minimum} build evidence files are required")
     lock_sha256 = hashlib.sha256(lock_raw).hexdigest()
     profile = load_evidence_module(root).manifest_profile(lock)
     evidence_digests: list[str] = []
-    expected_artifact_digest: str | None = None
-    expected_artifacts: tuple[tuple[str, str, int], ...] | None = None
     expected_snapshot: str | None = None
+    target_groups: dict[
+        str,
+        tuple[str, str, tuple[tuple[str, str, int], ...], list[str]],
+    ] = {}
     for path in evidence_paths:
         evidence, raw = read_json(path)
         evidence_sha256 = hashlib.sha256(raw).hexdigest()
         require(evidence_sha256 not in evidence_digests, "duplicate build evidence payload")
         evidence_digests.append(evidence_sha256)
-        artifact_digest, artifacts, source_snapshot = validate_evidence(
+        artifact_digest, artifacts, source_snapshot, target_triple, platform_family = validate_evidence(
             evidence, lock, lock_sha256, profile
         )
-        if expected_artifact_digest is None:
-            expected_artifact_digest = artifact_digest
-            expected_artifacts = artifacts
+        if expected_snapshot is None:
             expected_snapshot = source_snapshot
         else:
             require(source_snapshot == expected_snapshot, "builders used different source snapshots")
-            require(
-                artifact_digest == expected_artifact_digest and artifacts == expected_artifacts,
-                "builder artifact sets do not match",
+        existing = target_groups.get(target_triple)
+        if existing is None:
+            target_groups[target_triple] = (
+                platform_family,
+                artifact_digest,
+                artifacts,
+                [evidence_sha256],
             )
+        else:
+            expected_family, expected_digest, expected_artifacts, group_evidence = existing
+            require(
+                platform_family == expected_family,
+                "target platform family changed between builders",
+            )
+            require(
+                artifact_digest == expected_digest and artifacts == expected_artifacts,
+                f"builder artifact sets do not match for target {target_triple}",
+            )
+            group_evidence.append(evidence_sha256)
+    require(bool(target_groups), "no target build groups were produced")
+    for target_triple, (_, _, _, group_evidence) in target_groups.items():
+        require(
+            len(group_evidence) >= minimum_per_target,
+            f"target {target_triple} has fewer than {minimum_per_target} matching builds",
+        )
+    platform_families = sorted({group[0] for group in target_groups.values()})
+    require(
+        len(platform_families) >= minimum_platform_families,
+        f"comparison requires at least {minimum_platform_families} platform families",
+    )
+    target_reports = [
+        {
+            "target_triple": target_triple,
+            "platform_family": platform_family,
+            "artifact_set_sha256": artifact_digest,
+            "matching_build_count": len(group_evidence),
+            "evidence_sha256": sorted(group_evidence),
+        }
+        for target_triple, (platform_family, artifact_digest, _, group_evidence) in sorted(
+            target_groups.items()
+        )
+    ]
     return {
         "schema_version": SCHEMA,
         "status": "matching-build-evidence-unattributed",
@@ -268,13 +351,16 @@ def compare(root: Path, lock_path: Path, evidence_paths: list[Path], minimum: in
         "activation_id": profile["activation_id"],
         "lock_sha256": lock_sha256,
         "source_snapshot_sha256": expected_snapshot,
-        "artifact_set_sha256": expected_artifact_digest,
         "matching_build_count": len(evidence_paths),
         "minimum_matching_builds": minimum,
+        "minimum_matching_builds_per_target": minimum_per_target,
+        "minimum_platform_families": minimum_platform_families,
+        "platform_families": platform_families,
+        "target_groups": target_reports,
         "evidence_sha256": sorted(evidence_digests),
         "operator_independence_verified": False,
         "release_authorized": False,
-        "next_gate": "package each build as BuildAttestationV1 and authenticate it with a distinct eligible Idena owner",
+        "next_gate": "authenticate each target-group build with a distinct eligible Idena owner; critical DAO execution remains disabled until artifact-group governance is deployed",
     }
 
 
@@ -298,7 +384,7 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--evidence", type=Path, action="append", required=True)
-    parser.add_argument("--minimum-builds", type=int, default=3)
+    parser.add_argument("--minimum-builds", type=int, default=4)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     root = args.repo_root.resolve()

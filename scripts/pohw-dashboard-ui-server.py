@@ -76,6 +76,50 @@ def parse_api_origin(raw: str) -> tuple[str, int]:
     return host, port
 
 
+def parse_loopback_authority(raw: str, label: str) -> tuple[str, int | None]:
+    if not raw or raw != raw.strip() or any(ord(char) < 33 or ord(char) == 127 for char in raw):
+        raise ValueError(f"{label} has invalid whitespace or control characters")
+    parsed = urlsplit(f"//{raw}")
+    if (
+        not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{label} must be a loopback authority")
+    hostname = parsed.hostname.lower()
+    if hostname != "localhost":
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError as exc:
+            raise ValueError(f"{label} must use localhost or a literal loopback address") from exc
+        if not address.is_loopback:
+            raise ValueError(f"{label} must use a loopback address")
+        hostname = address.compressed
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{label} has an invalid port") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"{label} has an invalid port")
+    return hostname, port
+
+
+def parse_loopback_origin(raw: str) -> tuple[str, int | None]:
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "http"
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("request Origin must be loopback HTTP")
+    return parse_loopback_authority(parsed.netloc, "request Origin")
+
+
 def load_token(path: Path) -> str:
     try:
         metadata = path.lstat()
@@ -151,11 +195,46 @@ class DashboardUiHandler(BaseHTTPRequestHandler):
         return
 
     def _dispatch(self, send_body: bool) -> None:
+        if not self._request_is_local():
+            self._json_error(421, "request authority is not local", send_body=send_body)
+            return
         parsed = urlsplit(self.path)
         if parsed.path == "/dashboard.json" or parsed.path.startswith("/api/v1/"):
+            if not self._api_fetch_is_same_origin():
+                self._json_error(403, "cross-origin API request rejected", send_body=send_body)
+                return
             self._proxy_api(parsed.path, parsed.query, send_body)
             return
         self._serve_static(parsed.path, send_body)
+
+    def _request_is_local(self) -> bool:
+        hosts = self.headers.get_all("Host", [])
+        if len(hosts) != 1:
+            return False
+        try:
+            parse_loopback_authority(hosts[0], "request Host")
+        except ValueError:
+            return False
+        return True
+
+    def _api_fetch_is_same_origin(self) -> bool:
+        origins = self.headers.get_all("Origin", [])
+        if len(origins) > 1:
+            return False
+        if origins:
+            try:
+                origin_host, origin_port = parse_loopback_origin(origins[0])
+                request_host, request_port = parse_loopback_authority(
+                    self.headers["Host"], "request Host"
+                )
+            except ValueError:
+                return False
+            if (origin_host, origin_port) != (request_host, request_port):
+                return False
+        fetch_sites = self.headers.get_all("Sec-Fetch-Site", [])
+        if len(fetch_sites) > 1:
+            return False
+        return not fetch_sites or fetch_sites[0].lower() in {"none", "same-origin"}
 
     def _proxy_api(self, path: str, query: str, send_body: bool) -> None:
         target = path + (f"?{query}" if query else "")

@@ -1,5 +1,5 @@
 use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
-use crate::bitcoin_rpc::{BitcoinRpcAuth, BitcoinRpcClient};
+use crate::bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinRpcAuth, BitcoinRpcClient};
 use crate::explorer_api;
 use crate::fork_chain::block_subsidy_sats;
 use crate::fork_explorer::ExplorerForkClient;
@@ -164,6 +164,8 @@ pub struct DashboardShareWindow {
     pub user_hashrate_ths: f64,
     pub pool_hashrate_ths: f64,
     pub measurement_seconds: u64,
+    pub user_measurement_seconds: u64,
+    pub pool_measurement_seconds: u64,
     pub recent_shares: Vec<DashboardSharePoint>,
 }
 
@@ -203,7 +205,7 @@ pub struct DashboardPayout {
     pub coinbase_output_budget_vb: u64,
     pub direct_fee_basis_sat_vb: u64,
     pub vault_claim_sats: u64,
-    pub estimated_withdrawal_fee_sats: u64,
+    pub estimated_withdrawal_fee_sats: Option<u64>,
     pub min_payout_sats: u64,
     pub block_reward_source: String,
 }
@@ -243,7 +245,7 @@ struct ProjectedPayoutRoute {
     direct_rank: usize,
     direct_cutoff_sats: u64,
     projected_vault_claim_sats: u64,
-    estimated_withdrawal_fee_sats: u64,
+    estimated_withdrawal_fee_sats: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -621,11 +623,7 @@ fn build_dashboard_snapshot_with_statuses(
                 last_vault_rotation: "not available".to_string(),
                 vault_key: "not active".to_string(),
                 active_nodes: peers.len() + 1,
-                mining_estimate_source: if fork_economics.expected_hashes_per_block.is_some() {
-                    "24h submitted share work against the latest active fork target".to_string()
-                } else {
-                    fork_economics.source.clone()
-                },
+                mining_estimate_source: fork_economics.source.clone(),
             },
         },
     })
@@ -642,7 +640,7 @@ fn projected_payout_route(
             direct_rank: 0,
             direct_cutoff_sats: MIN_DIRECT_PAYOUT_SATS,
             projected_vault_claim_sats: 0,
-            estimated_withdrawal_fee_sats: 0,
+            estimated_withdrawal_fee_sats: None,
         };
     };
     let selected_miner_id = selected.miner_id.to_ascii_lowercase();
@@ -657,7 +655,7 @@ fn projected_payout_route(
             direct_rank: 0,
             direct_cutoff_sats: MIN_DIRECT_PAYOUT_SATS,
             projected_vault_claim_sats: selected.unpaid_sats,
-            estimated_withdrawal_fee_sats: 0,
+            estimated_withdrawal_fee_sats: None,
         };
     };
 
@@ -722,11 +720,46 @@ fn projected_payout_route(
         direct_rank,
         direct_cutoff_sats,
         projected_vault_claim_sats,
-        estimated_withdrawal_fee_sats: 0,
+        estimated_withdrawal_fee_sats: None,
     }
 }
 
 async fn dashboard_fork_economics(config: &DashboardApiConfig) -> DashboardForkEconomics {
+    if let Some(rpc_url) = config.bitcoin_rpc_url.as_ref() {
+        match BitcoinRpcClient::new_with_remote_policy(
+            rpc_url,
+            config.bitcoin_rpc_auth.clone(),
+            config.allow_remote_rpc,
+        ) {
+            Ok(client) => {
+                match timeout(config.probe_timeout, client.mining_job_template_unchecked()).await {
+                    Ok(Ok(template)) => match fork_economics_from_template(&template) {
+                        Ok(economics) => return economics,
+                        Err(_) => {
+                            return DashboardForkEconomics {
+                                source: "next-height Bitcoin template is invalid".to_string(),
+                                ..DashboardForkEconomics::default()
+                            };
+                        }
+                    },
+                    Ok(Err(_)) => {}
+                    Err(_) => {
+                        return DashboardForkEconomics {
+                            source: "next-height Bitcoin template probe timed out".to_string(),
+                            ..DashboardForkEconomics::default()
+                        };
+                    }
+                }
+            }
+            Err(_) => {
+                return DashboardForkEconomics {
+                    source: "Bitcoin RPC URL is invalid".to_string(),
+                    ..DashboardForkEconomics::default()
+                };
+            }
+        }
+    }
+
     let Some(client) = config.fork_explorer_client.as_ref() else {
         return DashboardForkEconomics::default();
     };
@@ -746,8 +779,8 @@ async fn dashboard_fork_economics(config: &DashboardApiConfig) -> DashboardForkE
         Ok::<_, anyhow::Error>(DashboardForkEconomics {
             block_subsidy_sats: Some(next_subsidy),
             estimated_fees_sats: Some(claimed_fees),
-            expected_hashes_per_block: Some(expected_hashes_for_compact_target(&block.bits)?),
-            source: "next-height fork subsidy plus fees claimed by the latest active fork block"
+            expected_hashes_per_block: None,
+            source: "next-height subsidy plus latest-block fees; next template target unavailable"
                 .to_string(),
         })
     })
@@ -763,6 +796,23 @@ async fn dashboard_fork_economics(config: &DashboardApiConfig) -> DashboardForkE
             ..DashboardForkEconomics::default()
         },
     }
+}
+
+fn fork_economics_from_template(
+    template: &BitcoinMiningJobTemplate,
+) -> Result<DashboardForkEconomics> {
+    let subsidy = block_subsidy_sats(template.height);
+    let fees = template
+        .coinbase_value_sats
+        .checked_sub(subsidy)
+        .context("next-height coinbase value is below the block subsidy")?;
+    Ok(DashboardForkEconomics {
+        block_subsidy_sats: Some(subsidy),
+        estimated_fees_sats: Some(fees),
+        expected_hashes_per_block: Some(expected_hashes_for_compact_target(&template.bits)?),
+        source: "next-height subsidy, fees, and target from authenticated getblocktemplate"
+            .to_string(),
+    })
 }
 
 fn expected_hashes_for_compact_target(bits: &str) -> Result<f64> {
@@ -801,7 +851,7 @@ fn mining_odds(
         return ("fork target unavailable".to_string(), 0.0, 0.0);
     };
     if !pool_hashrate_hps.is_finite() || pool_hashrate_hps <= 0.0 {
-        return ("waiting for 24h submitted share work".to_string(), 0.0, 0.0);
+        return ("waiting for submitted share work".to_string(), 0.0, 0.0);
     }
     let interval_seconds = expected_hashes / pool_hashrate_hps;
     if !interval_seconds.is_finite() || interval_seconds <= 0.0 {
@@ -819,25 +869,19 @@ fn mining_odds(
 
 fn format_duration_estimate(seconds: f64) -> String {
     if seconds < 60.0 {
-        format!("~{seconds:.1} seconds at the 24h observed pool rate")
+        format!("~{seconds:.1} seconds at the observed pool rate")
     } else if seconds < 60.0 * 60.0 {
-        format!(
-            "~{:.1} minutes at the 24h observed pool rate",
-            seconds / 60.0
-        )
+        format!("~{:.1} minutes at the observed pool rate", seconds / 60.0)
     } else if seconds < SECONDS_PER_DAY as f64 {
-        format!(
-            "~{:.1} hours at the 24h observed pool rate",
-            seconds / 3_600.0
-        )
+        format!("~{:.1} hours at the observed pool rate", seconds / 3_600.0)
     } else if seconds < 365.25 * SECONDS_PER_DAY as f64 {
         format!(
-            "~{:.1} days at the 24h observed pool rate",
+            "~{:.1} days at the observed pool rate",
             seconds / SECONDS_PER_DAY as f64
         )
     } else {
         format!(
-            "~{:.1} years at the 24h observed pool rate",
+            "~{:.1} years at the observed pool rate",
             seconds / (365.25 * SECONDS_PER_DAY as f64)
         )
     }
@@ -908,6 +952,8 @@ fn dashboard_share_window(
     let mut pool_stale_shares = 0usize;
     let mut user_expected_hashes = 0.0f64;
     let mut pool_expected_hashes = 0.0f64;
+    let mut earliest_user_share = None::<i64>;
+    let mut earliest_pool_share = None::<i64>;
 
     for share in shares {
         let Some(timestamp) = share.template_created_at_unix else {
@@ -918,6 +964,11 @@ fn dashboard_share_window(
         }
         let expected_hashes = expected_hashes_for_target_hex(&share.target)?;
         pool_expected_hashes += expected_hashes;
+        earliest_pool_share = Some(
+            earliest_pool_share
+                .map(|earliest| earliest.min(timestamp))
+                .unwrap_or(timestamp),
+        );
         if share.active {
             pool_accepted_shares += 1;
         } else {
@@ -929,6 +980,11 @@ fn dashboard_share_window(
             continue;
         }
         user_expected_hashes += expected_hashes;
+        earliest_user_share = Some(
+            earliest_user_share
+                .map(|earliest| earliest.min(timestamp))
+                .unwrap_or(timestamp),
+        );
         let elapsed = u64::try_from(timestamp.saturating_sub(start)).unwrap_or(0);
         let bucket = usize::try_from(
             elapsed
@@ -947,17 +1003,29 @@ fn dashboard_share_window(
         }
     }
 
-    let seconds = measurement_seconds as f64;
+    let pool_measurement_seconds = observed_share_seconds(now, start, earliest_pool_share);
+    let user_measurement_seconds = observed_share_seconds(now, start, earliest_user_share);
+    let pool_seconds = pool_measurement_seconds.max(1) as f64;
+    let user_seconds = user_measurement_seconds.max(1) as f64;
     Ok(DashboardShareWindow {
         accepted_shares,
         stale_shares,
         pool_accepted_shares,
         pool_stale_shares,
-        user_hashrate_ths: user_expected_hashes / seconds / 1_000_000_000_000.0,
-        pool_hashrate_ths: pool_expected_hashes / seconds / 1_000_000_000_000.0,
+        user_hashrate_ths: user_expected_hashes / user_seconds / 1_000_000_000_000.0,
+        pool_hashrate_ths: pool_expected_hashes / pool_seconds / 1_000_000_000_000.0,
         measurement_seconds,
+        user_measurement_seconds,
+        pool_measurement_seconds,
         recent_shares: points,
     })
+}
+
+fn observed_share_seconds(now: i64, window_start: i64, earliest: Option<i64>) -> u64 {
+    let Some(earliest) = earliest else {
+        return 0;
+    };
+    u64::try_from(now.saturating_sub(earliest.max(window_start)).max(1)).unwrap_or(u64::MAX)
 }
 
 fn share_bucket_label(start: i64, duration: u64, index: usize, mode: &str) -> String {
@@ -2580,6 +2648,9 @@ mod tests {
         assert_eq!(windows.hours_24.stale_shares, 1);
         assert_eq!(windows.hours_24.pool_accepted_shares, 2);
         assert_eq!(windows.hours_24.pool_stale_shares, 1);
+        assert_eq!(windows.hours_24.measurement_seconds, SECONDS_PER_DAY as u64);
+        assert_eq!(windows.hours_24.user_measurement_seconds, 3_600);
+        assert_eq!(windows.hours_24.pool_measurement_seconds, 3_600);
         assert_eq!(windows.days_7.accepted_shares, 2);
         assert!(windows.hours_24.user_hashrate_ths > 0.0);
         assert!(windows.hours_24.pool_hashrate_ths > windows.hours_24.user_hashrate_ths);
@@ -2593,6 +2664,51 @@ mod tests {
                 .sum::<usize>(),
             1
         );
+    }
+
+    #[test]
+    fn new_miner_hashrate_uses_observed_span_not_the_full_window() {
+        let now = 1_800_000_000;
+        let target = hex::encode(Target::MAX_ATTAINABLE_REGTEST.to_be_bytes());
+        let shares = vec![dashboard_share("alice", true, now - 60, &target)];
+
+        let windows = dashboard_share_windows(&shares, Some("alice"), now).unwrap();
+        let expected_hashes = expected_hashes_for_target_hex(&target).unwrap();
+        let expected_ths = expected_hashes / 60.0 / 1_000_000_000_000.0;
+
+        assert_eq!(windows.hours_24.user_measurement_seconds, 60);
+        assert_eq!(windows.hours_24.pool_measurement_seconds, 60);
+        assert!((windows.hours_24.user_hashrate_ths - expected_ths).abs() < 1e-12);
+        assert!((windows.hours_24.pool_hashrate_ths - expected_ths).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fork_economics_uses_next_template_height_fees_and_bits() {
+        let height = 958_080;
+        let subsidy = block_subsidy_sats(height);
+        let template = BitcoinMiningJobTemplate {
+            version: 1,
+            previous_block_hash: "11".repeat(32),
+            curtime: 1_800_000_000,
+            bits: "207fffff".to_string(),
+            height,
+            coinbase_value_sats: subsidy + 1_234,
+            transaction_hashes: Vec::new(),
+            transactions: Vec::new(),
+            default_witness_commitment: None,
+            pohw_replay_marker: None,
+            pohw_idena_authorization: None,
+        };
+
+        let economics = fork_economics_from_template(&template).unwrap();
+
+        assert_eq!(economics.block_subsidy_sats, Some(subsidy));
+        assert_eq!(economics.estimated_fees_sats, Some(1_234));
+        assert_eq!(
+            economics.expected_hashes_per_block,
+            Some(expected_hashes_for_compact_target("207fffff").unwrap())
+        );
+        assert!(economics.source.contains("getblocktemplate"));
     }
 
     #[test]

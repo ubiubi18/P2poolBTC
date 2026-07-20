@@ -208,21 +208,6 @@ fn validate_consensus_identity_profile_bindings(
         .authorization
         .validate_membership(&configured.policy)
         .context("invalid consensus identity authorization proof")?;
-    if !configured
-        .policy
-        .bitcoin_fork_activation_id
-        .eq_ignore_ascii_case(&configured.activation.predecessor_activation_id)
-    {
-        bail!("consensus identity policy does not bind the activation predecessor");
-    }
-    if configured
-        .activation
-        .authorization_parent_height
-        .checked_add(1)
-        != Some(configured.policy.bitcoin_activation_height)
-    {
-        bail!("consensus identity activation parent is not immediately before activation");
-    }
     if !share_work_policy
         .fork_activation_id
         .eq_ignore_ascii_case(&configured.policy.share_work_activation_id)

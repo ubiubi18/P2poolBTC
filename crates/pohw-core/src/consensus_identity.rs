@@ -586,6 +586,19 @@ impl ConsensusIdentityActivationManifestV1 {
                 "activation manifest and consensus policy do not match",
             ));
         }
+        if self.predecessor_activation_id != policy.bitcoin_fork_activation_id {
+            return Err(invalid(
+                "predecessor_activation_id",
+                "activation manifest does not extend the fork activation bound by the policy",
+            ));
+        }
+        if self.authorization_parent_height.checked_add(1) != Some(policy.bitcoin_activation_height)
+        {
+            return Err(invalid(
+                "authorization_parent_height",
+                "authorization parent must be immediately before policy activation",
+            ));
+        }
         Ok(())
     }
 }
@@ -2081,6 +2094,25 @@ mod tests {
         };
         manifest.activation_id = manifest.recomputed_activation_id().unwrap();
         manifest.validate_policy(&policy).unwrap();
+
+        let mut wrong_predecessor = manifest.clone();
+        wrong_predecessor.predecessor_activation_id = "ff".repeat(32);
+        wrong_predecessor.activation_id = wrong_predecessor.recomputed_activation_id().unwrap();
+        assert!(matches!(
+            wrong_predecessor.validate_policy(&policy),
+            Err(ConsensusIdentityError::InvalidField { ref field, .. })
+                if field == "predecessor_activation_id"
+        ));
+
+        let mut nonadjacent_parent = manifest.clone();
+        nonadjacent_parent.authorization_parent_height -= 1;
+        nonadjacent_parent.activation_id = nonadjacent_parent.recomputed_activation_id().unwrap();
+        assert!(matches!(
+            nonadjacent_parent.validate_policy(&policy),
+            Err(ConsensusIdentityError::InvalidField { ref field, .. })
+                if field == "authorization_parent_height"
+        ));
+
         assert!(manifest.validate_for_launch().is_err());
         let mut noncanonical = manifest.clone();
         noncanonical.activation_id = noncanonical.activation_id.to_ascii_uppercase();

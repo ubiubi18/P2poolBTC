@@ -51,8 +51,8 @@
       "sha256": "7253420aebcba1e12acfffdddae88bec4f30f0a9a308ab15d221daad7dd6d5d8"
     },
     "build_comparison_schema": {
-      "path": "schemas/pohw/Experiment2BuildComparisonV1.schema.json",
-      "sha256": "45251d91ca2a58125748894fde014478916936714f0e10dd45b791230d5d343b"
+      "path": "schemas/pohw/Experiment2BuildComparisonV2.schema.json",
+      "sha256": "3fa1a9a0cc12dbfde7fe9cf27d43600879c4d95c21f49833c858829e531d7e28"
     },
     "snapshot_comparison_tool": {
       "path": "scripts/pohw-compare-idena-snapshots.py",
@@ -60,15 +60,15 @@
     },
     "build_comparison_tool": {
       "path": "scripts/pohw-compare-bitcoin-core-builds.py",
-      "sha256": "b00ff3e22222900bbfed64f3f5ab881f027615755ceab3667031839904945d9c"
+      "sha256": "8a93ab596d9cd134fc453a5ed0b85032554a02ae8a67e55e68f933da2445fe63"
     },
     "build_evidence_tool": {
       "path": "scripts/pohw-bitcoin-core-build-evidence.py",
-      "sha256": "f5cefbcccda3eee150e0e60165b0d81e83d11825bc8c9dd82fde2a138ef06223"
+      "sha256": "dbf21ff0ca565b7df6cfbb646fe0529f3250c29c19942281b4d4c2f4d6836e5e"
     },
     "clean_room_builder": {
       "path": "scripts/pohw-build-bitcoin-core-fork.sh",
-      "sha256": "93faff800d1148b644818c39f3e45b6a36fd76f8108b45f16a14c7618cd80d3d"
+      "sha256": "2b51512357bf279173acf6fc8329190d7784fc5739e93d3de6aa0699020d142f"
     },
     "source_verifier": {
       "path": "scripts/pohw-verify-bitcoin-core-source.sh",
@@ -136,9 +136,10 @@
     "comparison_release_authorized": false
   },
   "independent_builds": {
-    "evidence_schema": "pohw-bitcoin-core-build-evidence/v4",
-    "comparison_schema": "pohw-experiment-2-build-comparison/v1",
-    "minimum_matching_builds": 3,
+    "evidence_schema": "pohw-bitcoin-core-build-evidence/v5",
+    "comparison_schema": "pohw-experiment-2-build-comparison/v2",
+    "minimum_matching_builds": 4,
+    "minimum_matching_builds_per_target": 2,
     "minimum_authenticated_operators": 3,
     "minimum_platform_families": 2,
     "require_exact_source_snapshot": true,
@@ -152,7 +153,7 @@
     "replace fixture Idena height, block hash, contract address, authorization root, and public test keys",
     "cryptographically bind every identity-state row to the finalized identity root through deterministic state replay or row proofs; compatible-rpc-unproven captures cannot activate",
     "obtain three matching finalized Idena captures authenticated by three distinct eligible operators",
-    "obtain three matching clean-room builds authenticated by three distinct eligible operators across at least two platform families",
+    "obtain two matching clean-room builds for each of at least two target platform families, authenticated by at least three distinct eligible operators",
     "review and approve a new immutable active manifest",
     "run cross-implementation and inherited-chain migration rehearsals",
     "obtain independent security review"
