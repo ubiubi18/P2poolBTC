@@ -22,6 +22,13 @@ from urllib.parse import unquote, urlsplit
 MAX_STATIC_BYTES = 32 * 1024 * 1024
 MAX_API_BYTES = 16 * 1024 * 1024
 MAX_TOKEN_BYTES = 4096
+MAX_API_TARGET_BYTES = 2048
+MAX_API_QUERY_BYTES = 512
+MAX_EXPLORER_CURSOR = 10_000_000
+MAX_PAGE_LIMIT = 100
+MAX_UINT64 = (1 << 64) - 1
+HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+ASCII_ALNUM = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -120,6 +127,198 @@ def parse_loopback_origin(raw: str) -> tuple[str, int | None]:
     return parse_loopback_authority(parsed.netloc, "request Origin")
 
 
+def parse_api_query(raw: str) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        encoded = raw.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("API query must be ASCII") from exc
+    if len(encoded) > MAX_API_QUERY_BYTES or "%" in raw or "+" in raw:
+        raise ValueError("API query is invalid")
+    query: dict[str, str] = {}
+    for pair in raw.split("&"):
+        key, separator, value = pair.partition("=")
+        if (
+            not separator
+            or not key
+            or any(ord(char) < 33 or ord(char) == 127 for char in pair)
+            or key in query
+        ):
+            raise ValueError("API query is invalid")
+        query[key] = value
+    return query
+
+
+def canonical_hash(raw: str, label: str) -> str:
+    if len(raw) != 64 or any(char not in HEX_DIGITS for char in raw):
+        raise ValueError(f"{label} must be 32 bytes encoded as hexadecimal")
+    return bytes.fromhex(raw).hex()
+
+
+def canonical_uint(raw: str, label: str, maximum: int) -> str:
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        raise ValueError(f"{label} must be an unsigned integer")
+    value = int(raw, 10)
+    if value > maximum:
+        raise ValueError(f"{label} exceeds the supported range")
+    return str(value)
+
+
+def canonical_bitcoin_address(raw: str) -> str:
+    if not 1 <= len(raw) <= 128 or any(char not in ASCII_ALNUM for char in raw):
+        raise ValueError("Bitcoin address has an unsafe representation")
+    # Rebuild only from a fixed alphabet. The upstream API performs the full
+    # network and checksum validation.
+    return "".join(ASCII_ALNUM[ASCII_ALNUM.index(char)] for char in raw)
+
+
+def canonical_api_query(raw: str, mode: str) -> str:
+    query = parse_api_query(raw)
+    rendered: list[tuple[str, str]] = []
+    if mode == "none":
+        allowed: set[str] = set()
+    elif mode == "hash-page":
+        allowed = {"cursor", "limit"}
+        if cursor := query.get("cursor"):
+            rendered.append(("cursor", canonical_hash(cursor, "explorer cursor")))
+        if "limit" in query:
+            limit = canonical_uint(query["limit"], "explorer limit", MAX_PAGE_LIMIT)
+            if int(limit) == 0:
+                raise ValueError("explorer limit must be positive")
+            rendered.append(("limit", limit))
+    elif mode == "numeric-page":
+        allowed = {"cursor", "limit"}
+        if "cursor" in query:
+            rendered.append(
+                (
+                    "cursor",
+                    canonical_uint(query["cursor"], "explorer cursor", MAX_EXPLORER_CURSOR),
+                )
+            )
+        if "limit" in query:
+            limit = canonical_uint(query["limit"], "explorer limit", MAX_PAGE_LIMIT)
+            if int(limit) == 0:
+                raise ValueError("explorer limit must be positive")
+            rendered.append(("limit", limit))
+    elif mode == "hash-cursor":
+        allowed = {"cursor"}
+        if cursor := query.get("cursor"):
+            rendered.append(("cursor", canonical_hash(cursor, "history cursor")))
+    elif mode == "numeric-cursor":
+        allowed = {"cursor"}
+        if "cursor" in query:
+            rendered.append(
+                (
+                    "cursor",
+                    canonical_uint(query["cursor"], "history cursor", MAX_EXPLORER_CURSOR),
+                )
+            )
+    elif mode == "start-height":
+        allowed = {"startHeight"}
+        if "startHeight" in query:
+            rendered.append(
+                (
+                    "startHeight",
+                    canonical_uint(query["startHeight"], "start height", MAX_UINT64),
+                )
+            )
+    else:
+        raise ValueError("unknown API query policy")
+    if set(query) - allowed:
+        raise ValueError("unsupported API query parameter")
+    return "" if not rendered else "?" + "&".join(f"{key}={value}" for key, value in rendered)
+
+
+def canonical_api_target(path: str, raw_query: str) -> str:
+    try:
+        encoded_path = path.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("API path must be ASCII") from exc
+    if (
+        not path.startswith("/")
+        or len(encoded_path) > MAX_API_TARGET_BYTES
+        or "%" in path
+        or "\\" in path
+        or any(byte < 33 or byte == 127 for byte in encoded_path)
+    ):
+        raise ValueError("API path is invalid")
+    if path == "/dashboard.json":
+        return "/dashboard.json" + canonical_api_query(raw_query, "none")
+    if not path.startswith("/api/v1/"):
+        raise ValueError("API route is not allowed")
+
+    parts = path.split("/")
+    if any(not part for part in parts[1:]):
+        raise ValueError("API path contains an empty segment")
+    route = tuple(parts[3:])
+    target: str
+    query_mode = "none"
+    if route in {("overview",), ("governance",), ("idena", "snapshot")}:
+        target = "/api/v1/" + "/".join(route)
+    elif route in {("fork", "blocks"), ("sharechain", "shares")}:
+        target = "/api/v1/" + "/".join(route)
+        query_mode = "hash-page"
+    elif route == ("bitcoin", "blocks"):
+        target = "/api/v1/bitcoin/blocks"
+        query_mode = "start-height"
+    elif len(route) == 3 and route[:2] in {
+        ("fork", "heights"),
+        ("bitcoin", "heights"),
+    }:
+        height = canonical_uint(route[2], "block height", MAX_UINT64)
+        target = f"/api/v1/{route[0]}/heights/{height}"
+    elif len(route) == 3 and route[:2] in {
+        ("fork", "blocks"),
+        ("fork", "transactions"),
+        ("bitcoin", "blocks"),
+        ("bitcoin", "transactions"),
+        ("sharechain", "shares"),
+    }:
+        identifier = canonical_hash(route[2], "explorer identifier")
+        target = f"/api/v1/{route[0]}/{route[1]}/{identifier}"
+    elif (
+        len(route) == 4
+        and route[:2] == ("fork", "blocks")
+        and route[3] == "transactions"
+    ):
+        identifier = canonical_hash(route[2], "fork block hash")
+        target = f"/api/v1/fork/blocks/{identifier}/transactions"
+        query_mode = "numeric-page"
+    elif (
+        len(route) == 4
+        and route[:2] == ("bitcoin", "blocks")
+        and route[3] == "transactions"
+    ):
+        identifier = canonical_hash(route[2], "Bitcoin block hash")
+        target = f"/api/v1/bitcoin/blocks/{identifier}/transactions"
+        query_mode = "numeric-cursor"
+    elif (
+        len(route) == 4
+        and route[:2] == ("bitcoin", "transactions")
+        and route[3] == "outspends"
+    ):
+        identifier = canonical_hash(route[2], "Bitcoin transaction id")
+        target = f"/api/v1/bitcoin/transactions/{identifier}/outspends"
+    elif len(route) in {3, 4} and route[:2] in {
+        ("fork", "addresses"),
+        ("bitcoin", "addresses"),
+    }:
+        address = canonical_bitcoin_address(route[2])
+        target = f"/api/v1/{route[0]}/addresses/{address}"
+        if len(route) == 4:
+            if route[3] not in {"transactions", "utxos"}:
+                raise ValueError("address API resource is not allowed")
+            target += f"/{route[3]}"
+            if route[3] == "transactions":
+                query_mode = "numeric-page" if route[0] == "fork" else "hash-cursor"
+            elif route[0] == "fork":
+                query_mode = "numeric-page"
+    else:
+        raise ValueError("API route is not allowed")
+    return target + canonical_api_query(raw_query, query_mode)
+
+
 def load_token(path: Path) -> str:
     try:
         metadata = path.lstat()
@@ -199,11 +398,19 @@ class DashboardUiHandler(BaseHTTPRequestHandler):
             self._json_error(421, "request authority is not local", send_body=send_body)
             return
         parsed = urlsplit(self.path)
+        if parsed.scheme or parsed.netloc or parsed.fragment:
+            self._json_error(400, "invalid request target", send_body=send_body)
+            return
         if parsed.path == "/dashboard.json" or parsed.path.startswith("/api/v1/"):
             if not self._api_fetch_is_same_origin():
                 self._json_error(403, "cross-origin API request rejected", send_body=send_body)
                 return
-            self._proxy_api(parsed.path, parsed.query, send_body)
+            try:
+                target = canonical_api_target(parsed.path, parsed.query)
+            except ValueError:
+                self._json_error(400, "invalid API request", send_body=send_body)
+                return
+            self._proxy_api(target, send_body)
             return
         self._serve_static(parsed.path, send_body)
 
@@ -236,35 +443,35 @@ class DashboardUiHandler(BaseHTTPRequestHandler):
             return False
         return not fetch_sites or fetch_sites[0].lower() in {"none", "same-origin"}
 
-    def _proxy_api(self, path: str, query: str, send_body: bool) -> None:
-        target = path + (f"?{query}" if query else "")
+    def _proxy_api(self, target: str, send_body: bool) -> None:
         connection = http.client.HTTPConnection(
             self.server.api_host,
             self.server.api_port,
             timeout=5,
         )
         try:
-            connection.request(
+            # canonical_api_target has already reduced the browser input to a
+            # bounded route grammar before any credential is attached.
+            connection.putrequest(
                 "GET" if send_body else "HEAD",
                 target,
-                headers={
-                    "Accept": "application/json",
-                    "X-PoHW-Dashboard-Token": self.server.api_token,
-                },
+                skip_accept_encoding=True,
             )
+            connection.putheader("Accept", "application/json")
+            connection.putheader("X-PoHW-Dashboard-Token", self.server.api_token)
+            connection.endheaders()
             response = connection.getresponse()
             declared_length = response.getheader("Content-Length")
-            if declared_length is not None and int(declared_length) > MAX_API_BYTES:
-                raise ValueError("upstream response is too large")
+            if declared_length is not None:
+                parsed_length = int(declared_length)
+                if not 0 <= parsed_length <= MAX_API_BYTES:
+                    raise ValueError("upstream response has an unsafe length")
             body = response.read(MAX_API_BYTES + 1) if send_body else b""
             if len(body) > MAX_API_BYTES:
                 raise ValueError("upstream response is too large")
             response_length = len(body) if send_body else int(declared_length or 0)
             self.send_response(response.status)
-            self.send_header(
-                "Content-Type",
-                response.getheader("Content-Type") or "application/json",
-            )
+            self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(response_length))
             self._send_security_headers()
