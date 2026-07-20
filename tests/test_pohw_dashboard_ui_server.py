@@ -24,10 +24,15 @@ SPEC.loader.exec_module(SERVER_MODULE)
 class FakeDashboardApiHandler(BaseHTTPRequestHandler):
     received_token: str | None = None
     received_path: str | None = None
+    received_target: str | None = None
 
     def do_GET(self) -> None:  # noqa: N802
         type(self).received_token = self.headers.get("X-PoHW-Dashboard-Token")
         type(self).received_path = self.path
+        encoded_target = self.headers.get("X-PoHW-Dashboard-Target-Hex")
+        type(self).received_target = (
+            bytes.fromhex(encoded_target).decode("ascii") if encoded_target else None
+        )
         body = json.dumps({"source": "live-test"}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -85,7 +90,10 @@ class DashboardUiServerTest(unittest.TestCase):
         self.assertEqual(
             FakeDashboardApiHandler.received_token, "test-dashboard-token"
         )
-        self.assertEqual(FakeDashboardApiHandler.received_path, "/dashboard.json")
+        self.assertEqual(
+            FakeDashboardApiHandler.received_path, "/internal/dashboard-proxy"
+        )
+        self.assertEqual(FakeDashboardApiHandler.received_target, "/dashboard.json")
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertEqual(response.headers["Content-Type"], "application/json")
 
@@ -150,11 +158,13 @@ class DashboardUiServerTest(unittest.TestCase):
             with self.subTest(path=path):
                 FakeDashboardApiHandler.received_token = None
                 FakeDashboardApiHandler.received_path = None
+                FakeDashboardApiHandler.received_target = None
                 status, payload = self.request_with_headers(path, {"Host": host})
                 self.assertEqual(status, 400)
                 self.assertEqual(payload, {"error": "invalid API request"})
                 self.assertIsNone(FakeDashboardApiHandler.received_token)
                 self.assertIsNone(FakeDashboardApiHandler.received_path)
+                self.assertIsNone(FakeDashboardApiHandler.received_target)
 
     def test_canonicalizes_allowed_dynamic_api_target(self) -> None:
         block_hash = "AB" * 32
@@ -167,8 +177,11 @@ class DashboardUiServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"source": "live-test"})
         self.assertEqual(
-            FakeDashboardApiHandler.received_path,
+            FakeDashboardApiHandler.received_target,
             f"/api/v1/fork/blocks/{block_hash.lower()}/transactions?cursor=7&limit=25",
+        )
+        self.assertEqual(
+            FakeDashboardApiHandler.received_path, "/internal/dashboard-proxy"
         )
 
     def test_accepts_the_documented_explorer_route_grammar(self) -> None:

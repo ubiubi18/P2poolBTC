@@ -1415,7 +1415,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let raw_target = parts.next().unwrap_or("");
-    let target = match parse_request_target(raw_target) {
+    let transport_target = match parse_request_target(raw_target) {
         Ok(target) => target,
         Err(_) => {
             return Ok(http_response(
@@ -1426,9 +1426,15 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             ));
         }
     };
-    let public_explorer_request =
-        method == "GET" && config.public_explorer && target.path.starts_with("/api/v1/");
-    if method != "OPTIONS" && !public_explorer_request && !request_is_authorized(request, config) {
+    let authenticated_proxy =
+        method == "GET" && transport_target.path == "/internal/dashboard-proxy";
+    let public_explorer_request = method == "GET"
+        && config.public_explorer
+        && !authenticated_proxy
+        && transport_target.path.starts_with("/api/v1/");
+    let protected_request_is_authorized = request_is_authorized(request, config)
+        && (!authenticated_proxy || config.api_token.is_some());
+    if method != "OPTIONS" && !public_explorer_request && !protected_request_is_authorized {
         return Ok(http_response(
             "401 Unauthorized",
             "application/json",
@@ -1452,6 +1458,14 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
         }
     } else {
         None
+    };
+    let target = if authenticated_proxy {
+        match dashboard_proxy_target(request) {
+            Ok(target) => target,
+            Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+        }
+    } else {
+        transport_target
     };
     match (method, target.path.as_str()) {
         ("OPTIONS", _) => Ok(http_response(
@@ -2125,6 +2139,29 @@ fn parse_request_target(raw: &str) -> Result<ParsedRequestTarget> {
         path: path.to_string(),
         query,
     })
+}
+
+fn dashboard_proxy_target(request: &str) -> Result<ParsedRequestTarget> {
+    let encoded = request_header(request, "x-pohw-dashboard-target-hex")
+        .map_err(|_| anyhow::anyhow!("duplicate dashboard proxy target header"))?
+        .context("dashboard proxy target header is missing")?;
+    if encoded.is_empty()
+        || encoded.len() > 4096
+        || encoded.len() % 2 != 0
+        || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("dashboard proxy target encoding is invalid");
+    }
+    let decoded = hex::decode(encoded).context("dashboard proxy target is not hexadecimal")?;
+    if decoded.len() > 2048 || decoded.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
+        bail!("dashboard proxy target is unsafe");
+    }
+    let raw = std::str::from_utf8(&decoded).context("dashboard proxy target is not UTF-8")?;
+    let target = parse_request_target(raw)?;
+    if target.path != "/dashboard.json" && !target.path.starts_with("/api/v1/") {
+        bail!("dashboard proxy target route is not allowed");
+    }
+    Ok(target)
 }
 
 fn explorer_pagination(query: &BTreeMap<String, String>) -> Result<(Option<String>, usize)> {
@@ -3213,6 +3250,70 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 401 Unauthorized"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dashboard_proxy_requires_authentication_and_an_allowed_target() {
+        let datadir = temp_datadir("dashboard_proxy_requires_authentication");
+        let mut config = test_config(datadir.clone());
+        config.public_explorer = true;
+        let overview_target = hex::encode("/api/v1/overview");
+
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 401 Unauthorized"));
+
+        config.api_token = Some("secret".to_string());
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"apiVersion\": \"pohw-explorer-v1\""));
+
+        for target in [
+            hex::encode("/health"),
+            "not-hexadecimal".to_string(),
+            String::new(),
+        ] {
+            let response = handle_http_request(
+                &format!(
+                    "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {target}\r\n\r\n"
+                ),
+                &config,
+            )
+            .await
+            .unwrap();
+            assert!(String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 400 Bad Request"));
+        }
+
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 400 Bad Request"));
         fs::remove_dir_all(datadir).unwrap();
     }
 

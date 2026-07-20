@@ -27,6 +27,8 @@ MAX_API_QUERY_BYTES = 512
 MAX_EXPLORER_CURSOR = 10_000_000
 MAX_PAGE_LIMIT = 100
 MAX_UINT64 = (1 << 64) - 1
+UPSTREAM_PROXY_PATH = "/internal/dashboard-proxy"
+UPSTREAM_TARGET_HEADER = "X-PoHW-Dashboard-Target-Hex"
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 ASCII_ALNUM = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 SECURITY_HEADERS = {
@@ -453,12 +455,13 @@ class DashboardUiHandler(BaseHTTPRequestHandler):
             # canonical_api_target has already reduced the browser input to a
             # bounded route grammar before any credential is attached.
             connection.putrequest(
-                "GET" if send_body else "HEAD",
-                target,
+                "GET",
+                UPSTREAM_PROXY_PATH,
                 skip_accept_encoding=True,
             )
             connection.putheader("Accept", "application/json")
             connection.putheader("X-PoHW-Dashboard-Token", self.server.api_token)
+            connection.putheader(UPSTREAM_TARGET_HEADER, target.encode("ascii").hex())
             connection.endheaders()
             response = connection.getresponse()
             declared_length = response.getheader("Content-Length")
@@ -466,10 +469,10 @@ class DashboardUiHandler(BaseHTTPRequestHandler):
                 parsed_length = int(declared_length)
                 if not 0 <= parsed_length <= MAX_API_BYTES:
                     raise ValueError("upstream response has an unsafe length")
-            body = response.read(MAX_API_BYTES + 1) if send_body else b""
+            body = response.read(MAX_API_BYTES + 1)
             if len(body) > MAX_API_BYTES:
                 raise ValueError("upstream response is too large")
-            response_length = len(body) if send_body else int(declared_length or 0)
+            response_length = len(body)
             self.send_response(response.status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
