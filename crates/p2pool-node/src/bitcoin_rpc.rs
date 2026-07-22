@@ -38,7 +38,6 @@ pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_PARENT_HASH: &str =
     "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6";
 pub(crate) const POHW_EXPERIMENT_1_REPLAY_SIGHASH_VERSION_BIT: u32 = 1 << 30;
 pub(crate) const POHW_EXPERIMENT_1_BOOTSTRAP_HANDOFF_HASHRATE_HPS: u64 = 1_000_000_000_000_000;
-
 #[derive(Debug, Clone)]
 pub struct BitcoinRpcClient {
     url: Url,
@@ -81,6 +80,28 @@ pub struct PohwExperimentInfoResponse {
     pub replay_sighash_domain: String,
     pub bootstrap_handoff_hashrate_hps: u64,
     pub handoff_active: bool,
+    #[serde(default)]
+    pub idena_authorization_consensus_enforced: bool,
+    #[serde(default)]
+    pub idena_authorization_activation_height: Option<u64>,
+    #[serde(default)]
+    pub idena_authorization_expiry_height: Option<u64>,
+    #[serde(default)]
+    pub idena_authorization_expiry_mtp: Option<u64>,
+    #[serde(default)]
+    pub idena_authorization_activation_id: Option<String>,
+    #[serde(default)]
+    pub idena_authorization_parent_height: Option<u64>,
+    #[serde(default)]
+    pub idena_authorization_parent_hash: Option<String>,
+    #[serde(default)]
+    pub idena_authorization_policy_hash: Option<String>,
+    #[serde(default)]
+    pub idena_authorization_root: Option<String>,
+    #[serde(default)]
+    pub idena_authorized_identity_count: Option<u32>,
+    #[serde(default)]
+    pub idena_authorization_max_proof_depth: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +162,18 @@ pub struct BitcoinMiningJobTemplate {
     pub default_witness_commitment: Option<String>,
     #[serde(default)]
     pub pohw_replay_marker: Option<String>,
+    #[serde(default)]
+    pub pohw_idena_authorization: Option<BitcoinConsensusIdentityRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinConsensusIdentityRequirement {
+    pub activation_id: String,
+    pub policy_hash: String,
+    pub authorization_root: String,
+    pub expiry_height: u64,
+    pub expiry_mtp: u64,
+    pub parent_mtp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +202,20 @@ struct GetBlockTemplateResponse {
     default_witness_commitment: Option<String>,
     #[serde(default)]
     pohw_replay_marker: Option<String>,
+    #[serde(default)]
+    pohw_idena_authorization_required: Option<bool>,
+    #[serde(default)]
+    pohw_idena_authorization_activation_id: Option<String>,
+    #[serde(default)]
+    pohw_idena_authorization_policy_hash: Option<String>,
+    #[serde(default)]
+    pohw_idena_authorization_root: Option<String>,
+    #[serde(default)]
+    pohw_idena_authorization_expiry_height: Option<u64>,
+    #[serde(default)]
+    pohw_idena_authorization_expiry_mtp: Option<u64>,
+    #[serde(default)]
+    pohw_idena_authorization_parent_mtp: Option<u64>,
     #[serde(default)]
     mintime: Option<u32>,
     #[serde(default)]
@@ -1280,6 +1327,7 @@ fn mining_job_template_from_getblocktemplate(
         .as_deref()
         .map(normalize_pohw_replay_marker_script_hex)
         .transpose()?;
+    let pohw_idena_authorization = normalize_consensus_identity_requirement(block_template)?;
     Ok(BitcoinMiningJobTemplate {
         version: block_template.version,
         previous_block_hash,
@@ -1291,7 +1339,87 @@ fn mining_job_template_from_getblocktemplate(
         transactions: transaction_data,
         default_witness_commitment,
         pohw_replay_marker,
+        pohw_idena_authorization,
     })
+}
+
+fn normalize_consensus_identity_requirement(
+    block_template: &GetBlockTemplateResponse,
+) -> Result<Option<BitcoinConsensusIdentityRequirement>> {
+    let fields_present = [
+        block_template
+            .pohw_idena_authorization_activation_id
+            .is_some(),
+        block_template
+            .pohw_idena_authorization_policy_hash
+            .is_some(),
+        block_template.pohw_idena_authorization_root.is_some(),
+        block_template
+            .pohw_idena_authorization_expiry_height
+            .is_some(),
+        block_template.pohw_idena_authorization_expiry_mtp.is_some(),
+        block_template.pohw_idena_authorization_parent_mtp.is_some(),
+    ];
+    match block_template.pohw_idena_authorization_required {
+        None | Some(false) if fields_present.iter().all(|present| !present) => Ok(None),
+        None | Some(false) => {
+            bail!("getblocktemplate returned Idena authorization metadata without requiring it")
+        }
+        Some(true) if fields_present.iter().any(|present| !present) => {
+            bail!("getblocktemplate requires Idena authorization but omitted policy metadata")
+        }
+        Some(true) => {
+            let activation_id = normalize_hash_hex(
+                "getblocktemplate Idena authorization activation ID",
+                block_template
+                    .pohw_idena_authorization_activation_id
+                    .as_deref()
+                    .expect("presence checked"),
+            )?;
+            let policy_hash = normalize_hash_hex(
+                "getblocktemplate Idena authorization policy hash",
+                block_template
+                    .pohw_idena_authorization_policy_hash
+                    .as_deref()
+                    .expect("presence checked"),
+            )?;
+            let authorization_root = normalize_hash_hex(
+                "getblocktemplate Idena authorization root",
+                block_template
+                    .pohw_idena_authorization_root
+                    .as_deref()
+                    .expect("presence checked"),
+            )?;
+            let expiry_height = block_template
+                .pohw_idena_authorization_expiry_height
+                .expect("presence checked");
+            let expiry_mtp = block_template
+                .pohw_idena_authorization_expiry_mtp
+                .expect("presence checked");
+            let parent_mtp = block_template
+                .pohw_idena_authorization_parent_mtp
+                .expect("presence checked");
+            if block_template.height > expiry_height {
+                bail!(
+                    "getblocktemplate height {} exceeds Idena authorization expiry height {expiry_height}",
+                    block_template.height
+                );
+            }
+            if parent_mtp >= expiry_mtp {
+                bail!(
+                    "getblocktemplate parent MTP {parent_mtp} reaches Idena authorization MTP expiry {expiry_mtp}"
+                );
+            }
+            Ok(Some(BitcoinConsensusIdentityRequirement {
+                activation_id,
+                policy_hash,
+                authorization_root,
+                expiry_height,
+                expiry_mtp,
+                parent_mtp,
+            }))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1733,6 +1861,13 @@ mod tests {
             coinbasevalue: Some(3_125_000_000),
             default_witness_commitment: None,
             pohw_replay_marker: None,
+            pohw_idena_authorization_required: None,
+            pohw_idena_authorization_activation_id: None,
+            pohw_idena_authorization_policy_hash: None,
+            pohw_idena_authorization_root: None,
+            pohw_idena_authorization_expiry_height: None,
+            pohw_idena_authorization_expiry_mtp: None,
+            pohw_idena_authorization_parent_mtp: None,
             mintime: None,
             mutable: Vec::new(),
             transactions: Some(Vec::new()),
@@ -2074,6 +2209,58 @@ mod tests {
             ]
         );
         assert_eq!(material.default_witness_commitment, None);
+    }
+
+    #[test]
+    fn mining_job_template_requires_complete_fresh_consensus_identity_metadata() {
+        let mut block_template = gbt(&"11".repeat(32), 1_700_000_000, "207fffff");
+        block_template.pohw_idena_authorization_required = Some(true);
+        block_template.pohw_idena_authorization_activation_id = Some("11".repeat(32));
+        block_template.pohw_idena_authorization_policy_hash = Some("22".repeat(32));
+        block_template.pohw_idena_authorization_root = Some("33".repeat(32));
+        block_template.pohw_idena_authorization_expiry_height = Some(130);
+        block_template.pohw_idena_authorization_expiry_mtp = Some(1_700_000_100);
+        block_template.pohw_idena_authorization_parent_mtp = Some(1_699_999_999);
+
+        let material = mining_job_template_from_getblocktemplate(&block_template).unwrap();
+        assert_eq!(
+            material.pohw_idena_authorization,
+            Some(BitcoinConsensusIdentityRequirement {
+                activation_id: "11".repeat(32),
+                policy_hash: "22".repeat(32),
+                authorization_root: "33".repeat(32),
+                expiry_height: 130,
+                expiry_mtp: 1_700_000_100,
+                parent_mtp: 1_699_999_999,
+            })
+        );
+
+        block_template.pohw_idena_authorization_root = None;
+        assert!(mining_job_template_from_getblocktemplate(&block_template)
+            .unwrap_err()
+            .to_string()
+            .contains("omitted policy metadata"));
+
+        block_template.pohw_idena_authorization_root = Some("33".repeat(32));
+        block_template.pohw_idena_authorization_expiry_height = Some(122);
+        assert!(mining_job_template_from_getblocktemplate(&block_template)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds Idena authorization expiry"));
+
+        block_template.pohw_idena_authorization_expiry_height = Some(130);
+        block_template.pohw_idena_authorization_parent_mtp =
+            block_template.pohw_idena_authorization_expiry_mtp;
+        assert!(mining_job_template_from_getblocktemplate(&block_template)
+            .unwrap_err()
+            .to_string()
+            .contains("reaches Idena authorization MTP expiry"));
+
+        block_template.pohw_idena_authorization_required = Some(false);
+        assert!(mining_job_template_from_getblocktemplate(&block_template)
+            .unwrap_err()
+            .to_string()
+            .contains("metadata without requiring it"));
     }
 
     #[test]

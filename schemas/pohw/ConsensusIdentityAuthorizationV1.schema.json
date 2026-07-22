@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/ConsensusIdentityAuthorizationV1.schema.json",
+  "title": "ConsensusIdentityAuthorizationV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_hash", "leaf", "proof", "block_signature_hex"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "policy_hash": { "$ref": "#/$defs/hash" },
+    "leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idena_address", "identity_state", "mining_pubkey_xonly", "registry_commitment", "registration_sequence", "registration_block", "registration_epoch"],
+      "properties": {
+        "idena_address": { "$ref": "#/$defs/address" },
+        "identity_state": { "enum": ["Newbie", "Verified", "Human"] },
+        "mining_pubkey_xonly": { "$ref": "#/$defs/hash" },
+        "registry_commitment": { "$ref": "#/$defs/hash" },
+        "registration_sequence": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "registration_block": { "type": "integer", "minimum": 1 },
+        "registration_epoch": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leaf_index", "siblings"],
+      "properties": {
+        "leaf_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "siblings": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/hash" } }
+      }
+    },
+    "block_signature_hex": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "address": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" }
+  }
+}

@@ -1,0 +1,1552 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6109639..3a6f11e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -57,6 +57,18 @@ project(BitcoinCore
+   LANGUAGES NONE
+ )
+ 
++# Experiment 2 builds are bound to the immutable ecosystem activation manifest
++# at configure time. An all-zero default keeps ordinary developer and upstream
++# test builds usable, but the pohw2 runtime refuses to start with that value.
++set(POHW2_ACTIVATION_ID "" CACHE STRING "Experiment 2 activation manifest id (64 lowercase hex characters)")
++if(POHW2_ACTIVATION_ID STREQUAL "")
++  set(POHW2_ACTIVATION_ID "0000000000000000000000000000000000000000000000000000000000000000")
++endif()
++string(LENGTH "${POHW2_ACTIVATION_ID}" POHW2_ACTIVATION_ID_LENGTH)
++if(NOT POHW2_ACTIVATION_ID_LENGTH EQUAL 64 OR POHW2_ACTIVATION_ID MATCHES "[^0-9a-f]")
++  message(FATAL_ERROR "POHW2_ACTIVATION_ID must be exactly 64 lowercase hexadecimal characters")
++endif()
++
+ set(CLIENT_VERSION_STRING ${PROJECT_VERSION})
+ if(CLIENT_VERSION_RC GREATER 0)
+   string(APPEND CLIENT_VERSION_STRING "rc${CLIENT_VERSION_RC}")
+diff --git a/cmake/bitcoin-build-config.h.in b/cmake/bitcoin-build-config.h.in
+index bf3ddcd..9a469d3 100644
+--- a/cmake/bitcoin-build-config.h.in
++++ b/cmake/bitcoin-build-config.h.in
+@@ -8,6 +8,9 @@
+ /* Version Build */
+ #define CLIENT_VERSION_BUILD @CLIENT_VERSION_BUILD@
+ 
++/* Immutable Experiment 2 ecosystem activation manifest id. */
++#define POHW2_ACTIVATION_ID "@POHW2_ACTIVATION_ID@"
++
+ /* Version is release */
+ #define CLIENT_VERSION_IS_RELEASE @CLIENT_VERSION_IS_RELEASE@
+ 
+diff --git a/src/bitcoin-cli.cpp b/src/bitcoin-cli.cpp
+index 7b879cb..39fd87d 100644
+--- a/src/bitcoin-cli.cpp
++++ b/src/bitcoin-cli.cpp
+@@ -429,6 +429,8 @@ private:
+         switch (gArgs.GetChainType()) {
+         case ChainType::POHW:
+             return " pohw";
++        case ChainType::POHW2:
++            return " pohw2";
+         case ChainType::TESTNET4:
+             return " testnet4";
+         case ChainType::TESTNET:
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 31f6f73..a33c743 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -64,6 +64,11 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+                 throw std::runtime_error("pohw-replay activation height must be greater than zero");
+             }
+             options.pohw_replay_marker_activation_height = *height;
++        } else if (deployment_name == "pohw-identity-auth") {
++            if (*height == 0) {
++                throw std::runtime_error("pohw-identity-auth activation height must be greater than zero");
++            }
++            options.pohw_identity_auth_activation_height = *height;
+         } else if (const auto buried_deployment = GetBuriedDeployment(deployment_name)) {
+             options.activation_heights[*buried_deployment] = *height;
+         } else {
+@@ -71,6 +76,41 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+         }
+     }
+ 
++    if (const auto value{args.GetArg("-pohwidentityauthparent")}) {
++        const auto hash{uint256::FromHex(*value)};
++        if (!hash) throw std::runtime_error("-pohwidentityauthparent must be exactly 64 hexadecimal characters");
++        options.pohw_identity_auth_parent_hash = *hash;
++    }
++    if (const auto value{args.GetIntArg("-pohwidentityauthexpiryheight")}) {
++        if (*value < 1 || *value >= std::numeric_limits<int>::max()) {
++            throw std::runtime_error("-pohwidentityauthexpiryheight is out of range");
++        }
++        options.pohw_identity_auth_expiry_height = *value;
++    }
++    if (const auto value{args.GetIntArg("-pohwidentityauthfinalizedmtp")}) {
++        if (*value < 0) throw std::runtime_error("-pohwidentityauthfinalizedmtp cannot be negative");
++        options.pohw_identity_auth_finalized_mtp = *value;
++    }
++    if (const auto value{args.GetIntArg("-pohwidentityauthexpirymtp")}) {
++        if (*value < 1) throw std::runtime_error("-pohwidentityauthexpirymtp must be positive");
++        options.pohw_identity_auth_expiry_mtp = *value;
++    }
++    if (options.pohw_identity_auth_activation_height) {
++        if (!options.pohw_identity_auth_parent_hash) {
++            throw std::runtime_error("pohw-identity-auth regtest activation requires -pohwidentityauthparent");
++        }
++        const int expiry_height{options.pohw_identity_auth_expiry_height.value_or(
++            *options.pohw_identity_auth_activation_height + 100)};
++        if (expiry_height < *options.pohw_identity_auth_activation_height) {
++            throw std::runtime_error("pohw-identity-auth expiry height precedes activation");
++        }
++        const int64_t finalized_mtp{options.pohw_identity_auth_finalized_mtp.value_or(0)};
++        const int64_t expiry_mtp{options.pohw_identity_auth_expiry_mtp.value_or(std::numeric_limits<int64_t>::max())};
++        if (expiry_mtp <= finalized_mtp) {
++            throw std::runtime_error("pohw-identity-auth expiry MTP must be later than finalized MTP");
++        }
++    }
++
+     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {
+         std::vector<std::string> vDeploymentParams = SplitString(strDeployment, ':');
+         if (vDeploymentParams.size() < 3 || 4 < vDeploymentParams.size()) {
+@@ -126,6 +166,8 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+         return CChainParams::Main();
+     case ChainType::POHW:
+         return CChainParams::PoHW();
++    case ChainType::POHW2:
++        return CChainParams::PoHW2();
+     case ChainType::TESTNET:
+         return CChainParams::TestNet();
+     case ChainType::TESTNET4:
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index cb43547..01944fb 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -15,9 +15,14 @@
+ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+ {
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-allowexperimentalpohw2", "Allow the inactive consensus-identity successor fixture (pohw2). This profile contains public test keys and is not a public network.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, pohw-replay). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, pohw-replay, pohw-identity-auth). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-pohwidentityauthparent=<hex>", "Pinned parent hash for regtest pohw-identity-auth activation", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-pohwidentityauthexpiryheight=<n>", "Last regtest height accepted by the test Idena authorization snapshot", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-pohwidentityauthfinalizedmtp=<n>", "Earliest regtest median time accepted by the test Idena authorization snapshot", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-pohwidentityauthexpirymtp=<n>", "First regtest median time rejected as a stale Idena authorization snapshot", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+@@ -45,6 +50,8 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const ChainType chain)
+         return std::make_unique<CBaseChainParams>("", 8332);
+     case ChainType::POHW:
+         return std::make_unique<CBaseChainParams>("pohw-experiment-1", pohw::experiment1::RPC_PORT);
++    case ChainType::POHW2:
++        return std::make_unique<CBaseChainParams>("pohw-experiment-2", pohw::experiment2::RPC_PORT);
+     case ChainType::TESTNET:
+         return std::make_unique<CBaseChainParams>("testnet3", 18332);
+     case ChainType::TESTNET4:
+diff --git a/src/chainparamsbase.h b/src/chainparamsbase.h
+index fa17306..97f6e0b 100644
+--- a/src/chainparamsbase.h
++++ b/src/chainparamsbase.h
+@@ -52,6 +52,6 @@ const CBaseChainParams& BaseParams();
+ void SelectBaseParams(ChainType chain);
+ 
+ /** List of possible chain / network names  */
+-#define LIST_CHAIN_NAMES "main, pohw, test, testnet4, signet, regtest"
++#define LIST_CHAIN_NAMES "main, pohw, pohw2, test, testnet4, signet, regtest"
+ 
+ #endif // BITCOIN_CHAINPARAMSBASE_H
+diff --git a/src/common/args.cpp b/src/common/args.cpp
+index c7cbaf9..5709c94 100644
+--- a/src/common/args.cpp
++++ b/src/common/args.cpp
+@@ -156,6 +156,7 @@ std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
+     // Section names to be recognized in the config file.
+     static const std::set<std::string> available_sections{
+         ChainTypeToString(ChainType::POHW),
++        ChainTypeToString(ChainType::POHW2),
+         ChainTypeToString(ChainType::REGTEST),
+         ChainTypeToString(ChainType::SIGNET),
+         ChainTypeToString(ChainType::TESTNET),
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 1e48b32..2ba24e9 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -13,6 +13,7 @@
+ #include <chrono>
+ #include <limits>
+ #include <map>
++#include <string>
+ #include <vector>
+ 
+ namespace Consensus {
+@@ -121,6 +122,19 @@ struct Params {
+     uint256 pohw_replay_sighash_parent_hash{};
+     uint256 pohw_legacy_pow_limit{};
+     uint64_t pohw_bootstrap_handoff_hashrate_hps{0};
++    /** Experiment 2 finalized-Idena authorization; inert on all other chains. */
++    bool pohw_identity_auth{false};
++    std::array<unsigned char, 32> pohw_identity_auth_activation_id{};
++    int pohw_identity_auth_activation_height{std::numeric_limits<int>::max()};
++    int pohw_identity_auth_expiry_height{std::numeric_limits<int>::max()};
++    int64_t pohw_identity_auth_finalized_mtp{0};
++    int64_t pohw_identity_auth_expiry_mtp{std::numeric_limits<int64_t>::max()};
++    uint256 pohw_identity_auth_parent_hash{};
++    std::array<unsigned char, 32> pohw_identity_auth_policy_hash{};
++    std::array<unsigned char, 32> pohw_identity_auth_root{};
++    uint32_t pohw_identity_auth_identity_count{0};
++    uint8_t pohw_identity_auth_max_proof_depth{0};
++    bool pohw_identity_auth_require_share_work{false};
+     bool fPowAllowMinDifficultyBlocks;
+     /**
+       * Enforce BIP94 timewarp attack mitigation. On testnet4 this also enforces
+diff --git a/src/init.cpp b/src/init.cpp
+index fb4b8fa..3f63f8c 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -63,6 +63,7 @@
+ #include <policy/fees/block_policy_estimator_args.h>
+ #include <policy/policy.h>
+ #include <policy/settings.h>
++#include <pohw/experiment.h>
+ #include <protocol.h>
+ #include <rpc/blockchain.h>
+ #include <rpc/register.h>
+@@ -938,6 +939,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+     // specified in default section of config file, but not overridden
+     // on the command line or in this chain's section of the config file.
+     ChainType chain = args.GetChainType();
++    if (chain == ChainType::POHW2 && !args.GetBoolArg("-allowexperimentalpohw2", false)) {
++        return InitError(_("The pohw2 profile is an inactive fixture with public test keys. Pass -allowexperimentalpohw2 only for isolated local consensus tests."));
++    }
++    if (chain == ChainType::POHW2 && !pohw::experiment2::HasConfiguredActivationId()) {
++        return InitError(_("The pohw2 binary is not bound to an activation manifest. Reconfigure with -DPOHW2_ACTIVATION_ID=<64 lowercase hex characters>."));
++    }
+     if (chain == ChainType::SIGNET) {
+         LogInfo("Signet derived magic (message start): %s", HexStr(chainparams.MessageStart()));
+     }
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 10552ea..b3ee186 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -214,7 +214,7 @@ public:
+  * transaction, mempool, wallet, and block validation otherwise remain the
+  * upstream Bitcoin Core implementation.
+  */
+-class CPoHWParams final : public CMainParams {
++class CPoHWParams : public CMainParams {
+ public:
+     CPoHWParams()
+     {
+@@ -248,6 +248,38 @@ public:
+     }
+ };
+ 
++class CPoHW2Params final : public CPoHWParams {
++public:
++    CPoHW2Params()
++    {
++        m_chain_type = ChainType::POHW2;
++        consensus.pohw_identity_auth = true;
++        const auto activation_id{ParseHex(pohw::experiment2::ACTIVATION_ID)};
++        assert(activation_id.size() == consensus.pohw_identity_auth_activation_id.size());
++        std::ranges::copy(activation_id, consensus.pohw_identity_auth_activation_id.begin());
++        consensus.pohw_identity_auth_activation_height = pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT;
++        consensus.pohw_identity_auth_expiry_height = pohw::experiment2::IDENTITY_AUTH_EXPIRY_HEIGHT;
++        consensus.pohw_identity_auth_finalized_mtp = pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP;
++        consensus.pohw_identity_auth_expiry_mtp = pohw::experiment2::IDENTITY_AUTH_EXPIRY_MTP;
++        consensus.pohw_identity_auth_parent_hash = uint256{pohw::experiment2::IDENTITY_AUTH_PARENT_HASH};
++        const auto policy_hash{ParseHex(pohw::experiment2::IDENTITY_AUTH_POLICY_HASH)};
++        const auto authorization_root{ParseHex(pohw::experiment2::IDENTITY_AUTH_ROOT)};
++        assert(policy_hash.size() == consensus.pohw_identity_auth_policy_hash.size());
++        assert(authorization_root.size() == consensus.pohw_identity_auth_root.size());
++        std::ranges::copy(policy_hash, consensus.pohw_identity_auth_policy_hash.begin());
++        std::ranges::copy(authorization_root, consensus.pohw_identity_auth_root.begin());
++        consensus.pohw_identity_auth_identity_count = pohw::experiment2::AUTHORIZED_IDENTITY_COUNT;
++        consensus.pohw_identity_auth_max_proof_depth = pohw::experiment2::MAX_PROOF_DEPTH;
++        consensus.pohw_identity_auth_require_share_work = true;
++
++        m_legacy_block_file_message_starts.push_back(pchMessageStart);
++        std::ranges::copy(pohw::experiment2::MESSAGE_START, pchMessageStart.begin());
++        nDefaultPort = pohw::experiment2::P2P_PORT;
++        vSeeds.clear();
++        vFixedSeeds.clear();
++    }
++};
++
+ /**
+  * Testnet (v3): public test network which is reset from time to time.
+  */
+@@ -627,6 +659,26 @@ public:
+             consensus.pohw_replay_marker_activation_height = *opts.pohw_replay_marker_activation_height;
+             consensus.pohw_replay_sighash_activation_height = *opts.pohw_replay_marker_activation_height;
+         }
++        if (opts.pohw_identity_auth_activation_height) {
++            consensus.pohw_identity_auth = true;
++            consensus.pohw_identity_auth_activation_id.fill(0xff);
++            consensus.pohw_identity_auth_activation_height = *opts.pohw_identity_auth_activation_height;
++            consensus.pohw_identity_auth_expiry_height = opts.pohw_identity_auth_expiry_height.value_or(
++                *opts.pohw_identity_auth_activation_height + 100);
++            consensus.pohw_identity_auth_finalized_mtp = opts.pohw_identity_auth_finalized_mtp.value_or(0);
++            consensus.pohw_identity_auth_expiry_mtp = opts.pohw_identity_auth_expiry_mtp.value_or(
++                std::numeric_limits<int64_t>::max());
++            consensus.pohw_identity_auth_parent_hash = *opts.pohw_identity_auth_parent_hash;
++            const auto policy_hash{ParseHex(pohw::experiment2::IDENTITY_AUTH_POLICY_HASH)};
++            const auto authorization_root{ParseHex(pohw::experiment2::IDENTITY_AUTH_ROOT)};
++            assert(policy_hash.size() == consensus.pohw_identity_auth_policy_hash.size());
++            assert(authorization_root.size() == consensus.pohw_identity_auth_root.size());
++            std::ranges::copy(policy_hash, consensus.pohw_identity_auth_policy_hash.begin());
++            std::ranges::copy(authorization_root, consensus.pohw_identity_auth_root.begin());
++            consensus.pohw_identity_auth_identity_count = pohw::experiment2::AUTHORIZED_IDENTITY_COUNT;
++            consensus.pohw_identity_auth_max_proof_depth = pohw::experiment2::MAX_PROOF_DEPTH;
++            consensus.pohw_identity_auth_require_share_work = true;
++        }
+ 
+         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = 0;
+@@ -757,6 +809,11 @@ std::unique_ptr<const CChainParams> CChainParams::PoHW()
+     return std::make_unique<const CPoHWParams>();
+ }
+ 
++std::unique_ptr<const CChainParams> CChainParams::PoHW2()
++{
++    return std::make_unique<const CPoHW2Params>();
++}
++
+ std::unique_ptr<const CChainParams> CChainParams::TestNet()
+ {
+     return std::make_unique<const CTestNetParams>();
+@@ -782,6 +839,7 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
+ {
+     const auto mainnet_msg = CChainParams::Main()->MessageStart();
+     const auto pohw_msg = CChainParams::PoHW()->MessageStart();
++    const auto pohw2_msg = CChainParams::PoHW2()->MessageStart();
+     const auto testnet_msg = CChainParams::TestNet()->MessageStart();
+     const auto testnet4_msg = CChainParams::TestNet4()->MessageStart();
+     const auto regtest_msg = CChainParams::RegTest({})->MessageStart();
+@@ -791,6 +849,8 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
+         return ChainType::MAIN;
+     } else if (std::ranges::equal(message, pohw_msg)) {
+         return ChainType::POHW;
++    } else if (std::ranges::equal(message, pohw2_msg)) {
++        return ChainType::POHW2;
+     } else if (std::ranges::equal(message, testnet_msg)) {
+         return ChainType::TESTNET;
+     } else if (std::ranges::equal(message, testnet4_msg)) {
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 3259ef3..8d27a8c 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -161,6 +161,11 @@ public:
+         std::unordered_map<Consensus::DeploymentPos, VersionBitsParameters> version_bits_parameters{};
+         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
+         std::optional<int> pohw_replay_marker_activation_height{};
++        std::optional<int> pohw_identity_auth_activation_height{};
++        std::optional<int> pohw_identity_auth_expiry_height{};
++        std::optional<int64_t> pohw_identity_auth_finalized_mtp{};
++        std::optional<int64_t> pohw_identity_auth_expiry_mtp{};
++        std::optional<uint256> pohw_identity_auth_parent_hash{};
+         bool fastprune{false};
+         bool enforce_bip94{false};
+     };
+@@ -169,6 +174,7 @@ public:
+     static std::unique_ptr<const CChainParams> SigNet(const SigNetOptions& options);
+     static std::unique_ptr<const CChainParams> Main();
+     static std::unique_ptr<const CChainParams> PoHW();
++    static std::unique_ptr<const CChainParams> PoHW2();
+     static std::unique_ptr<const CChainParams> TestNet();
+     static std::unique_ptr<const CChainParams> TestNet4();
+ 
+diff --git a/src/node/miner.cpp b/src/node/miner.cpp
+index 5ac592b..34069f3 100644
+--- a/src/node/miner.cpp
++++ b/src/node/miner.cpp
+@@ -235,7 +235,13 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
+ 
+     if (m_options.test_block_validity) {
+         // if nHeight <= 16, and include_dummy_extranonce=false this will fail due to bad-cb-length.
+-        if (BlockValidationState state{TestBlockValidity(m_chainstate, *pblock, /*check_pow=*/false, /*check_merkle_root=*/false)}; !state.IsValid()) {
++        if (BlockValidationState state{TestBlockValidity(
++                m_chainstate,
++                *pblock,
++                /*check_pow=*/false,
++                /*check_merkle_root=*/false,
++                /*check_identity_auth=*/!chainparams.GetConsensus().pohw_identity_auth)};
++            !state.IsValid()) {
+             throw std::runtime_error(strprintf("TestBlockValidity failed: %s", state.ToString()));
+         }
+     }
+diff --git a/src/pohw/experiment.h b/src/pohw/experiment.h
+index 2e1769d..51da457 100644
+--- a/src/pohw/experiment.h
++++ b/src/pohw/experiment.h
+@@ -5,8 +5,11 @@
+ #ifndef BITCOIN_POHW_EXPERIMENT_H
+ #define BITCOIN_POHW_EXPERIMENT_H
+ 
++#include <bitcoin-build-config.h>
++
+ #include <array>
+ #include <cstdint>
++#include <string_view>
+ 
+ namespace pohw::experiment1 {
+ 
+@@ -36,4 +39,39 @@ inline constexpr uint16_t RPC_PORT{40414};
+ 
+ } // namespace pohw::experiment1
+ 
++namespace pohw::experiment2 {
++
++// Inactive fixture profile for the consensus-enforced Idena successor. The
++// authorization root contains public test keys only and must be replaced by a
++// reviewed finalized-Idena snapshot before any public launch.
++inline constexpr char NETWORK_ID[] = "p2poolbtc-experiment-2";
++inline constexpr std::string_view ACTIVATION_ID{POHW2_ACTIVATION_ID};
++static_assert(ACTIVATION_ID.size() == 64);
++inline constexpr int IDENTITY_AUTH_PARENT_HEIGHT{958175};
++inline constexpr int IDENTITY_AUTH_ACTIVATION_HEIGHT{IDENTITY_AUTH_PARENT_HEIGHT + 1};
++inline constexpr int IDENTITY_AUTH_EXPIRY_HEIGHT{959184};
++inline constexpr int64_t IDENTITY_AUTH_FINALIZED_MTP{1784404800};
++inline constexpr int64_t IDENTITY_AUTH_EXPIRY_MTP{1786219200};
++inline constexpr char IDENTITY_AUTH_PARENT_HASH[] =
++    "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6";
++inline constexpr char IDENTITY_AUTH_POLICY_HASH[] =
++    "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3";
++inline constexpr char IDENTITY_AUTH_ROOT[] =
++    "2430c7f7ab395c27c67ed7d4bfc6e55f4db2cbd72ce8dc1876b1c5ebc9411e38";
++inline constexpr uint32_t AUTHORIZED_IDENTITY_COUNT{3};
++inline constexpr uint8_t MAX_PROOF_DEPTH{8};
++inline constexpr std::array<uint8_t, 4> MESSAGE_START{0xf2, 0xb1, 0xd4, 0xc3};
++inline constexpr uint16_t P2P_PORT{40422};
++inline constexpr uint16_t RPC_PORT{40424};
++
++inline constexpr bool HasConfiguredActivationId()
++{
++    for (const char character : ACTIVATION_ID) {
++        if (character != '0') return true;
++    }
++    return false;
++}
++
++} // namespace pohw::experiment2
++
+ #endif // BITCOIN_POHW_EXPERIMENT_H
+diff --git a/src/pohw/identity_auth.h b/src/pohw/identity_auth.h
+new file mode 100644
+index 0000000..a10b3e5
+--- /dev/null
++++ b/src/pohw/identity_auth.h
+@@ -0,0 +1,334 @@
++// Copyright (c) 2026 The P2poolBTC contributors
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_POHW_IDENTITY_AUTH_H
++#define BITCOIN_POHW_IDENTITY_AUTH_H
++
++#include <consensus/params.h>
++#include <crypto/sha256.h>
++#include <primitives/block.h>
++#include <pubkey.h>
++#include <script/script.h>
++#include <uint256.h>
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <span>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace pohw {
++
++inline constexpr std::array<unsigned char, 5> IDENTITY_AUTH_MAGIC{'P', '2', 'I', 'A', '1'};
++inline constexpr std::array<unsigned char, 5> SHARE_WORK_MAGIC{'P', '2', 'S', 'W', '1'};
++inline constexpr unsigned char IDENTITY_AUTH_VERSION{1};
++inline constexpr size_t IDENTITY_AUTH_LEAF_BYTES{99};
++inline constexpr size_t IDENTITY_AUTH_FIXED_BYTES{5 + 1 + 32 + IDENTITY_AUTH_LEAF_BYTES + 4 + 1 + 64};
++
++namespace identity_auth_detail {
++
++inline constexpr std::string_view LEAF_TAG{"P2POOLBTC_IDENA_AUTH_LEAF_V1"};
++inline constexpr std::string_view NODE_TAG{"P2POOLBTC_IDENA_AUTH_NODE_V1"};
++inline constexpr std::string_view TXSET_TAG{"P2POOLBTC_IDENA_AUTH_TXSET_V1"};
++inline constexpr std::string_view OUTPUTS_TAG{"P2POOLBTC_IDENA_AUTH_OUTPUTS_V1"};
++inline constexpr std::string_view SIGNING_TAG{"P2POOLBTC_IDENA_AUTH_SIGNING_V1"};
++
++using HashBytes = std::array<unsigned char, 32>;
++
++inline HashBytes TaggedSha256(std::string_view tag, std::span<const unsigned char> payload)
++{
++    HashBytes result{};
++    const unsigned char separator{0};
++    CSHA256 hasher;
++    hasher.Write(reinterpret_cast<const unsigned char*>(tag.data()), tag.size());
++    hasher.Write(&separator, 1);
++    hasher.Write(payload.data(), payload.size());
++    hasher.Finalize(result.data());
++    return result;
++}
++
++inline void AppendLE32(std::vector<unsigned char>& output, uint32_t value)
++{
++    for (int shift = 0; shift < 32; shift += 8) output.push_back(static_cast<unsigned char>(value >> shift));
++}
++
++inline void AppendLE64(std::vector<unsigned char>& output, uint64_t value)
++{
++    for (int shift = 0; shift < 64; shift += 8) output.push_back(static_cast<unsigned char>(value >> shift));
++}
++
++inline uint32_t ReadLE32(std::span<const unsigned char> bytes)
++{
++    return uint32_t{bytes[0]} | (uint32_t{bytes[1]} << 8) | (uint32_t{bytes[2]} << 16) |
++           (uint32_t{bytes[3]} << 24);
++}
++
++inline uint64_t ReadLE64(std::span<const unsigned char> bytes)
++{
++    uint64_t value{0};
++    for (int index = 7; index >= 0; --index) value = (value << 8) | bytes[index];
++    return value;
++}
++
++inline std::optional<std::span<const unsigned char>> SingleMinimalOpReturnPayload(const CScript& script)
++{
++    if (script.size() < 2 || script[0] != OP_RETURN) return std::nullopt;
++    size_t offset{0};
++    size_t length{0};
++    const unsigned char opcode{script[1]};
++    if (opcode <= 75) {
++        offset = 2;
++        length = opcode;
++    } else if (opcode == OP_PUSHDATA1 && script.size() >= 3 && script[2] >= 76) {
++        offset = 3;
++        length = script[2];
++    } else if (opcode == OP_PUSHDATA2 && script.size() >= 4) {
++        length = uint16_t{script[2]} | (uint16_t{script[3]} << 8);
++        if (length <= 255) return std::nullopt;
++        offset = 4;
++    } else {
++        return std::nullopt;
++    }
++    if (length > std::numeric_limits<size_t>::max() - offset || offset + length != script.size()) return std::nullopt;
++    return std::span<const unsigned char>{script.data() + offset, length};
++}
++
++template <size_t N>
++inline bool StartsWith(std::span<const unsigned char> bytes, const std::array<unsigned char, N>& prefix)
++{
++    return bytes.size() >= N && std::equal(prefix.begin(), prefix.end(), bytes.begin());
++}
++
++inline HashBytes DisplayHashBytes(const uint256& hash)
++{
++    HashBytes result{};
++    std::reverse_copy(hash.begin(), hash.end(), result.begin());
++    return result;
++}
++
++inline HashBytes MerkleParent(const HashBytes& left, const HashBytes& right)
++{
++    std::array<unsigned char, 64> payload{};
++    std::copy(left.begin(), left.end(), payload.begin());
++    std::copy(right.begin(), right.end(), payload.begin() + 32);
++    return TaggedSha256(NODE_TAG, payload);
++}
++
++inline HashBytes TransactionSetHash(const CBlock& block)
++{
++    std::vector<unsigned char> payload;
++    const uint32_t count{block.vtx.empty() ? 0U : static_cast<uint32_t>(block.vtx.size() - 1)};
++    payload.reserve(4 + static_cast<size_t>(count) * 32);
++    AppendLE32(payload, count);
++    for (size_t index = 1; index < block.vtx.size(); ++index) {
++        const auto txid{DisplayHashBytes(block.vtx[index]->GetHash().ToUint256())};
++        payload.insert(payload.end(), txid.begin(), txid.end());
++    }
++    return TaggedSha256(TXSET_TAG, payload);
++}
++
++inline HashBytes CoinbaseOutputsHash(const CTransaction& coinbase)
++{
++    std::vector<const CTxOut*> included;
++    included.reserve(coinbase.vout.size());
++    for (const CTxOut& output : coinbase.vout) {
++        const auto payload{SingleMinimalOpReturnPayload(output.scriptPubKey)};
++        if (payload && StartsWith(*payload, IDENTITY_AUTH_MAGIC)) continue;
++        included.push_back(&output);
++    }
++
++    std::vector<unsigned char> bytes;
++    AppendLE32(bytes, static_cast<uint32_t>(included.size()));
++    for (const CTxOut* output : included) {
++        AppendLE64(bytes, static_cast<uint64_t>(output->nValue));
++        AppendLE32(bytes, static_cast<uint32_t>(output->scriptPubKey.size()));
++        bytes.insert(bytes.end(), output->scriptPubKey.begin(), output->scriptPubKey.end());
++    }
++    return TaggedSha256(OUTPUTS_TAG, bytes);
++}
++
++struct ParsedAuthorization {
++    std::span<const unsigned char> policy_hash;
++    std::span<const unsigned char> leaf;
++    std::span<const unsigned char> mining_pubkey;
++    uint32_t leaf_index;
++    std::span<const unsigned char> siblings;
++    std::span<const unsigned char> signature;
++};
++
++inline size_t RequiredMerkleProofDepth(uint32_t authorized_identity_count)
++{
++    size_t depth{0};
++    uint32_t remaining{authorized_identity_count == 0 ? 0 : authorized_identity_count - 1};
++    while (remaining != 0) {
++        ++depth;
++        remaining >>= 1;
++    }
++    return depth;
++}
++
++inline std::optional<ParsedAuthorization> ParseAuthorization(std::span<const unsigned char> payload, const Consensus::Params& params)
++{
++    if (payload.size() < IDENTITY_AUTH_FIXED_BYTES || !StartsWith(payload, IDENTITY_AUTH_MAGIC) ||
++        payload[5] != IDENTITY_AUTH_VERSION) {
++        return std::nullopt;
++    }
++    const size_t proof_depth{payload[141]};
++    if (params.pohw_identity_auth_identity_count == 0 ||
++        proof_depth != RequiredMerkleProofDepth(params.pohw_identity_auth_identity_count) ||
++        proof_depth > params.pohw_identity_auth_max_proof_depth ||
++        proof_depth > (std::numeric_limits<size_t>::max() - IDENTITY_AUTH_FIXED_BYTES) / 32 ||
++        payload.size() != IDENTITY_AUTH_FIXED_BYTES + proof_depth * 32) {
++        return std::nullopt;
++    }
++    const unsigned char state{payload[58]};
++    if (state != 3 && state != 7 && state != 8) return std::nullopt;
++    const uint32_t sequence{ReadLE32(payload.subspan(123, 4))};
++    const uint64_t registration_block{ReadLE64(payload.subspan(127, 8))};
++    if (sequence == 0 || registration_block == 0) return std::nullopt;
++    return ParsedAuthorization{
++        .policy_hash = payload.subspan(6, 32),
++        .leaf = payload.subspan(38, IDENTITY_AUTH_LEAF_BYTES),
++        .mining_pubkey = payload.subspan(59, 32),
++        .leaf_index = ReadLE32(payload.subspan(137, 4)),
++        .siblings = payload.subspan(142, proof_depth * 32),
++        .signature = payload.last(64),
++    };
++}
++
++inline bool CheckMerkleProof(const ParsedAuthorization& auth, const Consensus::Params& params, HashBytes& leaf_hash)
++{
++    if (auth.leaf_index >= params.pohw_identity_auth_identity_count) return false;
++    leaf_hash = TaggedSha256(LEAF_TAG, auth.leaf);
++    HashBytes current{leaf_hash};
++    uint32_t index{auth.leaf_index};
++    for (size_t offset = 0; offset < auth.siblings.size(); offset += 32) {
++        HashBytes sibling{};
++        std::copy_n(auth.siblings.begin() + offset, 32, sibling.begin());
++        current = (index & 1U) == 0 ? MerkleParent(current, sibling) : MerkleParent(sibling, current);
++        index >>= 1;
++    }
++    return index == 0 && std::equal(current.begin(), current.end(), params.pohw_identity_auth_root.begin());
++}
++
++inline HashBytes SigningHashFromComponents(
++    const HashBytes& activation_id,
++    const std::array<unsigned char, 32>& policy_hash,
++    const HashBytes& leaf_hash,
++    const HashBytes& previous_hash,
++    uint64_t height,
++    int32_t version,
++    uint32_t bits,
++    const HashBytes& txset_hash,
++    const HashBytes& outputs_hash)
++{
++    std::vector<unsigned char> payload;
++    payload.reserve(216);
++    payload.insert(payload.end(), activation_id.begin(), activation_id.end());
++    payload.insert(payload.end(), policy_hash.begin(), policy_hash.end());
++    payload.insert(payload.end(), leaf_hash.begin(), leaf_hash.end());
++    payload.insert(payload.end(), previous_hash.begin(), previous_hash.end());
++    AppendLE64(payload, height);
++    AppendLE32(payload, static_cast<uint32_t>(version));
++    AppendLE32(payload, bits);
++    payload.insert(payload.end(), txset_hash.begin(), txset_hash.end());
++    payload.insert(payload.end(), outputs_hash.begin(), outputs_hash.end());
++    return TaggedSha256(SIGNING_TAG, payload);
++}
++
++inline HashBytes SigningHash(const CBlock& block, int height, const Consensus::Params& params,
++                             const HashBytes& leaf_hash)
++{
++    return SigningHashFromComponents(
++        params.pohw_identity_auth_activation_id,
++        params.pohw_identity_auth_policy_hash,
++        leaf_hash,
++        DisplayHashBytes(block.hashPrevBlock),
++        static_cast<uint64_t>(height),
++        block.nVersion,
++        block.nBits,
++        TransactionSetHash(block),
++        CoinbaseOutputsHash(*block.vtx.front()));
++}
++
++} // namespace identity_auth_detail
++
++inline bool CheckIdentityAuthorizedBlock(const CBlock& block, int height, int64_t median_time_past,
++                                         const Consensus::Params& params, std::string& reject_reason)
++{
++    if (!params.pohw_identity_auth || height < params.pohw_identity_auth_activation_height) return true;
++    if (height > params.pohw_identity_auth_expiry_height) {
++        reject_reason = "bad-pohw-idena-auth-expired";
++        return false;
++    }
++    if (median_time_past < params.pohw_identity_auth_finalized_mtp) {
++        reject_reason = "bad-pohw-idena-auth-before-snapshot";
++        return false;
++    }
++    if (median_time_past >= params.pohw_identity_auth_expiry_mtp) {
++        reject_reason = "bad-pohw-idena-auth-expired";
++        return false;
++    }
++    if (block.vtx.empty() || !block.vtx.front()->IsCoinBase()) {
++        reject_reason = "bad-pohw-idena-auth-coinbase";
++        return false;
++    }
++
++    size_t auth_count{0};
++    size_t share_work_count{0};
++    std::optional<std::span<const unsigned char>> auth_payload;
++    for (const CTxOut& output : block.vtx.front()->vout) {
++        const auto payload{identity_auth_detail::SingleMinimalOpReturnPayload(output.scriptPubKey)};
++        if (!payload) continue;
++        if (identity_auth_detail::StartsWith(*payload, IDENTITY_AUTH_MAGIC)) {
++            ++auth_count;
++            if (output.nValue == 0) auth_payload = payload;
++        }
++        if (identity_auth_detail::StartsWith(*payload, SHARE_WORK_MAGIC)) {
++            ++share_work_count;
++            if (payload->size() != 37) {
++                reject_reason = "bad-pohw-share-work-format";
++                return false;
++            }
++            if (output.nValue != 0) {
++                reject_reason = "bad-pohw-share-work-value";
++                return false;
++            }
++        }
++    }
++    if (auth_count != 1 || !auth_payload) {
++        reject_reason = "bad-pohw-idena-auth-count";
++        return false;
++    }
++    if (params.pohw_identity_auth_require_share_work && share_work_count != 1) {
++        reject_reason = "bad-pohw-share-work-count";
++        return false;
++    }
++    const auto auth{identity_auth_detail::ParseAuthorization(*auth_payload, params)};
++    if (!auth || !std::equal(auth->policy_hash.begin(), auth->policy_hash.end(), params.pohw_identity_auth_policy_hash.begin())) {
++        reject_reason = "bad-pohw-idena-auth-format";
++        return false;
++    }
++    identity_auth_detail::HashBytes leaf_hash{};
++    if (!identity_auth_detail::CheckMerkleProof(*auth, params, leaf_hash)) {
++        reject_reason = "bad-pohw-idena-auth-proof";
++        return false;
++    }
++    const XOnlyPubKey pubkey{auth->mining_pubkey};
++    const auto signing_hash{identity_auth_detail::SigningHash(block, height, params, leaf_hash)};
++    const uint256 message{std::span<const unsigned char>{signing_hash}};
++    if (!pubkey.VerifySchnorr(message, auth->signature)) {
++        reject_reason = "bad-pohw-idena-auth-signature";
++        return false;
++    }
++    return true;
++}
++
++} // namespace pohw
++
++#endif // BITCOIN_POHW_IDENTITY_AUTH_H
+diff --git a/src/qt/guiconstants.h b/src/qt/guiconstants.h
+index d4b6ed2..85d4678 100644
+--- a/src/qt/guiconstants.h
++++ b/src/qt/guiconstants.h
+@@ -50,6 +50,7 @@ static const int TOOLTIP_WRAP_THRESHOLD = 80;
+ #define QAPP_ORG_DOMAIN "bitcoin.org"
+ #define QAPP_APP_NAME_DEFAULT "Bitcoin-Qt"
+ #define QAPP_APP_NAME_POHW "Bitcoin-Qt-pohw"
++#define QAPP_APP_NAME_POHW2 "Bitcoin-Qt-pohw2"
+ #define QAPP_APP_NAME_TESTNET "Bitcoin-Qt-testnet"
+ #define QAPP_APP_NAME_TESTNET4 "Bitcoin-Qt-testnet4"
+ #define QAPP_APP_NAME_SIGNET "Bitcoin-Qt-signet"
+diff --git a/src/qt/guiutil.cpp b/src/qt/guiutil.cpp
+index a0aa66e..e3d5bfb 100644
+--- a/src/qt/guiutil.cpp
++++ b/src/qt/guiutil.cpp
+@@ -112,6 +112,7 @@ static std::string DummyAddress(const CChainParams &params)
+     switch (params.GetChainType()) {
+     case ChainType::MAIN:
+     case ChainType::POHW:
++    case ChainType::POHW2:
+         addr = "bc1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq2jku9f";
+         break;
+     case ChainType::SIGNET:
+diff --git a/src/qt/networkstyle.cpp b/src/qt/networkstyle.cpp
+index e1f0d78..e0d9b19 100644
+--- a/src/qt/networkstyle.cpp
++++ b/src/qt/networkstyle.cpp
+@@ -19,6 +19,7 @@ static const struct {
+ } network_styles[] = {
+     {ChainType::MAIN, QAPP_APP_NAME_DEFAULT, 0, 0},
+     {ChainType::POHW, QAPP_APP_NAME_POHW, 190, 10},
++    {ChainType::POHW2, QAPP_APP_NAME_POHW2, 210, 20},
+     {ChainType::TESTNET, QAPP_APP_NAME_TESTNET, 70, 30},
+     {ChainType::TESTNET4, QAPP_APP_NAME_TESTNET4, 70, 30},
+     {ChainType::SIGNET, QAPP_APP_NAME_SIGNET, 35, 15},
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index be9f47f..4ebe5b2 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1390,7 +1390,7 @@ RPCHelpMan getblockchaininfo()
+                 {RPCResult::Type::BOOL, "automatic_pruning", /*optional=*/true, "whether automatic pruning is enabled (only present if pruning is enabled)"},
+                 {RPCResult::Type::NUM, "prune_target_size", /*optional=*/true, "the target size used by pruning (only present if automatic pruning is enabled)"},
+                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "the block challenge (aka. block script), in hexadecimal (only present if the current network is a signet)"},
+-                {RPCResult::Type::OBJ, "pohw_experiment", /*optional=*/true, "P2poolBTC Experiment 1 consensus state (only present on the pohw chain)", {
++                {RPCResult::Type::OBJ, "pohw_experiment", /*optional=*/true, "P2poolBTC experimental consensus state (only present on pohw chains)", {
+                     {RPCResult::Type::NUM, "fork_height", "last inherited Bitcoin mainnet block height"},
+                     {RPCResult::Type::STR_HEX, "fork_hash", "pinned inherited Bitcoin mainnet block hash"},
+                     {RPCResult::Type::STR_HEX, "first_fork_hash", "pinned first PoHW fork block hash"},
+@@ -1403,6 +1403,18 @@ RPCHelpMan getblockchaininfo()
+                     {RPCResult::Type::STR, "replay_sighash_domain", "exact signature-hash domain separator"},
+                     {RPCResult::Type::NUM, "bootstrap_handoff_hashrate_hps", "target-implied hashrate that permanently activates Bitcoin retargeting"},
+                     {RPCResult::Type::BOOL, "handoff_active", "whether the active tip carries the permanent handoff marker"},
++                    {RPCResult::Type::BOOL, "idena_authorization_consensus_enforced", "whether finalized-Idena authorization is a Bitcoin consensus rule"},
++                    {RPCResult::Type::STR_HEX, "idena_authorization_activation_id", /*optional=*/true, "build-bound ecosystem activation manifest id"},
++                    {RPCResult::Type::NUM, "idena_authorization_activation_height", /*optional=*/true, "first height requiring P2IA1"},
++                    {RPCResult::Type::NUM, "idena_authorization_expiry_height", /*optional=*/true, "last height accepted by the pinned authorization snapshot"},
++                    {RPCResult::Type::NUM_TIME, "idena_authorization_finalized_mtp", /*optional=*/true, "earliest chain median time accepted for this finalized snapshot"},
++                    {RPCResult::Type::NUM_TIME, "idena_authorization_expiry_mtp", /*optional=*/true, "first chain median time rejected as stale"},
++                    {RPCResult::Type::NUM, "idena_authorization_parent_height", /*optional=*/true, "height of the pinned predecessor block"},
++                    {RPCResult::Type::STR_HEX, "idena_authorization_parent_hash", /*optional=*/true, "hash of the pinned predecessor block"},
++                    {RPCResult::Type::STR_HEX, "idena_authorization_policy_hash", /*optional=*/true, "pinned P2IA1 policy hash"},
++                    {RPCResult::Type::STR_HEX, "idena_authorization_root", /*optional=*/true, "pinned finalized-Idena authorization Merkle root"},
++                    {RPCResult::Type::NUM, "idena_authorized_identity_count", /*optional=*/true, "number of leaves committed by the authorization root"},
++                    {RPCResult::Type::NUM, "idena_authorization_max_proof_depth", /*optional=*/true, "maximum accepted Merkle proof depth"},
+                     {RPCResult::Type::STR, "warning", "no-value and key-isolation warning"},
+                 }},
+                 (IsDeprecatedRPCEnabled("warnings") ?
+@@ -1456,7 +1468,8 @@ RPCHelpMan getblockchaininfo()
+             chainman.GetParams().GetConsensus().signet_challenge;
+         obj.pushKV("signet_challenge", HexStr(signet_challenge));
+     }
+-    if (chainman.GetParams().GetChainType() == ChainType::POHW) {
++    if (chainman.GetParams().GetChainType() == ChainType::POHW ||
++        chainman.GetParams().GetChainType() == ChainType::POHW2) {
+         const Consensus::Params& consensus{chainman.GetConsensus()};
+         UniValue pohw(UniValue::VOBJ);
+         pohw.pushKV("fork_height", consensus.pohw_fork_height);
+@@ -1471,7 +1484,23 @@ RPCHelpMan getblockchaininfo()
+         pohw.pushKV("replay_sighash_domain", pohw::REPLAY_SIGHASH_DOMAIN);
+         pohw.pushKV("bootstrap_handoff_hashrate_hps", consensus.pohw_bootstrap_handoff_hashrate_hps);
+         pohw.pushKV("handoff_active", tip.nHeight > consensus.pohw_fork_height && CheckPoHWBlockVersion(tip.pprev, tip.nBits, tip.nVersion, consensus) && (tip.nVersion & pohw::experiment1::HANDOFF_VERSION_BIT) != 0);
+-        pohw.pushKV("warning", "NO-VALUE EXPERIMENT: inherited scripts map to Bitcoin mainnet keys; never assume key isolation");
++        pohw.pushKV("idena_authorization_consensus_enforced", consensus.pohw_identity_auth);
++        if (consensus.pohw_identity_auth) {
++            pohw.pushKV("idena_authorization_activation_id", HexStr(consensus.pohw_identity_auth_activation_id));
++            pohw.pushKV("idena_authorization_activation_height", consensus.pohw_identity_auth_activation_height);
++            pohw.pushKV("idena_authorization_expiry_height", consensus.pohw_identity_auth_expiry_height);
++            pohw.pushKV("idena_authorization_finalized_mtp", consensus.pohw_identity_auth_finalized_mtp);
++            pohw.pushKV("idena_authorization_expiry_mtp", consensus.pohw_identity_auth_expiry_mtp);
++            pohw.pushKV("idena_authorization_parent_height", consensus.pohw_identity_auth_activation_height - 1);
++            pohw.pushKV("idena_authorization_parent_hash", consensus.pohw_identity_auth_parent_hash.GetHex());
++            pohw.pushKV("idena_authorization_policy_hash", HexStr(consensus.pohw_identity_auth_policy_hash));
++            pohw.pushKV("idena_authorization_root", HexStr(consensus.pohw_identity_auth_root));
++            pohw.pushKV("idena_authorized_identity_count", consensus.pohw_identity_auth_identity_count);
++            pohw.pushKV("idena_authorization_max_proof_depth", consensus.pohw_identity_auth_max_proof_depth);
++        }
++        pohw.pushKV("warning", consensus.pohw_identity_auth
++            ? "INACTIVE NO-VALUE FIXTURE: public test authorization keys; start only with explicit experimental opt-in"
++            : "NO-VALUE EXPERIMENT: inherited scripts map to Bitcoin mainnet keys; never assume key isolation");
+         obj.pushKV("pohw_experiment", std::move(pohw));
+     }
+ 
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index b50b46f..f63d45a 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -700,6 +700,13 @@ static RPCHelpMan getblocktemplate()
+                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
+                 {RPCResult::Type::STR_HEX, "pohw_replay_marker", /*optional=*/true, "required zero-value PoHW replay-marker output script"},
+                 {RPCResult::Type::NUM, "pohw_replay_sighash_version_bit", /*optional=*/true, "transaction-version bit required for domain-separated inherited spends"},
++                {RPCResult::Type::BOOL, "pohw_idena_authorization_required", /*optional=*/true, "whether the next block requires a consensus P2IA1 authorization output"},
++                {RPCResult::Type::STR_HEX, "pohw_idena_authorization_activation_id", /*optional=*/true, "build-bound ecosystem activation manifest id"},
++                {RPCResult::Type::STR_HEX, "pohw_idena_authorization_policy_hash", /*optional=*/true, "pinned P2IA1 policy hash"},
++                {RPCResult::Type::STR_HEX, "pohw_idena_authorization_root", /*optional=*/true, "pinned finalized-Idena authorization root"},
++                {RPCResult::Type::NUM, "pohw_idena_authorization_expiry_height", /*optional=*/true, "last height accepted by this authorization snapshot"},
++                {RPCResult::Type::NUM_TIME, "pohw_idena_authorization_expiry_mtp", /*optional=*/true, "first chain median time rejected as stale"},
++                {RPCResult::Type::NUM_TIME, "pohw_idena_authorization_parent_mtp", /*optional=*/true, "median time past of the template parent used by consensus"},
+             }},
+         },
+         RPCExamples{
+@@ -1034,6 +1041,24 @@ static RPCHelpMan getblocktemplate()
+     if (pohw::ReplaySighashActive(pindexPrev->nHeight + 1, consensusParams)) {
+         result.pushKV("pohw_replay_sighash_version_bit", pohw::REPLAY_SIGHASH_VERSION_BIT);
+     }
++    const int next_height{pindexPrev->nHeight + 1};
++    if (consensusParams.pohw_identity_auth &&
++        next_height >= consensusParams.pohw_identity_auth_activation_height) {
++        if (next_height > consensusParams.pohw_identity_auth_expiry_height ||
++            pindexPrev->GetMedianTimePast() >= consensusParams.pohw_identity_auth_expiry_mtp) {
++            throw JSONRPCError(RPC_VERIFY_ERROR, "The pinned Idena authorization snapshot has expired");
++        }
++        if (pindexPrev->GetMedianTimePast() < consensusParams.pohw_identity_auth_finalized_mtp) {
++            throw JSONRPCError(RPC_VERIFY_ERROR, "The finalized Idena authorization snapshot is newer than chain median time");
++        }
++        result.pushKV("pohw_idena_authorization_required", true);
++        result.pushKV("pohw_idena_authorization_activation_id", HexStr(consensusParams.pohw_identity_auth_activation_id));
++        result.pushKV("pohw_idena_authorization_policy_hash", HexStr(consensusParams.pohw_identity_auth_policy_hash));
++        result.pushKV("pohw_idena_authorization_root", HexStr(consensusParams.pohw_identity_auth_root));
++        result.pushKV("pohw_idena_authorization_expiry_height", consensusParams.pohw_identity_auth_expiry_height);
++        result.pushKV("pohw_idena_authorization_expiry_mtp", consensusParams.pohw_identity_auth_expiry_mtp);
++        result.pushKV("pohw_idena_authorization_parent_mtp", pindexPrev->GetMedianTimePast());
++    }
+ 
+     return result;
+ },
+diff --git a/src/test/CMakeLists.txt b/src/test/CMakeLists.txt
+index 7d9dccb..79e183b 100644
+--- a/src/test/CMakeLists.txt
++++ b/src/test/CMakeLists.txt
+@@ -77,6 +77,7 @@ add_executable(test_bitcoin
+   pmt_tests.cpp
+   policyestimator_tests.cpp
+   pool_tests.cpp
++  pohw_identity_auth_tests.cpp
+   pow_tests.cpp
+   prevector_tests.cpp
+   private_broadcast_tests.cpp
+diff --git a/src/test/pohw_identity_auth_tests.cpp b/src/test/pohw_identity_auth_tests.cpp
+new file mode 100644
+index 0000000..bc6b152
+--- /dev/null
++++ b/src/test/pohw_identity_auth_tests.cpp
+@@ -0,0 +1,277 @@
++// Copyright (c) 2026 The P2poolBTC contributors
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <boost/test/unit_test.hpp>
++
++#include <kernel/chainparams.h>
++#include <pohw/experiment.h>
++#include <pohw/identity_auth.h>
++#include <primitives/block.h>
++#include <primitives/transaction.h>
++#include <script/script.h>
++#include <uint256.h>
++#include <util/strencodings.h>
++
++#include <string>
++#include <vector>
++
++BOOST_AUTO_TEST_SUITE(pohw_identity_auth_tests)
++
++namespace {
++
++constexpr std::string_view AUTHORIZATION_SCRIPT{
++    "6a4d0e015032494131014f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3000000000000000000000000000000000000000203531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337000000000000000000000000000000000000000000000000000000000000000c0300000012270000000000007a000100000002700120a51a4650ccc1193ef4d4a379a79db691390dd66547eb2a7d1788fe37f548332a7eacc21076edca496211fb712f6bc05fb1c3774284e891adc5b949bf37bb43d5dd70663f1994010931912a5fee6a5154b6da8c6ec8175fff4ce05e376884ed83dde50b0d11eaac36bf625510195d2d08bf0eb48dea120257379416ceb0"};
++
++CScript ScriptFromHex(std::string_view hex)
++{
++    const auto bytes{ParseHex(hex)};
++    return CScript{bytes.begin(), bytes.end()};
++}
++
++CBlock AuthorizedBlock()
++{
++    CMutableTransaction coinbase;
++    coinbase.version = 2;
++    coinbase.vin.resize(1);
++    coinbase.vin[0].prevout.SetNull();
++    coinbase.vin[0].scriptSig = CScript{} << 1;
++    coinbase.vout.emplace_back(5'000'000'000, ScriptFromHex("00147777777777777777777777777777777777777777"));
++
++    std::vector<unsigned char> share_work{'P', '2', 'S', 'W', '1'};
++    share_work.insert(share_work.end(), 32, 0x88);
++    coinbase.vout.emplace_back(0, CScript{} << OP_RETURN << share_work);
++    coinbase.vout.emplace_back(0, ScriptFromHex(AUTHORIZATION_SCRIPT));
++
++    CBlock block;
++    block.nVersion = 0x20000000;
++    block.hashPrevBlock = uint256{"5555555555555555555555555555555555555555555555555555555555555555"};
++    block.nTime = pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP + 100;
++    block.nBits = 0x207fffff;
++    block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
++    return block;
++}
++
++Consensus::Params VectorConsensus()
++{
++    const auto chainparams{CChainParams::PoHW2()};
++    Consensus::Params params{chainparams->GetConsensus()};
++    params.pohw_identity_auth_activation_id.fill(0xaa);
++    return params;
++}
++
++bool Check(const CBlock& block, int height, std::string& reason,
++           int64_t median_time_past = pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP + 100)
++{
++    const auto params{VectorConsensus()};
++    return pohw::CheckIdentityAuthorizedBlock(block, height, median_time_past, params, reason);
++}
++
++} // namespace
++
++BOOST_AUTO_TEST_CASE(successor_params_are_distinct_and_consensus_enforced)
++{
++    const auto predecessor{CChainParams::PoHW()};
++    const auto successor{CChainParams::PoHW2()};
++    const auto& consensus{successor->GetConsensus()};
++    BOOST_CHECK(successor->MessageStart() != predecessor->MessageStart());
++    BOOST_CHECK(successor->GetDefaultPort() != predecessor->GetDefaultPort());
++    BOOST_CHECK(consensus.pohw_identity_auth);
++    BOOST_CHECK_EQUAL(consensus.pohw_identity_auth_activation_height, pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.pohw_identity_auth_expiry_height, pohw::experiment2::IDENTITY_AUTH_EXPIRY_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.pohw_identity_auth_finalized_mtp, pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP);
++    BOOST_CHECK_EQUAL(consensus.pohw_identity_auth_expiry_mtp, pohw::experiment2::IDENTITY_AUTH_EXPIRY_MTP);
++    BOOST_CHECK_EQUAL(consensus.pohw_identity_auth_parent_hash.GetHex(), pohw::experiment2::IDENTITY_AUTH_PARENT_HASH);
++    BOOST_CHECK_EQUAL(HexStr(consensus.pohw_identity_auth_activation_id), pohw::experiment2::ACTIVATION_ID);
++    BOOST_CHECK_EQUAL(HexStr(consensus.pohw_identity_auth_policy_hash), pohw::experiment2::IDENTITY_AUTH_POLICY_HASH);
++    BOOST_CHECK_EQUAL(HexStr(consensus.pohw_identity_auth_root), pohw::experiment2::IDENTITY_AUTH_ROOT);
++}
++
++BOOST_AUTO_TEST_CASE(rust_fixed_vector_is_accepted)
++{
++    std::string reason;
++    const CBlock block{AuthorizedBlock()};
++    const auto params{VectorConsensus()};
++    const auto payload{pohw::identity_auth_detail::SingleMinimalOpReturnPayload(block.vtx.front()->vout.back().scriptPubKey)};
++    BOOST_REQUIRE(payload);
++    const auto auth{pohw::identity_auth_detail::ParseAuthorization(*payload, params)};
++    BOOST_REQUIRE(auth);
++    pohw::identity_auth_detail::HashBytes leaf_hash{};
++    BOOST_REQUIRE(pohw::identity_auth_detail::CheckMerkleProof(*auth, params, leaf_hash));
++    BOOST_CHECK_EQUAL(HexStr(params.pohw_identity_auth_policy_hash), "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3");
++    BOOST_CHECK_EQUAL(HexStr(leaf_hash), "571dfda102d64afb00330eb07c929f3eb3c183a5ac11f17ca6ec51f27d7c6b6b");
++    BOOST_CHECK_EQUAL(HexStr(pohw::identity_auth_detail::DisplayHashBytes(block.hashPrevBlock)), std::string(64, '5'));
++    BOOST_CHECK_EQUAL(block.nVersion, 0x20000000);
++    BOOST_CHECK_EQUAL(block.nBits, 0x207fffffU);
++    BOOST_CHECK_EQUAL(HexStr(pohw::identity_auth_detail::TransactionSetHash(block)), "df9a71eb4114cfd21da50ff75e28a82ab23d451ba009253d2d18712dbc013ec3");
++    BOOST_CHECK_EQUAL(HexStr(pohw::identity_auth_detail::CoinbaseOutputsHash(*block.vtx.front())), "675d77960d702e5870df9d1b6723b018395e03c49448dccd7022de1efb569da8");
++    pohw::identity_auth_detail::HashBytes vector_activation_id{};
++    vector_activation_id.fill(0xaa);
++    BOOST_CHECK_EQUAL(
++        HexStr(pohw::identity_auth_detail::SigningHashFromComponents(
++            vector_activation_id,
++            params.pohw_identity_auth_policy_hash,
++            leaf_hash,
++            pohw::identity_auth_detail::DisplayHashBytes(block.hashPrevBlock),
++            958176,
++            0x20000000,
++            0x207fffff,
++            pohw::identity_auth_detail::TransactionSetHash(block),
++            pohw::identity_auth_detail::CoinbaseOutputsHash(*block.vtx.front()))),
++        "f4663bd69894696e26f2f83d0a2424f2901f2f4eb29fac8b83b1f11a3b735d04");
++    const auto configured_activation_id{params.pohw_identity_auth_activation_id};
++    BOOST_CHECK_EQUAL(
++        HexStr(pohw::identity_auth_detail::SigningHash(
++            block,
++            pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT,
++            params,
++            leaf_hash)),
++        HexStr(pohw::identity_auth_detail::SigningHashFromComponents(
++            configured_activation_id,
++            params.pohw_identity_auth_policy_hash,
++            leaf_hash,
++            pohw::identity_auth_detail::DisplayHashBytes(block.hashPrevBlock),
++            958176,
++            0x20000000,
++            0x207fffff,
++            pohw::identity_auth_detail::TransactionSetHash(block),
++            pohw::identity_auth_detail::CoinbaseOutputsHash(*block.vtx.front()))));
++    BOOST_CHECK_MESSAGE(
++        pohw::CheckIdentityAuthorizedBlock(
++            block,
++            pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT,
++            pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP + 100,
++            params,
++            reason),
++        "authorization rejected: " << reason);
++    BOOST_CHECK(reason.empty());
++}
++
++BOOST_AUTO_TEST_CASE(missing_duplicate_or_malformed_commitments_fail_closed)
++{
++    const int height{pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT};
++    std::string reason;
++
++    CBlock missing_auth{AuthorizedBlock()};
++    CMutableTransaction missing_auth_coinbase{*missing_auth.vtx.front()};
++    missing_auth_coinbase.vout.pop_back();
++    missing_auth.vtx[0] = MakeTransactionRef(std::move(missing_auth_coinbase));
++    BOOST_CHECK(!Check(missing_auth, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-count");
++
++    CBlock duplicate_auth{AuthorizedBlock()};
++    CMutableTransaction duplicate_coinbase{*duplicate_auth.vtx.front()};
++    duplicate_coinbase.vout.push_back(duplicate_coinbase.vout.back());
++    duplicate_auth.vtx[0] = MakeTransactionRef(std::move(duplicate_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(duplicate_auth, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-count");
++
++    CBlock nonzero_auth{AuthorizedBlock()};
++    CMutableTransaction nonzero_auth_coinbase{*nonzero_auth.vtx.front()};
++    nonzero_auth_coinbase.vout.back().nValue = 1;
++    nonzero_auth.vtx[0] = MakeTransactionRef(std::move(nonzero_auth_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(nonzero_auth, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-count");
++
++    CBlock missing_share_work{AuthorizedBlock()};
++    CMutableTransaction missing_share_coinbase{*missing_share_work.vtx.front()};
++    missing_share_coinbase.vout.erase(missing_share_coinbase.vout.begin() + 1);
++    missing_share_work.vtx[0] = MakeTransactionRef(std::move(missing_share_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(missing_share_work, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-share-work-count");
++
++    CBlock nonzero_share_work{AuthorizedBlock()};
++    CMutableTransaction nonzero_share_coinbase{*nonzero_share_work.vtx.front()};
++    nonzero_share_coinbase.vout[1].nValue = 1;
++    nonzero_share_work.vtx[0] = MakeTransactionRef(std::move(nonzero_share_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(nonzero_share_work, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-share-work-value");
++
++    CBlock malformed_share_work{AuthorizedBlock()};
++    CMutableTransaction malformed_share_coinbase{*malformed_share_work.vtx.front()};
++    std::vector<unsigned char> malformed_share{'P', '2', 'S', 'W', '1', 0};
++    malformed_share_coinbase.vout.emplace_back(0, CScript{} << OP_RETURN << malformed_share);
++    malformed_share_work.vtx[0] = MakeTransactionRef(std::move(malformed_share_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(malformed_share_work, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-share-work-format");
++
++    CBlock ineligible{AuthorizedBlock()};
++    CMutableTransaction ineligible_coinbase{*ineligible.vtx.front()};
++    auto bytes{std::vector<unsigned char>{ineligible_coinbase.vout.back().scriptPubKey.begin(), ineligible_coinbase.vout.back().scriptPubKey.end()}};
++    bytes[4 + 58] = 2;
++    ineligible_coinbase.vout.back().scriptPubKey = CScript{bytes.begin(), bytes.end()};
++    ineligible.vtx[0] = MakeTransactionRef(std::move(ineligible_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(ineligible, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-format");
++}
++
++BOOST_AUTO_TEST_CASE(proof_signature_outputs_and_expiry_are_bound)
++{
++    const int height{pohw::experiment2::IDENTITY_AUTH_ACTIVATION_HEIGHT};
++    std::string reason;
++
++    const CBlock canonical{AuthorizedBlock()};
++    const auto canonical_payload{pohw::identity_auth_detail::SingleMinimalOpReturnPayload(canonical.vtx.front()->vout.back().scriptPubKey)};
++    BOOST_REQUIRE(canonical_payload);
++    std::vector<unsigned char> short_proof{canonical_payload->begin(), canonical_payload->end()};
++    short_proof[141] = 1;
++    short_proof.erase(short_proof.begin() + 174, short_proof.begin() + 206);
++    BOOST_CHECK(!pohw::identity_auth_detail::ParseAuthorization(short_proof, CChainParams::PoHW2()->GetConsensus()));
++
++    std::vector<unsigned char> long_proof{canonical_payload->begin(), canonical_payload->end()};
++    long_proof[141] = 3;
++    long_proof.insert(long_proof.end() - 64, 32, 0);
++    BOOST_CHECK(!pohw::identity_auth_detail::ParseAuthorization(long_proof, CChainParams::PoHW2()->GetConsensus()));
++
++    CBlock changed_payout{AuthorizedBlock()};
++    CMutableTransaction changed_payout_coinbase{*changed_payout.vtx.front()};
++    changed_payout_coinbase.vout.front().nValue += 1;
++    changed_payout.vtx[0] = MakeTransactionRef(std::move(changed_payout_coinbase));
++    BOOST_CHECK(!Check(changed_payout, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-signature");
++
++    auto substituted_activation{VectorConsensus()};
++    substituted_activation.pohw_identity_auth_activation_id.fill(0xbb);
++    reason.clear();
++    BOOST_CHECK(!pohw::CheckIdentityAuthorizedBlock(
++        AuthorizedBlock(),
++        height,
++        pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP + 100,
++        substituted_activation,
++        reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-signature");
++
++    CBlock changed_proof{AuthorizedBlock()};
++    CMutableTransaction changed_proof_coinbase{*changed_proof.vtx.front()};
++    auto proof_bytes{std::vector<unsigned char>{changed_proof_coinbase.vout.back().scriptPubKey.begin(), changed_proof_coinbase.vout.back().scriptPubKey.end()}};
++    proof_bytes[4 + 142] ^= 1;
++    changed_proof_coinbase.vout.back().scriptPubKey = CScript{proof_bytes.begin(), proof_bytes.end()};
++    changed_proof.vtx[0] = MakeTransactionRef(std::move(changed_proof_coinbase));
++    reason.clear();
++    BOOST_CHECK(!Check(changed_proof, height, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-proof");
++
++    reason.clear();
++    BOOST_CHECK(!Check(AuthorizedBlock(), pohw::experiment2::IDENTITY_AUTH_EXPIRY_HEIGHT + 1, reason));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-expired");
++
++    reason.clear();
++    BOOST_CHECK(!Check(AuthorizedBlock(), height, reason, pohw::experiment2::IDENTITY_AUTH_FINALIZED_MTP - 1));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-before-snapshot");
++
++    reason.clear();
++    BOOST_CHECK(!Check(AuthorizedBlock(), height, reason, pohw::experiment2::IDENTITY_AUTH_EXPIRY_MTP));
++    BOOST_CHECK_EQUAL(reason, "bad-pohw-idena-auth-expired");
++
++    CBlock empty;
++    reason.clear();
++    BOOST_CHECK(Check(empty, height - 1, reason));
++}
++
++BOOST_AUTO_TEST_SUITE_END()
+diff --git a/src/util/chaintype.cpp b/src/util/chaintype.cpp
+index 510f659..2a766e9 100644
+--- a/src/util/chaintype.cpp
++++ b/src/util/chaintype.cpp
+@@ -15,6 +15,8 @@ std::string ChainTypeToString(ChainType chain)
+         return "main";
+     case ChainType::POHW:
+         return "pohw";
++    case ChainType::POHW2:
++        return "pohw2";
+     case ChainType::TESTNET:
+         return "test";
+     case ChainType::TESTNET4:
+@@ -33,6 +35,8 @@ std::optional<ChainType> ChainTypeFromString(std::string_view chain)
+         return ChainType::MAIN;
+     } else if (chain == "pohw") {
+         return ChainType::POHW;
++    } else if (chain == "pohw2") {
++        return ChainType::POHW2;
+     } else if (chain == "test") {
+         return ChainType::TESTNET;
+     } else if (chain == "testnet4") {
+diff --git a/src/util/chaintype.h b/src/util/chaintype.h
+index 4468925..1d3ff87 100644
+--- a/src/util/chaintype.h
++++ b/src/util/chaintype.h
+@@ -11,6 +11,7 @@
+ enum class ChainType {
+     MAIN,
+     POHW,
++    POHW2,
+     TESTNET,
+     SIGNET,
+     REGTEST,
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 7f2a878..9dae445 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -36,6 +36,7 @@
+ #include <policy/rbf.h>
+ #include <policy/settings.h>
+ #include <policy/truc_policy.h>
++#include <pohw/identity_auth.h>
+ #include <pohw/replay.h>
+ #include <pow.h>
+ #include <primitives/block.h>
+@@ -2371,7 +2372,7 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
+  *  can fail if those validity checks fail (among other reasons). */
+ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
+-                               CCoinsViewCache& view, bool fJustCheck)
++                               CCoinsViewCache& view, bool fJustCheck, bool check_identity_auth)
+ {
+     AssertLockHeld(cs_main);
+     assert(pindex);
+@@ -2411,6 +2412,31 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state,
+         }
+     }
+ 
++    const bool wrong_identity_auth_parent_block{
++        consensus.pohw_identity_auth &&
++        pindex->nHeight == consensus.pohw_identity_auth_activation_height - 1 &&
++        block_hash != consensus.pohw_identity_auth_parent_hash};
++    const bool wrong_identity_auth_parent{
++        consensus.pohw_identity_auth &&
++        pindex->nHeight == consensus.pohw_identity_auth_activation_height &&
++        (pindex->pprev == nullptr || pindex->pprev->GetBlockHash() != consensus.pohw_identity_auth_parent_hash)};
++    if (wrong_identity_auth_parent_block || wrong_identity_auth_parent) {
++        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pohw-idena-auth-parent",
++                             "block does not extend the pinned consensus-identity authorization parent");
++    }
++    if (check_identity_auth) {
++        std::string identity_auth_reject_reason;
++        if (!pohw::CheckIdentityAuthorizedBlock(
++                block,
++                pindex->nHeight,
++                pindex->pprev != nullptr ? pindex->pprev->GetMedianTimePast() : 0,
++                consensus,
++                identity_auth_reject_reason)) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, identity_auth_reject_reason,
++                                 "block lacks a valid finalized-Idena authorization proof");
++        }
++    }
++
+     // Check it again in case a previous version let a bad block in
+     // NOTE: We don't currently (re-)invoke ContextualCheckBlock() or
+     // ContextualCheckBlockHeader() here. This means that if we add a new
+@@ -4672,7 +4698,8 @@ BlockValidationState TestBlockValidity(
+     Chainstate& chainstate,
+     const CBlock& block,
+     const bool check_pow,
+-    const bool check_merkle_root)
++    const bool check_merkle_root,
++    const bool check_identity_auth)
+ {
+     // Lock must be held throughout this function for two reasons:
+     // 1. We don't want the tip to change during several of the validation steps
+@@ -4730,7 +4757,7 @@ BlockValidationState TestBlockValidity(
+     CCoinsViewCache view_dummy(&chainstate.CoinsTip());
+ 
+     // Set fJustCheck to true in order to update, and not clear, validation caches.
+-    if(!chainstate.ConnectBlock(block, state, &index_dummy, view_dummy, /*fJustCheck=*/true)) {
++    if(!chainstate.ConnectBlock(block, state, &index_dummy, view_dummy, /*fJustCheck=*/true, check_identity_auth)) {
+         if (state.IsValid()) NONFATAL_UNREACHABLE();
+         return state;
+     }
+diff --git a/src/validation.h b/src/validation.h
+index 543043c..23b7660 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -413,7 +413,8 @@ BlockValidationState TestBlockValidity(
+     Chainstate& chainstate,
+     const CBlock& block,
+     bool check_pow,
+-    bool check_merkle_root) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
++    bool check_merkle_root,
++    bool check_identity_auth = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+ 
+ /** Check that the proof of work on each blockheader matches the value in nBits */
+ bool HasValidProofOfWork(std::span<const CBlockHeader> headers, const Consensus::Params& consensusParams);
+@@ -780,7 +781,8 @@ public:
+     DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view)
+         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
+-                      CCoinsViewCache& view, bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
++                      CCoinsViewCache& view, bool fJustCheck = false,
++                      bool check_identity_auth = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+ 
+     // Apply the effects of a block disconnection on the UTXO set.
+     bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+diff --git a/test/functional/feature_pohw_identity_auth.py b/test/functional/feature_pohw_identity_auth.py
+new file mode 100644
+index 0000000..728db8f
+--- /dev/null
++++ b/test/functional/feature_pohw_identity_auth.py
+@@ -0,0 +1,189 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 The P2poolBTC contributors
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Exercise P2IA1 through submitblock and the real ConnectBlock path."""
++
++import hashlib
++import struct
++
++from test_framework.blocktools import create_block, create_coinbase
++from test_framework.key import sign_schnorr
++from test_framework.messages import CTxOut
++from test_framework.script import CScript, OP_RETURN
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++
++
++ACTIVATION_HEIGHT = 105
++EXPIRY_HEIGHT = 120
++ACTIVATION_ID = "f" * 64
++POLICY_HASH = "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3"
++AUTHORIZATION_ROOT = "2430c7f7ab395c27c67ed7d4bfc6e55f4db2cbd72ce8dc1876b1c5ebc9411e38"
++MINING_SECRET = bytes([3]) * 32
++MINING_PUBKEY = "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"
++PROOF_SIBLINGS = [
++    "700120a51a4650ccc1193ef4d4a379a79db691390dd66547eb2a7d1788fe37f5",
++    "48332a7eacc21076edca496211fb712f6bc05fb1c3774284e891adc5b949bf37",
++]
++
++
++def tagged_sha256(tag, payload):
++    return hashlib.sha256(tag.encode() + b"\x00" + payload).digest()
++
++
++def authorization_leaf():
++    return b"".join([
++        bytes.fromhex("00" * 19 + "02"),
++        bytes([3]),  # Verified
++        bytes.fromhex(MINING_PUBKEY),
++        bytes.fromhex("00" * 31 + "0c"),
++        struct.pack("<I", 3),
++        struct.pack("<Q", 10002),
++        struct.pack("<H", 122),
++    ])
++
++
++def transaction_set_hash(block):
++    txids = [tx.txid_int.to_bytes(32, "big") for tx in block.vtx[1:]]
++    return tagged_sha256(
++        "P2POOLBTC_IDENA_AUTH_TXSET_V1",
++        struct.pack("<I", len(txids)) + b"".join(txids),
++    )
++
++
++def coinbase_outputs_hash(coinbase):
++    encoded = []
++    for output in coinbase.vout:
++        script = bytes(output.scriptPubKey)
++        if script.startswith(b"\x6a") and b"P2IA1" in script[:6 + len(b"P2IA1")]:
++            continue
++        encoded.append(
++            struct.pack("<Q", output.nValue)
++            + struct.pack("<I", len(script))
++            + script
++        )
++    return tagged_sha256(
++        "P2POOLBTC_IDENA_AUTH_OUTPUTS_V1",
++        struct.pack("<I", len(encoded)) + b"".join(encoded),
++    )
++
++
++def add_authorization(block):
++    leaf = authorization_leaf()
++    leaf_hash = tagged_sha256("P2POOLBTC_IDENA_AUTH_LEAF_V1", leaf)
++    signing_payload = b"".join([
++        bytes.fromhex(ACTIVATION_ID),
++        bytes.fromhex(POLICY_HASH),
++        leaf_hash,
++        block.hashPrevBlock.to_bytes(32, "big"),
++        struct.pack("<Q", ACTIVATION_HEIGHT),
++        struct.pack("<i", block.nVersion),
++        struct.pack("<I", block.nBits),
++        transaction_set_hash(block),
++        coinbase_outputs_hash(block.vtx[0]),
++    ])
++    signing_hash = tagged_sha256(
++        "P2POOLBTC_IDENA_AUTH_SIGNING_V1",
++        signing_payload,
++    )
++    signature = sign_schnorr(MINING_SECRET, signing_hash)
++    payload = b"".join([
++        b"P2IA1",
++        bytes([1]),
++        bytes.fromhex(POLICY_HASH),
++        leaf,
++        struct.pack("<I", 1),
++        bytes([len(PROOF_SIBLINGS)]),
++        b"".join(bytes.fromhex(sibling) for sibling in PROOF_SIBLINGS),
++        signature,
++    ])
++    block.vtx[0].vout.append(CTxOut(0, CScript([OP_RETURN, payload])))
++    block.hashMerkleRoot = block.calc_merkle_root()
++
++
++def candidate_block(node, *, authorized):
++    template = node.getblocktemplate({"rules": ["segwit"]})
++    coinbase = create_coinbase(template["height"])
++    coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, b"P2SW1" + bytes([0x88]) * 32])))
++    block = create_block(coinbase=coinbase, tmpl=template)
++    if authorized:
++        add_authorization(block)
++    block.solve()
++    return block, template
++
++
++class PoHWIdentityAuthorizationTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++
++    def run_test(self):
++        node = self.nodes[0]
++        self.generate(node, ACTIVATION_HEIGHT - 1)
++        parent_hash = node.getbestblockhash()
++        predecessor_hash = node.getblockhash(ACTIVATION_HEIGHT - 2)
++        predecessor_time = node.getblock(predecessor_hash)["time"]
++
++        self.restart_node(0, extra_args=[
++            f"-testactivationheight=pohw-identity-auth@{ACTIVATION_HEIGHT}",
++            f"-pohwidentityauthparent={parent_hash}",
++            f"-pohwidentityauthexpiryheight={EXPIRY_HEIGHT}",
++            "-pohwidentityauthfinalizedmtp=0",
++            "-pohwidentityauthexpirymtp=4102444800",
++        ])
++        node = self.nodes[0]
++
++        self.log.info("The RPC template exposes the exact consensus authorization profile")
++        _, template = candidate_block(node, authorized=False)
++        assert_equal(template["pohw_idena_authorization_required"], True)
++        assert_equal(template["pohw_idena_authorization_activation_id"], ACTIVATION_ID)
++        assert_equal(template["pohw_idena_authorization_policy_hash"], POLICY_HASH)
++        assert_equal(template["pohw_idena_authorization_root"], AUTHORIZATION_ROOT)
++        assert_equal(template["pohw_idena_authorization_expiry_height"], EXPIRY_HEIGHT)
++        assert_equal(template["pohw_idena_authorization_expiry_mtp"], 4102444800)
++        assert_equal(
++            template["pohw_idena_authorization_parent_mtp"],
++            node.getblockheader(parent_hash)["mediantime"],
++        )
++
++        self.log.info("A competing activation parent is rejected by ConnectBlock")
++        alternate_parent = create_block(
++            int(predecessor_hash, 16),
++            create_coinbase(ACTIVATION_HEIGHT - 1),
++            predecessor_time + 2,
++        )
++        alternate_parent.solve()
++        node.invalidateblock(parent_hash)
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 2)
++        assert_equal(
++            node.submitblock(alternate_parent.serialize().hex()),
++            "bad-pohw-idena-auth-parent",
++        )
++        node.reconsiderblock(parent_hash)
++        assert_equal(node.getbestblockhash(), parent_hash)
++
++        self.log.info("Missing and duplicate authorizations fail through submitblock")
++        missing, _ = candidate_block(node, authorized=False)
++        assert_equal(
++            node.submitblock(missing.serialize().hex()),
++            "bad-pohw-idena-auth-count",
++        )
++
++        duplicate, _ = candidate_block(node, authorized=True)
++        duplicate.vtx[0].vout.append(duplicate.vtx[0].vout[-1])
++        duplicate.hashMerkleRoot = duplicate.calc_merkle_root()
++        duplicate.solve()
++        assert_equal(
++            node.submitblock(duplicate.serialize().hex()),
++            "bad-pohw-idena-auth-count",
++        )
++
++        self.log.info("A valid signed P2IA1 block advances the active chain")
++        authorized, _ = candidate_block(node, authorized=True)
++        assert_equal(node.submitblock(authorized.serialize().hex()), None)
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT)
++
++
++if __name__ == "__main__":
++    PoHWIdentityAuthorizationTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index c4354de..7d4a094 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -147,6 +147,7 @@ BASE_SCRIPTS = [
+     'p2p_feefilter.py',
+     'feature_csv_activation.py',
+     'feature_pohw_replay.py',
++    'feature_pohw_identity_auth.py',
+     'p2p_sendheaders.py',
+     'feature_config_args.py',
+     'wallet_listtransactions.py',

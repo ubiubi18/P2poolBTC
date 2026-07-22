@@ -1,7 +1,7 @@
 use crate::{
     bitcoin_rpc::{
-        BitcoinMiningJobTemplate, BitcoinRpcClient, SubmitBlockOutcome,
-        POHW_REPLAY_MARKER_SCRIPT_HEX,
+        BitcoinConsensusIdentityRequirement, BitcoinMiningJobTemplate, BitcoinRpcClient,
+        SubmitBlockOutcome, POHW_REPLAY_MARKER_SCRIPT_HEX,
     },
     default_parent_share_hash,
     fork_chain::ForkChainClient,
@@ -14,13 +14,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::pow::{CompactTarget, Target};
-use bitcoin::{Block, ScriptBuf, Transaction};
+use bitcoin::{key::Keypair, Block, ScriptBuf, Transaction};
 use chrono::{NaiveDate, Utc};
 use fs2::FileExt;
 use pohw_core::commitment::{
     validate_pohw_commitment, PohwCommitment, PohwCommitmentParams, PohwCommitmentValidationContext,
 };
-use pohw_core::idena_anchor::SharechainCheckpointAnchorV1;
+use pohw_core::consensus_identity::{
+    coinbase_outputs_hash, is_consensus_identity_script, is_magic_op_return, is_share_work_script,
+    transaction_set_hash, ConsensusIdentityActivationManifestV1, ConsensusIdentityAuthorizationV1,
+    ConsensusIdentityPolicyV1, ConsensusIdentitySigningContext, SHARE_WORK_MAGIC,
+};
+use pohw_core::idena_anchor::{IdenaAnchorPolicyV2, SharechainCheckpointAnchorV1};
 use pohw_core::payout::PayoutSchedule;
 use pohw_core::share_work::{
     ShareWorkBindingPolicyV1, ShareWorkBindingV1, SHARE_WORK_BINDING_SCHEMA_VERSION,
@@ -180,6 +185,55 @@ pub(crate) struct MiningAdapterConfig {
     pub require_idena_admission: bool,
     pub idena_anchor_verifier: Option<IdenaAnchorVerifier>,
     pub share_work_binding_policy: Option<ShareWorkBindingPolicyV1>,
+    pub consensus_identity: Option<ConsensusIdentityMiningConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConsensusIdentityMiningConfig {
+    pub activation: ConsensusIdentityActivationManifestV1,
+    pub policy: ConsensusIdentityPolicyV1,
+    pub authorization: ConsensusIdentityAuthorizationV1,
+}
+
+fn validate_consensus_identity_profile_bindings(
+    configured: &ConsensusIdentityMiningConfig,
+    share_work_policy: &ShareWorkBindingPolicyV1,
+    idena_anchor_policy: &IdenaAnchorPolicyV2,
+) -> Result<()> {
+    configured
+        .activation
+        .validate_policy(&configured.policy)
+        .context("invalid consensus identity activation or policy")?;
+    configured
+        .authorization
+        .validate_membership(&configured.policy)
+        .context("invalid consensus identity authorization proof")?;
+    if !share_work_policy
+        .fork_activation_id
+        .eq_ignore_ascii_case(&configured.policy.share_work_activation_id)
+    {
+        bail!(
+            "share-work activation {} does not match consensus identity policy {}",
+            share_work_policy.fork_activation_id,
+            configured.policy.share_work_activation_id
+        );
+    }
+    if !idena_anchor_policy
+        .registry_contract_address
+        .eq_ignore_ascii_case(&configured.policy.registry_contract_address)
+    {
+        bail!("Idena anchor registry does not match consensus identity policy");
+    }
+    if !share_work_policy
+        .experiment_id
+        .eq_ignore_ascii_case(&configured.policy.experiment_id)
+        || !idena_anchor_policy
+            .experiment_id
+            .eq_ignore_ascii_case(&configured.policy.experiment_id)
+    {
+        bail!("P2IA1, P2SW1, and Idena anchor policies do not share one experiment ID");
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -391,6 +445,14 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             bail!("share-work binding requires a live Bitcoin template source");
         }
     }
+    if config.consensus_identity.is_some() {
+        if config.fork_chain_client.is_some() || !config.refresh_job_from_rpc {
+            bail!("consensus identity authorization requires live Bitcoin Core RPC templates");
+        }
+        if config.share_work_binding_policy.is_none() {
+            bail!("consensus identity authorization requires a P2SW1 share-work binding policy");
+        }
+    }
     if !config.bind_addr.ip().is_loopback() && config.stratum_password_file.is_none() {
         bail!("refusing non-loopback Stratum adapter without --stratum-password-file");
     }
@@ -482,6 +544,13 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
                 verifier.policy().experiment_id
             );
         }
+        if let Some(consensus_identity) = config.consensus_identity.as_ref() {
+            validate_consensus_identity_profile_bindings(
+                consensus_identity,
+                policy,
+                verifier.policy(),
+            )?;
+        }
         local_node::bind_share_work_binding_policy(&config.datadir, policy)
             .context("failed to bind successor share-work policy to mining datadir")?;
     }
@@ -490,6 +559,27 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         && config.fork_chain_client.is_none()
     {
         bail!("payout schedule and PoHW commitment require a live template source");
+    }
+    let mining_keypair = read_keypair_from_file(&config.mining_secret_key_file)?;
+    let mining_pubkey_hex = mining_keypair.x_only_public_key().0.to_string();
+    if let Some(consensus_identity) = config.consensus_identity.as_ref() {
+        if !consensus_identity
+            .authorization
+            .leaf
+            .mining_pubkey_xonly
+            .eq_ignore_ascii_case(&mining_pubkey_hex)
+        {
+            bail!("consensus identity authorization leaf does not match the configured mining key");
+        }
+    }
+    let registration =
+        registered_miner_matching_key(&config.datadir, &config.miner_id, &mining_pubkey_hex)?;
+    if let Some(consensus_identity) = config.consensus_identity.as_ref() {
+        consensus_identity
+            .authorization
+            .leaf
+            .validate_registration(&registration)
+            .context("consensus identity authorization does not match the registered miner")?;
     }
     let share_work_seed =
         prepare_share_work_binding_seed(&config, config.share_target.as_deref()).await?;
@@ -503,10 +593,17 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
                 material,
                 config.extranonce2_size,
                 share_work_seed.clone(),
+                config.consensus_identity.clone(),
+                mining_keypair,
             )
             .await?
         } else {
-            build_static_active_job(&config, &material, share_work_seed.as_ref())?
+            build_static_active_job(
+                &config,
+                &material,
+                share_work_seed.as_ref(),
+                &mining_keypair,
+            )?
         }
     } else if let Some(dynamic) = config.dynamic_pohw_payout.as_ref() {
         let client = config
@@ -521,6 +618,8 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             material,
             config.extranonce2_size,
             share_work_seed.clone(),
+            config.consensus_identity.clone(),
+            mining_keypair,
         )
         .await?
     } else if config.refresh_job_from_rpc {
@@ -529,7 +628,12 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
             .as_ref()
             .context("Bitcoin RPC is required for live job refresh")?;
         let (_, material) = crate::mining_job_template_if_ready(client).await?;
-        build_static_active_job(&config, &material, share_work_seed.as_ref())?
+        build_static_active_job(
+            &config,
+            &material,
+            share_work_seed.as_ref(),
+            &mining_keypair,
+        )?
     } else {
         let job_file = config
             .job_file
@@ -559,9 +663,6 @@ pub(crate) async fn run_mining_adapter(mut config: MiningAdapterConfig) -> Resul
         config.stratum_password_file.as_deref(),
         !config.bind_addr.ip().is_loopback(),
     )?;
-    let mining_keypair = read_keypair_from_file(&config.mining_secret_key_file)?;
-    let mining_pubkey_hex = mining_keypair.x_only_public_key().0.to_string();
-    ensure_registered_miner_matches_key(&config.datadir, &config.miner_id, &mining_pubkey_hex)?;
     let idena_eligibility_monitor = if let Some(verifier) = config.idena_anchor_verifier.as_ref() {
         let replay = local_node::replay_state(&config.datadir)?;
         let registration = replay
@@ -743,6 +844,7 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
     };
     let share_work_seed =
         prepare_share_work_binding_seed(&state.config, Some(&state.share_target)).await?;
+    let mining_keypair = read_keypair_from_file(&state.config.mining_secret_key_file)?;
     let active_job = if let Some(dynamic) = state.config.dynamic_pohw_payout.as_ref() {
         build_dynamic_active_job(
             state.config.datadir.clone(),
@@ -751,10 +853,17 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
             material,
             state.config.extranonce2_size,
             share_work_seed.clone(),
+            state.config.consensus_identity.clone(),
+            mining_keypair,
         )
         .await?
     } else {
-        build_static_active_job(&state.config, &material, share_work_seed.as_ref())?
+        build_static_active_job(
+            &state.config,
+            &material,
+            share_work_seed.as_ref(),
+            &mining_keypair,
+        )?
     };
     let job = &active_job.job;
     job.validate()?;
@@ -774,6 +883,7 @@ async fn refresh_job_once(state: &AdapterState) -> Result<Option<String>> {
     Ok(Some(job_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_dynamic_active_job(
     datadir: PathBuf,
     dynamic: DynamicPohwPayoutConfig,
@@ -781,9 +891,11 @@ async fn build_dynamic_active_job(
     material: BitcoinMiningJobTemplate,
     extranonce2_size: usize,
     share_work_seed: Option<ShareWorkBindingSeed>,
+    consensus_identity: Option<ConsensusIdentityMiningConfig>,
+    mining_keypair: Keypair,
 ) -> Result<ActiveStratumJob> {
     let dynamic_job = tokio::task::spawn_blocking(move || {
-        build_dynamic_pohw_stratum_job_from_template(
+        build_dynamic_pohw_stratum_job_from_template_with_consensus_identity(
             &datadir,
             &dynamic.snapshot_dir,
             &miner_id,
@@ -792,6 +904,8 @@ async fn build_dynamic_active_job(
             extranonce2_size,
             dynamic.min_snapshot_voters,
             share_work_seed.as_ref(),
+            consensus_identity.as_ref(),
+            Some(&mining_keypair),
         )
     })
     .await
@@ -870,6 +984,7 @@ fn build_static_active_job(
     config: &MiningAdapterConfig,
     material: &BitcoinMiningJobTemplate,
     share_work_seed: Option<&ShareWorkBindingSeed>,
+    mining_keypair: &Keypair,
 ) -> Result<ActiveStratumJob> {
     let share_work_binding = share_work_seed
         .map(|seed| {
@@ -888,6 +1003,8 @@ fn build_static_active_job(
             config.pohw_commitment.as_ref(),
             share_work_binding.as_ref(),
             config.extranonce2_size,
+            config.consensus_identity.as_ref(),
+            Some(mining_keypair),
         )?
         .job,
         payout_evidence: None,
@@ -901,6 +1018,8 @@ fn build_job_for_template_source(
     pohw_commitment: Option<&PohwCommitment>,
     share_work_binding: Option<&ShareWorkBindingV1>,
     extranonce2_size: usize,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<BuiltStratumJob> {
     match (payout_schedule, pohw_commitment) {
         (Some(schedule), Some(commitment)) => build_pohw_stratum_job_from_template_with_binding(
@@ -909,11 +1028,15 @@ fn build_job_for_template_source(
             commitment,
             share_work_binding,
             extranonce2_size,
+            consensus_identity,
+            mining_keypair,
         ),
         (None, None) => build_stratum_job_from_template_with_binding(
             material,
             share_work_binding,
             extranonce2_size,
+            consensus_identity,
+            mining_keypair,
         ),
         _ => Err(anyhow!(
             "payout schedule and PoHW commitment must be supplied together"
@@ -925,13 +1048,15 @@ pub(crate) fn build_stratum_job_from_template(
     material: &BitcoinMiningJobTemplate,
     extranonce2_size: usize,
 ) -> Result<BuiltStratumJob> {
-    build_stratum_job_from_template_with_binding(material, None, extranonce2_size)
+    build_stratum_job_from_template_with_binding(material, None, extranonce2_size, None, None)
 }
 
 fn build_stratum_job_from_template_with_binding(
     material: &BitcoinMiningJobTemplate,
     share_work_binding: Option<&ShareWorkBindingV1>,
     extranonce2_size: usize,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<BuiltStratumJob> {
     validate_extranonce2_size(extranonce2_size)?;
     let (coinbase1, coinbase2) = coinbase_split_for_extranonces(
@@ -940,6 +1065,9 @@ fn build_stratum_job_from_template_with_binding(
         material.default_witness_commitment.as_deref(),
         material.pohw_replay_marker.as_deref(),
         share_work_binding,
+        Some(material),
+        consensus_identity,
+        mining_keypair,
     )?;
     build_stratum_job_from_parts(
         material,
@@ -962,6 +1090,8 @@ pub(crate) fn build_pohw_stratum_job_from_template(
         pohw_commitment,
         None,
         extranonce2_size,
+        None,
+        None,
     )
 }
 
@@ -971,6 +1101,8 @@ fn build_pohw_stratum_job_from_template_with_binding(
     pohw_commitment: &PohwCommitment,
     share_work_binding: Option<&ShareWorkBindingV1>,
     extranonce2_size: usize,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<BuiltStratumJob> {
     validate_extranonce2_size(extranonce2_size)?;
     let (coinbase1, coinbase2) = coinbase_split_for_pohw_payouts(
@@ -982,6 +1114,9 @@ fn build_pohw_stratum_job_from_template_with_binding(
         material.default_witness_commitment.as_deref(),
         material.pohw_replay_marker.as_deref(),
         share_work_binding,
+        Some(material),
+        consensus_identity,
+        mining_keypair,
     )?;
     build_stratum_job_from_parts(
         material,
@@ -1002,6 +1137,33 @@ pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
     extranonce2_size: usize,
     min_snapshot_voters: usize,
     share_work_seed: Option<&ShareWorkBindingSeed>,
+) -> Result<BuiltDynamicPohwStratumJob> {
+    build_dynamic_pohw_stratum_job_from_template_with_consensus_identity(
+        datadir,
+        snapshot_dir,
+        miner_id,
+        commitment_template,
+        material,
+        extranonce2_size,
+        min_snapshot_voters,
+        share_work_seed,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dynamic_pohw_stratum_job_from_template_with_consensus_identity(
+    datadir: &Path,
+    snapshot_dir: &Path,
+    miner_id: &str,
+    commitment_template: &PohwCommitment,
+    material: &BitcoinMiningJobTemplate,
+    extranonce2_size: usize,
+    min_snapshot_voters: usize,
+    share_work_seed: Option<&ShareWorkBindingSeed>,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<BuiltDynamicPohwStratumJob> {
     let state = local_node::replay_state_with_confirmed_payouts(datadir, Some(snapshot_dir))?;
     let snapshot_status = local_node::latest_verified_snapshot(snapshot_dir)?;
@@ -1111,6 +1273,8 @@ pub(crate) fn build_dynamic_pohw_stratum_job_from_template(
         &pohw_commitment,
         share_work_binding.as_ref(),
         extranonce2_size,
+        consensus_identity,
+        mining_keypair,
     )?;
     Ok(BuiltDynamicPohwStratumJob {
         built,
@@ -1356,11 +1520,11 @@ fn validate_bind_addr(bind_addr: SocketAddr, allow_non_loopback: bool) -> Result
     Ok(())
 }
 
-fn ensure_registered_miner_matches_key(
+fn registered_miner_matching_key(
     datadir: &Path,
     miner_id: &str,
     mining_pubkey_hex: &str,
-) -> Result<()> {
+) -> Result<MinerRegistration> {
     let state = local_node::replay_state(datadir)?;
     let miner_id = miner_id.to_ascii_lowercase();
     let registration = state.registrations().get(&miner_id).ok_or_else(|| {
@@ -1375,7 +1539,7 @@ fn ensure_registered_miner_matches_key(
             miner_id
         );
     }
-    Ok(())
+    Ok(registration.clone())
 }
 
 pub(crate) fn read_stratum_job_file(path: &Path) -> Result<StratumJob> {
@@ -3922,12 +4086,16 @@ fn block_target_hex_from_job_nbits(nbits_header_order_hex: &str) -> Result<Strin
     Ok(hex::encode(target.to_be_bytes()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn coinbase_split_for_extranonces(
     height: u64,
     extranonce2_size: usize,
     default_witness_commitment: Option<&str>,
     pohw_replay_marker: Option<&str>,
     share_work_binding: Option<&ShareWorkBindingV1>,
+    material: Option<&BitcoinMiningJobTemplate>,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<(String, String)> {
     let mut outputs = vec![CoinbaseOutputSpec {
         amount_sats: 0,
@@ -3951,6 +4119,7 @@ fn coinbase_split_for_extranonces(
             script_pubkey_hex: validate_witness_commitment_script(script_pubkey_hex)?,
         });
     }
+    append_consensus_identity_output(&mut outputs, material, consensus_identity, mining_keypair)?;
     coinbase_split_for_outputs(
         height,
         extranonce2_size,
@@ -3969,6 +4138,9 @@ fn coinbase_split_for_pohw_payouts(
     default_witness_commitment: Option<&str>,
     pohw_replay_marker: Option<&str>,
     share_work_binding: Option<&ShareWorkBindingV1>,
+    material: Option<&BitcoinMiningJobTemplate>,
+    consensus_identity: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
 ) -> Result<(String, String)> {
     payout_schedule.validate()?;
     let pohw_commitment = pohw_commitment.clone().normalized();
@@ -4034,6 +4206,7 @@ fn coinbase_split_for_pohw_payouts(
             script_pubkey_hex: validate_witness_commitment_script(script_pubkey_hex)?,
         });
     }
+    append_consensus_identity_output(&mut outputs, material, consensus_identity, mining_keypair)?;
     coinbase_split_for_outputs(
         height,
         extranonce2_size,
@@ -4046,6 +4219,131 @@ fn coinbase_split_for_pohw_payouts(
 struct CoinbaseOutputSpec {
     amount_sats: Sats,
     script_pubkey_hex: String,
+}
+
+fn append_consensus_identity_output(
+    outputs: &mut Vec<CoinbaseOutputSpec>,
+    material: Option<&BitcoinMiningJobTemplate>,
+    configured: Option<&ConsensusIdentityMiningConfig>,
+    mining_keypair: Option<&Keypair>,
+) -> Result<()> {
+    let requirement = material.and_then(|template| template.pohw_idena_authorization.as_ref());
+    match (requirement, configured, mining_keypair) {
+        (None, None, _) => return Ok(()),
+        (None, Some(_), _) => {
+            bail!("local consensus identity policy is configured but Bitcoin Core does not require P2IA1")
+        }
+        (Some(_), None, _) => {
+            bail!("Bitcoin Core requires P2IA1 but no local consensus identity policy and proof are configured")
+        }
+        (Some(_), Some(_), None) => {
+            bail!("Bitcoin Core requires P2IA1 but no mining key is available")
+        }
+        (Some(requirement), Some(configured), Some(mining_keypair)) => {
+            append_verified_consensus_identity_output(
+                outputs,
+                material.expect("requirement came from material"),
+                requirement,
+                configured,
+                mining_keypair,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn append_verified_consensus_identity_output(
+    outputs: &mut Vec<CoinbaseOutputSpec>,
+    material: &BitcoinMiningJobTemplate,
+    requirement: &BitcoinConsensusIdentityRequirement,
+    configured: &ConsensusIdentityMiningConfig,
+    mining_keypair: &Keypair,
+) -> Result<()> {
+    configured
+        .policy
+        .validate()
+        .context("invalid local consensus identity policy")?;
+    configured
+        .authorization
+        .validate_membership(&configured.policy)
+        .context("invalid local consensus identity proof")?;
+    let policy_hash = configured.policy.commitment_hash()?;
+    if policy_hash != requirement.policy_hash {
+        bail!(
+            "Bitcoin Core P2IA1 policy hash {} does not match local policy {policy_hash}",
+            requirement.policy_hash
+        );
+    }
+    if !configured
+        .activation
+        .activation_id
+        .eq_ignore_ascii_case(&requirement.activation_id)
+    {
+        bail!("Bitcoin Core P2IA1 activation ID does not match the local activation manifest");
+    }
+    if !configured
+        .policy
+        .authorization_root
+        .eq_ignore_ascii_case(&requirement.authorization_root)
+    {
+        bail!("Bitcoin Core P2IA1 authorization root does not match the local finalized snapshot");
+    }
+    if configured.policy.bitcoin_expiry_height != requirement.expiry_height {
+        bail!("Bitcoin Core P2IA1 expiry height does not match the local policy");
+    }
+    if configured.policy.bitcoin_expiry_mtp != requirement.expiry_mtp {
+        bail!("Bitcoin Core P2IA1 MTP expiry does not match the local policy");
+    }
+    configured
+        .policy
+        .validate_block_window(material.height, requirement.parent_mtp)
+        .context("Bitcoin template is outside the local P2IA1 activation window")?;
+
+    let mut encoded_outputs = Vec::with_capacity(outputs.len());
+    let mut share_work_outputs = 0usize;
+    for output in outputs.iter() {
+        let script = decode_script_hex("coinbase output script", &output.script_pubkey_hex)?;
+        if is_magic_op_return(&script, SHARE_WORK_MAGIC) {
+            if !is_share_work_script(&script) {
+                bail!("P2SW1-prefixed coinbase output is not the canonical 32-byte commitment");
+            }
+            if output.amount_sats != 0 {
+                bail!("canonical P2SW1 output must have zero value");
+            }
+            share_work_outputs += 1;
+        }
+        if is_consensus_identity_script(&script) {
+            bail!("coinbase outputs already contain a P2IA1 authorization");
+        }
+        encoded_outputs.push((output.amount_sats, script));
+    }
+    if share_work_outputs != 1 {
+        bail!("consensus identity authorization requires exactly one canonical P2SW1 output");
+    }
+    let block_bits = u32::from_str_radix(&material.bits, 16)
+        .context("Bitcoin template bits are not canonical hexadecimal")?;
+    let context = ConsensusIdentitySigningContext {
+        activation_id: configured.activation.activation_id.clone(),
+        previous_block_hash: material.previous_block_hash.clone(),
+        block_height: material.height,
+        block_version: material.version,
+        block_bits,
+        median_time_past: requirement.parent_mtp,
+        transaction_set_hash: transaction_set_hash(&material.transaction_hashes)?,
+        coinbase_outputs_hash: coinbase_outputs_hash(&encoded_outputs)?,
+    };
+    let mut authorization = configured.authorization.clone();
+    authorization
+        .sign(&configured.policy, &context, mining_keypair)
+        .context("failed to sign consensus identity authorization")?;
+    authorization
+        .verify(&configured.policy, &context)
+        .context("locally generated consensus identity authorization did not verify")?;
+    outputs.push(CoinbaseOutputSpec {
+        amount_sats: 0,
+        script_pubkey_hex: authorization.op_return_script_pubkey_hex()?,
+    });
+    Ok(())
 }
 
 fn coinbase_split_for_outputs(
@@ -4396,6 +4694,10 @@ mod tests {
     use bitcoin::{absolute, transaction, Amount, OutPoint, Sequence, TxIn, TxOut, Txid, Witness};
     use idena_lite_indexer::rpc::IdenaRpcClient;
     use pohw_core::commitment::PohwCommitmentParams;
+    use pohw_core::consensus_identity::{
+        count_magic_outputs, ConsensusIdentityLeafV1, ConsensusIdentityProofV1,
+        CONSENSUS_IDENTITY_MAGIC, SHARE_WORK_MAGIC,
+    };
     use pohw_core::idena_anchor::{IdenaAnchorPolicyV2, IdenaBlockAnchorV1, MinerRegistryAnchorV1};
     use pohw_core::payout::{DirectPayout, VaultAllocation};
     use pohw_core::sharechain::{MinerRegistration, SnapshotVote};
@@ -4726,10 +5028,15 @@ mod tests {
         let parent = "56".repeat(32);
         let mut binding =
             build_share_work_binding(&seed, &parent, "2026-07-17", &"78".repeat(32)).unwrap();
-        let job =
-            build_stratum_job_from_template_with_binding(&mining_job_material(), Some(&binding), 4)
-                .unwrap()
-                .job;
+        let job = build_stratum_job_from_template_with_binding(
+            &mining_job_material(),
+            Some(&binding),
+            4,
+            None,
+            None,
+        )
+        .unwrap()
+        .job;
         let candidate = (0u32..10_000)
             .find_map(|nonce| {
                 let candidate = build_stratum_block_candidate(
@@ -4988,7 +5295,220 @@ mod tests {
             transactions: Vec::new(),
             default_witness_commitment: None,
             pohw_replay_marker: None,
+            pohw_idena_authorization: None,
         }
+    }
+
+    fn consensus_identity_fixture(
+        material: &mut BitcoinMiningJobTemplate,
+        mining_keypair: &Keypair,
+    ) -> (ConsensusIdentityMiningConfig, ShareWorkBindingV1) {
+        let leaf = ConsensusIdentityLeafV1 {
+            idena_address: format!("0x{}", "11".repeat(20)),
+            identity_state: IdenaStatus::Human,
+            mining_pubkey_xonly: mining_keypair.x_only_public_key().0.to_string(),
+            registry_commitment: "22".repeat(32),
+            registration_sequence: 1,
+            registration_block: 10_000,
+            registration_epoch: 100,
+        };
+        let root = leaf.leaf_hash().unwrap();
+        let policy = ConsensusIdentityPolicyV1 {
+            schema_version: 1,
+            experiment_id: "p2poolbtc-experiment-2".to_string(),
+            bitcoin_network: "pohw2".to_string(),
+            bitcoin_fork_activation_id: "33".repeat(32),
+            share_work_activation_id: "44".repeat(32),
+            registry_contract_address: format!("0x{}", "55".repeat(20)),
+            idena_finalized_height: 123_456,
+            idena_finalized_timestamp: u64::from(material.curtime) - 100,
+            idena_finalized_block_hash: format!("0x{}", "66".repeat(32)),
+            idena_next_validation_timestamp: u64::from(material.curtime) + 1_000,
+            authorization_root: hex::encode(root),
+            authorized_identity_count: 1,
+            bitcoin_activation_height: material.height,
+            bitcoin_expiry_height: material.height + 100,
+            bitcoin_expiry_mtp: u64::from(material.curtime) + 1_000,
+            max_proof_depth: 8,
+            require_share_work_commitment: true,
+        };
+        let authorization = ConsensusIdentityAuthorizationV1::unsigned(
+            &policy,
+            leaf,
+            ConsensusIdentityProofV1 {
+                leaf_index: 0,
+                siblings: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut activation = ConsensusIdentityActivationManifestV1 {
+            schema_version: pohw_core::consensus_identity::CONSENSUS_IDENTITY_ACTIVATION_SCHEMA
+                .to_string(),
+            profile_revision: 1,
+            status: "experimental-candidate".to_string(),
+            launch_enabled: false,
+            activation_id: "00".repeat(32),
+            experiment_id: policy.experiment_id.clone(),
+            predecessor_activation_id: policy.bitcoin_fork_activation_id.clone(),
+            consensus_ruleset: "pohw2-p2ia1-p2sw1-v1".to_string(),
+            bitcoin_core_upstream_commit: "11".repeat(20),
+            bitcoin_core_patch_series_sha256: "22".repeat(32),
+            authorization_parent_height: material.height - 1,
+            authorization_parent_hash: material.previous_block_hash.clone(),
+            bitcoin_network: policy.bitcoin_network.clone(),
+            bitcoin_datadir: "pohw-experiment-2".to_string(),
+            p2p_port: 40422,
+            rpc_port: 40424,
+            message_start_hex: "f2b1d4c3".to_string(),
+            consensus_policy_hash: policy.commitment_hash().unwrap(),
+            require_fresh_datadir: true,
+            history_reinterpreted: false,
+        };
+        activation.activation_id = activation.recomputed_activation_id().unwrap();
+        material.pohw_idena_authorization = Some(BitcoinConsensusIdentityRequirement {
+            activation_id: activation.activation_id.clone(),
+            policy_hash: policy.commitment_hash().unwrap(),
+            authorization_root: policy.authorization_root.clone(),
+            expiry_height: policy.bitcoin_expiry_height,
+            expiry_mtp: policy.bitcoin_expiry_mtp,
+            parent_mtp: u64::from(material.curtime) - 1,
+        });
+        let seed = ShareWorkBindingSeed {
+            policy_hash: test_share_work_policy().commitment_hash().unwrap(),
+            miner_id: "miner-a".to_string(),
+            assigned_share_target: pohw_core::sharechain::MAX_ACCEPTED_SHARE_TARGET_HEX.to_string(),
+            idena_anchor: IdenaBlockAnchorV1 {
+                height: 500,
+                hash: format!("0x{}", "77".repeat(32)),
+            },
+            idena_anchor_policy_hash: "88".repeat(32),
+        };
+        let binding =
+            build_share_work_binding(&seed, &"99".repeat(32), "2026-07-18", &"aa".repeat(32))
+                .unwrap();
+        (
+            ConsensusIdentityMiningConfig {
+                activation,
+                policy,
+                authorization,
+            },
+            binding,
+        )
+    }
+
+    #[test]
+    fn successor_job_contains_verifiable_consensus_identity_authorization() {
+        let mining_keypair = test_keypair(91);
+        let mut material = mining_job_material();
+        let (configured, binding) = consensus_identity_fixture(&mut material, &mining_keypair);
+        let job = build_stratum_job_from_template_with_binding(
+            &material,
+            Some(&binding),
+            4,
+            Some(&configured),
+            Some(&mining_keypair),
+        )
+        .unwrap()
+        .job;
+        let transaction = coinbase_tx_from_job(&job);
+        let outputs = transaction
+            .output
+            .iter()
+            .map(|output| {
+                (
+                    output.value.to_sat(),
+                    output.script_pubkey.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(count_magic_outputs(&outputs, CONSENSUS_IDENTITY_MAGIC), 1);
+        assert_eq!(count_magic_outputs(&outputs, SHARE_WORK_MAGIC), 1);
+        let authorization = transaction
+            .output
+            .iter()
+            .find_map(|output| {
+                ConsensusIdentityAuthorizationV1::from_op_return_script(&hex::encode(
+                    output.script_pubkey.as_bytes(),
+                ))
+                .ok()
+            })
+            .unwrap();
+        let context = ConsensusIdentitySigningContext {
+            activation_id: configured.activation.activation_id.clone(),
+            previous_block_hash: material.previous_block_hash.clone(),
+            block_height: material.height,
+            block_version: material.version,
+            block_bits: u32::from_str_radix(&material.bits, 16).unwrap(),
+            median_time_past: material
+                .pohw_idena_authorization
+                .as_ref()
+                .unwrap()
+                .parent_mtp,
+            transaction_set_hash: transaction_set_hash(&material.transaction_hashes).unwrap(),
+            coinbase_outputs_hash: coinbase_outputs_hash(&outputs).unwrap(),
+        };
+        authorization.verify(&configured.policy, &context).unwrap();
+
+        let missing = build_stratum_job_from_template_with_binding(
+            &material,
+            Some(&binding),
+            4,
+            None,
+            Some(&mining_keypair),
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("no local consensus identity"));
+
+        let mut mismatched = configured.clone();
+        mismatched.policy.bitcoin_expiry_height += 1;
+        let mismatch = build_stratum_job_from_template_with_binding(
+            &material,
+            Some(&binding),
+            4,
+            Some(&mismatched),
+            Some(&mining_keypair),
+        )
+        .unwrap_err();
+        assert!(format!("{mismatch:#}").contains("policy hash"));
+    }
+
+    #[test]
+    fn successor_profile_rejects_cross_policy_substitution() {
+        let mining_keypair = test_keypair(92);
+        let mut material = mining_job_material();
+        let (configured, _) = consensus_identity_fixture(&mut material, &mining_keypair);
+        let mut share_work = test_share_work_policy();
+        share_work.experiment_id = configured.policy.experiment_id.clone();
+        share_work.fork_activation_id = configured.policy.share_work_activation_id.clone();
+        let mut idena_anchor = test_idena_anchor_policy();
+        idena_anchor.experiment_id = configured.policy.experiment_id.clone();
+        idena_anchor.registry_contract_address =
+            configured.policy.registry_contract_address.clone();
+
+        validate_consensus_identity_profile_bindings(&configured, &share_work, &idena_anchor)
+            .unwrap();
+
+        let mut wrong_share_work = share_work.clone();
+        wrong_share_work.fork_activation_id = "ff".repeat(32);
+        assert!(validate_consensus_identity_profile_bindings(
+            &configured,
+            &wrong_share_work,
+            &idena_anchor,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("share-work activation"));
+
+        let mut wrong_registry = idena_anchor;
+        wrong_registry.registry_contract_address = format!("0x{}", "ee".repeat(20));
+        assert!(validate_consensus_identity_profile_bindings(
+            &configured,
+            &share_work,
+            &wrong_registry,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("registry"));
     }
 
     fn test_keypair(byte: u8) -> Keypair {
@@ -5706,7 +6226,7 @@ mod tests {
     #[test]
     fn generated_coinbase_split_matches_configured_extranonce_sizes() {
         let (coinbase1, coinbase2) =
-            coinbase_split_for_extranonces(840_000, 4, None, None, None).unwrap();
+            coinbase_split_for_extranonces(840_000, 4, None, None, None, None, None, None).unwrap();
         let coinbase_hex = format!("{}{}{}{}", coinbase1, "aabbccdd", "01020304", coinbase2);
         let coinbase = hex::decode(&coinbase_hex).unwrap();
 
@@ -5734,6 +6254,9 @@ mod tests {
             None,
             Some(POHW_REPLAY_MARKER_SCRIPT_HEX),
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let coinbase_hex = format!("{}{}{}{}", coinbase1, "aabbccdd", "01020304", coinbase2);
@@ -5747,7 +6270,9 @@ mod tests {
 
     #[test]
     fn generated_coinbase_rejects_replay_marker_substitution() {
-        let err = coinbase_split_for_extranonces(840_000, 4, None, Some("5161"), None).unwrap_err();
+        let err =
+            coinbase_split_for_extranonces(840_000, 4, None, Some("5161"), None, None, None, None)
+                .unwrap_err();
         assert!(err.to_string().contains("exact fork-only replay marker"));
     }
 
@@ -6437,6 +6962,7 @@ mod tests {
                 require_idena_admission: true,
                 idena_anchor_verifier: Some(verifier),
                 share_work_binding_policy: None,
+                consensus_identity: None,
             },
             job: RwLock::new(ActiveStratumJob {
                 job,
@@ -6552,6 +7078,7 @@ mod tests {
             require_idena_admission: true,
             idena_anchor_verifier: Some(verifier),
             share_work_binding_policy: None,
+            consensus_identity: None,
         };
         let mut adapter = tokio::spawn(run_mining_adapter(config));
         let mut stream = timeout(Duration::from_secs(1), async {

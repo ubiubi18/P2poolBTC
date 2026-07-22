@@ -70,6 +70,40 @@ recorded configure environment also disables the path-sensitive Mach-O UUID,
 which makes the linker-generated ad-hoc code signature deterministic for
 identical bytes. Apple notarization is not part of that deterministic core.
 
+The same hardened builder accepts the inactive Experiment 2 patch-series lock.
+It adds the exact `POHW2_ACTIVATION_ID`, the `pohw_identity_auth_tests` unit
+suite, and `feature_pohw_identity_auth.py` functional test to the mandatory
+evidence sequence. It must be run from a clean checkout of the lock's exact
+Bitcoin Core commit:
+
+```sh
+scripts/pohw-build-bitcoin-core-fork.sh \
+  --source-dir /clean/bitcoin-core-v31.1 \
+  --manifest compatibility/experiment-2-bitcoin-core-patch-lock.json \
+  --build-dir /clean/output/pohw2-core \
+  --snapshot-dir /clean/output/pohw2-source \
+  --jobs 4
+```
+
+Experiment 2 requires three matching evidence v4 files, three distinct
+authenticated eligible Idena owners, and at least two independently verifiable
+platform families. The local deterministic comparison is:
+
+```sh
+python3 scripts/pohw-compare-bitcoin-core-builds.py \
+  --evidence /evidence/operator-a.json \
+  --evidence /evidence/operator-b.json \
+  --evidence /evidence/operator-c.json \
+  --output /evidence/experiment-2-comparison.json
+```
+
+The report intentionally keeps `operator_independence_verified` and
+`release_authorized` false. Three files from one operator, three VMs under one
+operator, or self-declared platform labels do not satisfy independence. The
+comparison must be followed by exact-CID `BuildAttestationV1` authentication
+and the objective DAO gates; no GitHub account or developer signature can
+substitute for them.
+
 The evidence generator never executes source-controlled commands. It verifies
 the plan, source CID bindings through a digest-pinned verifier and source CAR,
 exact dependency locks, declared toolchains, successful command records,

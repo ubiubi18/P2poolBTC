@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "pohw-bitcoin-core-build-evidence/v4"
+SCHEMA = "pohw-bitcoin-core-build-evidence/v5"
 RUN_SCHEMA = "pohw-bitcoin-core-build-run/v4"
 SNAPSHOT_SCHEMA = "pohw-bitcoin-core-source-snapshot/v1"
 SNAPSHOT_HASH_SCHEMA = b"pohw-bitcoin-core-source-snapshot-sha256/v1\0"
@@ -94,6 +94,17 @@ TEST_FILTERS = {
     "script_cache_domain": "txvalidationcache_tests",
     "block_file_reader": "streams_tests/streams_buffered_file_find_any_byte",
 }
+EXPERIMENT_2_LOCK_SCHEMA = "pohw-bitcoin-core-patch-series-lock/v1"
+EXPERIMENT_2_TEST_FILTERS = {
+    "consensus_identity": "pohw_identity_auth_tests",
+}
+EXPERIMENT_1_FUNCTIONAL_TESTS = (
+    ("replay_functional", "feature_pohw_replay.py"),
+)
+EXPERIMENT_2_FUNCTIONAL_TESTS = (
+    ("replay_functional", "feature_pohw_replay.py"),
+    ("consensus_identity_functional", "feature_pohw_identity_auth.py"),
+)
 HEX_TREE_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -111,6 +122,82 @@ DEPENDS_VARIABLES = (
 
 class EvidenceError(ValueError):
     pass
+
+
+def platform_family_for_triplet(host: str) -> str:
+    if HOST_TRIPLET_RE.fullmatch(host) is None:
+        raise EvidenceError("target host must be a canonical triplet")
+    lowered = host.lower()
+    families = (
+        ("linux", "linux"),
+        ("darwin", "macos"),
+        ("mingw", "windows"),
+        ("windows", "windows"),
+        ("freebsd", "freebsd"),
+        ("openbsd", "openbsd"),
+    )
+    matches = {family for marker, family in families if marker in lowered}
+    if len(matches) != 1:
+        raise EvidenceError(f"target host has an unsupported platform family: {host}")
+    return matches.pop()
+
+
+def manifest_profile(manifest: dict[str, Any]) -> dict[str, Any]:
+    if manifest.get("schema_version") != EXPERIMENT_2_LOCK_SCHEMA:
+        return {
+            "id": "experiment-1",
+            "activation_id": manifest.get("activation_id"),
+            "upstream_commit": manifest.get("upstream", {}).get("commit"),
+            "patch_sha256": manifest.get("build", {}).get("patch_sha256"),
+            "cmake_flags": CANONICAL_FLAGS,
+            "required_steps": REQUIRED_STEPS,
+            "test_steps": TEST_STEPS,
+            "test_filters": TEST_FILTERS,
+            "functional_tests": EXPERIMENT_1_FUNCTIONAL_TESTS,
+        }
+
+    if manifest.get("status") != "experimental-candidate-inactive" or manifest.get("launch_enabled") is not False:
+        raise EvidenceError("Experiment 2 build lock must remain inactive")
+    upstream = manifest.get("upstream")
+    network = manifest.get("network")
+    if not isinstance(upstream, dict) or not isinstance(network, dict):
+        raise EvidenceError("Experiment 2 build lock is missing upstream or network data")
+    activation_id = network.get("candidate_activation_id")
+    upstream_commit = upstream.get("commit")
+    patch_sha256 = manifest.get("patch_series_sha256")
+    if not isinstance(activation_id, str) or HEX_SHA256_RE.fullmatch(activation_id) is None:
+        raise EvidenceError("Experiment 2 activation ID is invalid")
+    if not isinstance(upstream_commit, str) or re.fullmatch(r"[0-9a-f]{40}", upstream_commit) is None:
+        raise EvidenceError("Experiment 2 upstream commit is invalid")
+    if not isinstance(patch_sha256, str) or HEX_SHA256_RE.fullmatch(patch_sha256) is None:
+        raise EvidenceError("Experiment 2 patch-series digest is invalid")
+    cmake_flags = (*CANONICAL_FLAGS, f"-DPOHW2_ACTIVATION_ID={activation_id}")
+    test_filters = {**TEST_FILTERS, **EXPERIMENT_2_TEST_FILTERS}
+    required_steps = (
+        *REQUIRED_STEPS[: REQUIRED_STEPS.index("replay_functional")],
+        "consensus_identity",
+        "replay_functional",
+        "consensus_identity_functional",
+        *REQUIRED_STEPS[REQUIRED_STEPS.index("replay_functional") + 1 :],
+    )
+    test_steps = (
+        *TEST_STEPS[: TEST_STEPS.index("replay_functional")],
+        "consensus_identity",
+        "replay_functional",
+        "consensus_identity_functional",
+        *TEST_STEPS[TEST_STEPS.index("replay_functional") + 1 :],
+    )
+    return {
+        "id": "experiment-2",
+        "activation_id": activation_id,
+        "upstream_commit": upstream_commit,
+        "patch_sha256": patch_sha256,
+        "cmake_flags": cmake_flags,
+        "required_steps": required_steps,
+        "test_steps": test_steps,
+        "test_filters": test_filters,
+        "functional_tests": EXPERIMENT_2_FUNCTIONAL_TESTS,
+    }
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -452,6 +539,7 @@ def validate_snapshot_metadata(
     manifest: dict[str, Any],
     manifest_path: Path,
 ) -> dict[str, Any]:
+    profile = manifest_profile(manifest)
     metadata = read_json(metadata_path)
     if set(metadata) != {
         "schema_version",
@@ -467,9 +555,9 @@ def validate_snapshot_metadata(
     tree_oid = metadata.get("patched_tree_oid")
     if not isinstance(tree_oid, str) or not HEX_TREE_RE.fullmatch(tree_oid):
         raise EvidenceError("source snapshot metadata has an invalid patched tree id")
-    if metadata.get("upstream_commit") != manifest.get("upstream", {}).get("commit"):
+    if metadata.get("upstream_commit") != profile["upstream_commit"]:
         raise EvidenceError("source snapshot metadata has a stale upstream commit")
-    if metadata.get("patch_sha256") != manifest.get("build", {}).get("patch_sha256"):
+    if metadata.get("patch_sha256") != profile["patch_sha256"]:
         raise EvidenceError("source snapshot metadata has a stale patch digest")
     if metadata.get("manifest_sha256") != sha256_file(manifest_path):
         raise EvidenceError("source snapshot metadata has a stale manifest digest")
@@ -549,6 +637,7 @@ def validate_commands(
     build_dir: Path,
     cache: dict[str, str],
     depends: dict[str, Any],
+    profile: dict[str, Any],
 ) -> None:
     by_label = {step["label"]: step for step in steps}
     depends_root = build_dir / "pohw-depends"
@@ -582,7 +671,7 @@ def validate_commands(
         "Ninja",
         "--toolchain",
         str(toolchain),
-        *CANONICAL_FLAGS,
+        *profile["cmake_flags"],
     ]
     prefix_map_flags = (
         f"-ffile-prefix-map={snapshot_dir}=/pohw/source "
@@ -609,7 +698,7 @@ def validate_commands(
 
     test_binary = str((build_dir / "bin" / "test_bitcoin").resolve(strict=True))
     tmpdirs: set[str] = set()
-    for label, test_filter in TEST_FILTERS.items():
+    for label, test_filter in profile["test_filters"].items():
         step = by_label[label]
         if step["argv"] != [test_binary, f"--run_test={test_filter}"]:
             raise EvidenceError(f"test command does not match the required filter: {label}")
@@ -621,10 +710,6 @@ def validate_commands(
         except ValueError as exc:
             raise EvidenceError("test temporary directory escapes the build directory") from exc
         tmpdirs.add(str(tmpdir))
-    functional_step = by_label["replay_functional"]
-    python = Path(functional_step["argv"][0]).resolve(strict=True)
-    if not python.is_file() or not os.access(python, os.X_OK):
-        raise EvidenceError("functional-test Python interpreter is not executable")
     functional_runner = snapshot_dir / "test" / "functional" / "test_runner.py"
     resolved_functional_runner = functional_runner.resolve(strict=True)
     expected_source_runner = (
@@ -634,9 +719,6 @@ def validate_commands(
         raise EvidenceError(
             "functional-test runner is not bound to the immutable source snapshot"
         )
-    functional_tmpdir = Path(functional_step["env"].get("TMPDIR", "")).resolve(
-        strict=False
-    )
     functional_config = build_dir / "test" / "config.ini"
     if functional_config.is_symlink() or not functional_config.is_file():
         raise EvidenceError("functional-test configuration is not a regular file")
@@ -661,27 +743,37 @@ def validate_commands(
     if not bitcoind_enabled:
         raise EvidenceError("functional-test configuration disables bitcoind")
     functional_tests_dir = snapshot_dir / "test" / "functional"
-    replay_test = functional_tests_dir / "feature_pohw_replay.py"
-    if replay_test.is_symlink() or not replay_test.is_file():
-        raise EvidenceError("replay functional test is not a regular snapshot file")
-    expected_functional = [
-        str(python),
-        str(functional_runner),
-        "feature_pohw_replay.py",
-        "--jobs=1",
-        f"--tmpdirprefix={functional_tmpdir}",
-        f"--configfile={functional_config}",
-        f"--testsdir={functional_tests_dir}",
-    ]
-    if functional_step["argv"] != expected_functional:
-        raise EvidenceError("replay functional-test command is not canonical")
-    if set(functional_step["env"]) != {"TMPDIR"}:
-        raise EvidenceError("replay functional-test environment is not canonical")
-    try:
-        functional_tmpdir.relative_to(build_dir)
-    except ValueError as exc:
-        raise EvidenceError("functional-test temporary directory escapes the build directory") from exc
-    tmpdirs.add(str(functional_tmpdir))
+    for label, filename in profile["functional_tests"]:
+        functional_step = by_label[label]
+        python = Path(functional_step["argv"][0]).resolve(strict=True)
+        if not python.is_file() or not os.access(python, os.X_OK):
+            raise EvidenceError("functional-test Python interpreter is not executable")
+        functional_tmpdir = Path(functional_step["env"].get("TMPDIR", "")).resolve(
+            strict=False
+        )
+        functional_test = functional_tests_dir / filename
+        if functional_test.is_symlink() or not functional_test.is_file():
+            raise EvidenceError(f"{label} test is not a regular snapshot file")
+        expected_functional = [
+            str(python),
+            str(functional_runner),
+            filename,
+            "--jobs=1",
+            f"--tmpdirprefix={functional_tmpdir}",
+            f"--configfile={functional_config}",
+            f"--testsdir={functional_tests_dir}",
+        ]
+        if functional_step["argv"] != expected_functional:
+            raise EvidenceError(f"{label} command is not canonical")
+        if set(functional_step["env"]) != {"TMPDIR"}:
+            raise EvidenceError(f"{label} environment is not canonical")
+        try:
+            functional_tmpdir.relative_to(build_dir)
+        except ValueError as exc:
+            raise EvidenceError(
+                "functional-test temporary directory escapes the build directory"
+            ) from exc
+        tmpdirs.add(str(functional_tmpdir))
     ctest_step = by_label["ctest"]
     ctest = str(Path(ctest_step["argv"][0]).resolve(strict=True))
     if ctest_step["argv"] != [ctest, "--test-dir", str(build_dir), "--output-on-failure"]:
@@ -727,6 +819,7 @@ def validate_run_record(
     snapshot: dict[str, Any],
     cache: dict[str, str],
     depends: dict[str, Any],
+    profile: dict[str, Any],
 ) -> dict[str, Any]:
     record = read_json(run_record_path)
     if set(record) != {
@@ -748,9 +841,9 @@ def validate_run_record(
     if len(steps) != len(raw_steps):
         raise EvidenceError("build run record contains a non-object step")
     labels = tuple(step["label"] for step in steps)
-    if labels != REQUIRED_STEPS:
+    if labels != profile["required_steps"]:
         raise EvidenceError("build run record is incomplete, reordered, or duplicated")
-    validate_commands(steps, snapshot_dir, build_dir, cache, depends)
+    validate_commands(steps, snapshot_dir, build_dir, cache, depends, profile)
     return record
 
 
@@ -762,6 +855,7 @@ def expected_evidence(
     run_record_path: Path,
 ) -> dict[str, Any]:
     manifest = read_json(manifest_path)
+    profile = manifest_profile(manifest)
     snapshot_dir = snapshot_dir.resolve(strict=True)
     build_dir = build_dir.resolve(strict=True)
     expected_metadata = build_dir / "pohw-source-snapshot.json"
@@ -779,12 +873,16 @@ def expected_evidence(
         "BUILD_FUZZ_BINARY": "OFF",
         "ENABLE_IPC": "OFF",
     }
+    if profile["id"] == "experiment-2":
+        required_cache["POHW2_ACTIVATION_ID"] = profile["activation_id"]
     for key, expected in required_cache.items():
         actual = cache.get(key)
         if actual != expected:
             raise EvidenceError(f"CMake cache {key} must be {expected}, got {actual!r}")
-    manifest_flags = manifest.get("build", {}).get("cmake_flags")
-    if manifest_flags != list(CANONICAL_FLAGS):
+    manifest_flags = list(profile["cmake_flags"])
+    if profile["id"] == "experiment-1" and manifest.get("build", {}).get(
+        "cmake_flags"
+    ) != manifest_flags:
         raise EvidenceError("manifest CMake flags are not the canonical build flags")
     snapshot = validate_snapshot_metadata(
         snapshot_metadata_path, snapshot_dir, manifest, manifest_path
@@ -796,7 +894,13 @@ def expected_evidence(
         build_dir / "pohw-depends-prefix.json", build_dir
     )
     run_record = validate_run_record(
-        run_record_path, snapshot_dir, build_dir, snapshot, cache, depends
+        run_record_path,
+        snapshot_dir,
+        build_dir,
+        snapshot,
+        cache,
+        depends,
+        profile,
     )
 
     artifacts: dict[str, Any] = {}
@@ -837,10 +941,14 @@ def expected_evidence(
     }
     return {
         "schema_version": SCHEMA,
-        "activation_id": manifest.get("activation_id"),
+        "activation_id": profile["activation_id"],
         "manifest_sha256": sha256_file(manifest_path),
-        "upstream_commit": manifest.get("upstream", {}).get("commit"),
-        "patch_sha256": manifest.get("build", {}).get("patch_sha256"),
+        "upstream_commit": profile["upstream_commit"],
+        "patch_sha256": profile["patch_sha256"],
+        "target": {
+            "triple": depends["host"],
+            "platform_family": platform_family_for_triplet(depends["host"]),
+        },
         "source_snapshot": snapshot,
         "build": {
             "generator": "Ninja",
@@ -867,7 +975,7 @@ def expected_evidence(
         },
         "tests": {
             "status": "passed",
-            "required_steps": list(TEST_STEPS),
+            "required_steps": list(profile["test_steps"]),
         },
         "toolchain": toolchain,
         "artifacts": artifacts,

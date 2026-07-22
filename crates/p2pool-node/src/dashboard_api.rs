@@ -1,13 +1,17 @@
 use crate::bitcoin_explorer_index::BitcoinExplorerIndexClient;
-use crate::bitcoin_rpc::{BitcoinRpcAuth, BitcoinRpcClient};
+use crate::bitcoin_rpc::{BitcoinMiningJobTemplate, BitcoinRpcAuth, BitcoinRpcClient};
 use crate::explorer_api;
+use crate::fork_chain::block_subsidy_sats;
 use crate::fork_explorer::ExplorerForkClient;
 use crate::governance_api;
 use crate::local_node;
 use anyhow::{bail, Context, Result};
+use bitcoin::pow::{CompactTarget, Target};
+use chrono::{DateTime, Utc};
 use idena_lite_indexer::rpc::{EpochResponse, IdenaRpcClient, SyncingResponse};
 use pohw_core::payout::{build_payout_schedule, ParticipantAccount};
 use pohw_core::sharechain::MinerRegistration;
+use pohw_core::sharechain_state::SharechainShareSummary;
 use pohw_core::snapshot::Snapshot;
 use pohw_core::{Score, DIRECT_PAYOUT_LIMIT, MIN_DIRECT_PAYOUT_SATS};
 use reqwest::Url;
@@ -22,9 +26,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout, Duration};
 
-const DEFAULT_BLOCK_SUBSIDY_BTC: f64 = 3.125;
-const DEFAULT_BLOCK_REWARD_SATS: u64 = 312_500_000;
 const DEFAULT_BTC_USD_REFERENCE: u64 = 59_520;
+const SATS_PER_BTC: f64 = 100_000_000.0;
+const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+const SHARE_CHART_BUCKETS: usize = 8;
 const MAX_REQUEST_HEADER_BYTES: usize = 8 * 1024;
 const MAX_SAFE_JS_INTEGER: u128 = 9_007_199_254_740_991;
 const MIN_NON_LOOPBACK_API_TOKEN_BYTES: usize = 24;
@@ -130,12 +135,15 @@ pub struct DashboardIdentity {
 pub struct DashboardSharechain {
     pub accepted_shares: usize,
     pub stale_shares: usize,
+    pub pool_accepted_shares: usize,
+    pub pool_stale_shares: usize,
     pub hashrate_score: u64,
     pub pool_hashrate_score: u64,
     pub pool_hashrate_ths: f64,
     pub user_hashrate_ths: f64,
     pub relative_hashrate_share: f64,
     pub recent_shares: Vec<DashboardSharePoint>,
+    pub windows: DashboardShareWindows,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +152,30 @@ pub struct DashboardSharePoint {
     pub label: String,
     pub accepted: usize,
     pub stale: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardShareWindow {
+    pub accepted_shares: usize,
+    pub stale_shares: usize,
+    pub pool_accepted_shares: usize,
+    pub pool_stale_shares: usize,
+    pub user_hashrate_ths: f64,
+    pub pool_hashrate_ths: f64,
+    pub measurement_seconds: u64,
+    pub user_measurement_seconds: u64,
+    pub pool_measurement_seconds: u64,
+    pub recent_shares: Vec<DashboardSharePoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardShareWindows {
+    #[serde(rename = "24h")]
+    pub hours_24: DashboardShareWindow,
+    #[serde(rename = "7d")]
+    pub days_7: DashboardShareWindow,
+    pub epoch: DashboardShareWindow,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,8 +205,9 @@ pub struct DashboardPayout {
     pub coinbase_output_budget_vb: u64,
     pub direct_fee_basis_sat_vb: u64,
     pub vault_claim_sats: u64,
-    pub estimated_withdrawal_fee_sats: u64,
+    pub estimated_withdrawal_fee_sats: Option<u64>,
     pub min_payout_sats: u64,
+    pub block_reward_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,6 +215,7 @@ pub struct DashboardPayout {
 pub struct DashboardPoolContext {
     pub expected_block_interval: String,
     pub chance30d: f64,
+    pub expected_blocks30d: f64,
     pub bitcoin_network_hashrate_ehs: u64,
     pub vault_epoch: String,
     pub frost_threshold: String,
@@ -191,6 +225,7 @@ pub struct DashboardPoolContext {
     pub last_vault_rotation: String,
     pub vault_key: String,
     pub active_nodes: usize,
+    pub mining_estimate_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,7 +245,34 @@ struct ProjectedPayoutRoute {
     direct_rank: usize,
     direct_cutoff_sats: u64,
     projected_vault_claim_sats: u64,
-    estimated_withdrawal_fee_sats: u64,
+    estimated_withdrawal_fee_sats: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardForkEconomics {
+    block_subsidy_sats: Option<u64>,
+    estimated_fees_sats: Option<u64>,
+    expected_hashes_per_block: Option<f64>,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardProbeContext {
+    bitcoin_status: DashboardServiceStatus,
+    idena_status: DashboardServiceStatus,
+    snapshot_status: DashboardServiceStatus,
+    fork_economics: DashboardForkEconomics,
+}
+
+impl Default for DashboardForkEconomics {
+    fn default() -> Self {
+        Self {
+            block_subsidy_sats: None,
+            estimated_fees_sats: None,
+            expected_hashes_per_block: None,
+            source: "fork explorer not configured".to_string(),
+        }
+    }
 }
 
 pub fn default_allowed_origins() -> Vec<String> {
@@ -285,8 +347,11 @@ fn validate_dashboard_api_config(config: &DashboardApiConfig) -> Result<()> {
 }
 
 pub async fn build_dashboard_snapshot(config: &DashboardApiConfig) -> Result<DashboardApiResponse> {
-    let (bitcoin_status, (idena_status, idena_syncing, idena_epoch)) =
-        tokio::join!(bitcoin_service_status(config), idena_service_status(config));
+    let (bitcoin_status, (idena_status, idena_syncing, idena_epoch), fork_economics) = tokio::join!(
+        bitcoin_service_status(config),
+        idena_service_status(config),
+        dashboard_fork_economics(config)
+    );
     let snapshot_directory = config
         .snapshot_dir
         .as_deref()
@@ -301,9 +366,12 @@ pub async fn build_dashboard_snapshot(config: &DashboardApiConfig) -> Result<Das
     build_dashboard_snapshot_with_statuses(
         &config.datadir,
         config.snapshot_dir.as_deref(),
-        bitcoin_status,
-        idena_status,
-        snapshot_status,
+        DashboardProbeContext {
+            bitcoin_status,
+            idena_status,
+            snapshot_status,
+            fork_economics,
+        },
         &config.account_selector,
         snapshot_directory
             .as_ref()
@@ -314,12 +382,17 @@ pub async fn build_dashboard_snapshot(config: &DashboardApiConfig) -> Result<Das
 fn build_dashboard_snapshot_with_statuses(
     datadir: &Path,
     snapshot_dir: Option<&Path>,
-    bitcoin_status: DashboardServiceStatus,
-    idena_status: DashboardServiceStatus,
-    snapshot_status: DashboardServiceStatus,
+    probes: DashboardProbeContext,
     account_selector: &DashboardAccountSelector,
     verified_snapshot: Option<&local_node::VerifiedSnapshotFile>,
 ) -> Result<DashboardApiResponse> {
+    let DashboardProbeContext {
+        bitcoin_status,
+        idena_status,
+        snapshot_status,
+        fork_economics,
+    } = probes;
+    let generated_at_unix = current_unix_timestamp()?;
     let local_status = local_node::local_node_status(datadir)?;
     let state = local_node::replay_state_with_confirmed_payouts(datadir, snapshot_dir)?;
     let replay_summary = state.summary();
@@ -352,6 +425,14 @@ fn build_dashboard_snapshot_with_statuses(
         }
     }
     let selected = select_dashboard_account(&accounts, state.registrations(), account_selector);
+    let selected_miner_id = selected.as_ref().map(|account| account.miner_id.as_str());
+    let share_summaries = state.share_summaries();
+    let share_windows =
+        dashboard_share_windows(&share_summaries, selected_miner_id, generated_at_unix)?;
+    let accepted_shares = count_shares(&share_summaries, selected_miner_id, true);
+    let stale_shares = count_shares(&share_summaries, selected_miner_id, false);
+    let pool_accepted_shares = count_shares(&share_summaries, None, true);
+    let pool_stale_shares = count_shares(&share_summaries, None, false);
     let total_hashrate_score = accounts.iter().fold(0u128, |sum, account| {
         sum.saturating_add(account.hashrate_score)
     });
@@ -369,7 +450,15 @@ fn build_dashboard_snapshot_with_statuses(
     let relative_hashrate_share = ratio(user_hashrate_score, total_hashrate_score);
     let relative_idena_share = ratio(user_idena_score, total_idena_score);
     let combined_reward_weight = (relative_hashrate_share * 0.5) + (relative_idena_share * 0.5);
-    let payout_route = projected_payout_route(&accounts, selected.as_ref());
+    let block_reward_sats = fork_economics
+        .block_subsidy_sats
+        .zip(fork_economics.estimated_fees_sats)
+        .and_then(|(subsidy, fees)| subsidy.checked_add(fees));
+    let payout_route =
+        projected_payout_route(&accounts, selected.as_ref(), block_reward_sats.unwrap_or(0));
+    let pool_hashrate_hps = share_windows.hours_24.pool_hashrate_ths * 1_000_000_000_000.0;
+    let (expected_block_interval, chance30d, expected_blocks30d) =
+        mining_odds(pool_hashrate_hps, fork_economics.expected_hashes_per_block);
     let selected_registration = selected
         .as_ref()
         .and_then(|account| state.registrations().get(&account.miner_id));
@@ -438,7 +527,7 @@ fn build_dashboard_snapshot_with_statuses(
         });
 
     Ok(DashboardApiResponse {
-        generated_at_unix: current_unix_timestamp()?,
+        generated_at_unix,
         source: "local-p2pool-node".to_string(),
         service_statuses: vec![
             DashboardServiceStatus {
@@ -469,14 +558,17 @@ fn build_dashboard_snapshot_with_statuses(
         account: DashboardPoolSnapshot {
             identity,
             sharechain: DashboardSharechain {
-                accepted_shares: replay_summary.active_share_count,
-                stale_shares: replay_summary.inactive_share_count,
+                accepted_shares,
+                stale_shares,
+                pool_accepted_shares,
+                pool_stale_shares,
                 hashrate_score: safe_score(user_hashrate_score),
                 pool_hashrate_score: safe_score(total_hashrate_score),
-                pool_hashrate_ths: 0.0,
-                user_hashrate_ths: 0.0,
+                pool_hashrate_ths: share_windows.hours_24.pool_hashrate_ths,
+                user_hashrate_ths: share_windows.hours_24.user_hashrate_ths,
                 relative_hashrate_share,
-                recent_shares: recent_share_points(replay_summary.active_share_count),
+                recent_shares: share_windows.hours_24.recent_shares.clone(),
+                windows: share_windows,
             },
             idena_accounting: DashboardIdenaAccounting {
                 validation_score: selected_snapshot_score
@@ -497,8 +589,14 @@ fn build_dashboard_snapshot_with_statuses(
             },
             payout: DashboardPayout {
                 combined_reward_weight,
-                block_subsidy_btc: DEFAULT_BLOCK_SUBSIDY_BTC,
-                estimated_fees_btc: 0.0,
+                block_subsidy_btc: fork_economics
+                    .block_subsidy_sats
+                    .map(|value| value as f64 / SATS_PER_BTC)
+                    .unwrap_or(0.0),
+                estimated_fees_btc: fork_economics
+                    .estimated_fees_sats
+                    .map(|value| value as f64 / SATS_PER_BTC)
+                    .unwrap_or(0.0),
                 btc_usd_reference: DEFAULT_BTC_USD_REFERENCE,
                 btc_usd_reference_label: "local display reference".to_string(),
                 direct_payout_eligible: payout_route.direct_payout_eligible,
@@ -510,10 +608,12 @@ fn build_dashboard_snapshot_with_statuses(
                 vault_claim_sats: payout_route.projected_vault_claim_sats,
                 estimated_withdrawal_fee_sats: payout_route.estimated_withdrawal_fee_sats,
                 min_payout_sats: MIN_DIRECT_PAYOUT_SATS,
+                block_reward_source: fork_economics.source.clone(),
             },
             pool: DashboardPoolContext {
-                expected_block_interval: "waiting for live pool hashrate".to_string(),
-                chance30d: 0.0,
+                expected_block_interval,
+                chance30d,
+                expected_blocks30d,
                 bitcoin_network_hashrate_ehs: 0,
                 vault_epoch: "not active".to_string(),
                 frost_threshold: "no active vault epoch".to_string(),
@@ -523,6 +623,7 @@ fn build_dashboard_snapshot_with_statuses(
                 last_vault_rotation: "not available".to_string(),
                 vault_key: "not active".to_string(),
                 active_nodes: peers.len() + 1,
+                mining_estimate_source: fork_economics.source.clone(),
             },
         },
     })
@@ -531,6 +632,7 @@ fn build_dashboard_snapshot_with_statuses(
 fn projected_payout_route(
     accounts: &[ParticipantAccount],
     selected: Option<&ParticipantAccount>,
+    block_reward_sats: u64,
 ) -> ProjectedPayoutRoute {
     let Some(selected) = selected else {
         return ProjectedPayoutRoute {
@@ -538,13 +640,13 @@ fn projected_payout_route(
             direct_rank: 0,
             direct_cutoff_sats: MIN_DIRECT_PAYOUT_SATS,
             projected_vault_claim_sats: 0,
-            estimated_withdrawal_fee_sats: 0,
+            estimated_withdrawal_fee_sats: None,
         };
     };
     let selected_miner_id = selected.miner_id.to_ascii_lowercase();
     let Ok(schedule) = build_payout_schedule(
         accounts,
-        DEFAULT_BLOCK_REWARD_SATS,
+        block_reward_sats,
         DIRECT_PAYOUT_LIMIT,
         MIN_DIRECT_PAYOUT_SATS,
     ) else {
@@ -553,7 +655,7 @@ fn projected_payout_route(
             direct_rank: 0,
             direct_cutoff_sats: MIN_DIRECT_PAYOUT_SATS,
             projected_vault_claim_sats: selected.unpaid_sats,
-            estimated_withdrawal_fee_sats: 0,
+            estimated_withdrawal_fee_sats: None,
         };
     };
 
@@ -618,7 +720,331 @@ fn projected_payout_route(
         direct_rank,
         direct_cutoff_sats,
         projected_vault_claim_sats,
-        estimated_withdrawal_fee_sats: 0,
+        estimated_withdrawal_fee_sats: None,
+    }
+}
+
+async fn dashboard_fork_economics(config: &DashboardApiConfig) -> DashboardForkEconomics {
+    if let Some(rpc_url) = config.bitcoin_rpc_url.as_ref() {
+        match BitcoinRpcClient::new_with_remote_policy(
+            rpc_url,
+            config.bitcoin_rpc_auth.clone(),
+            config.allow_remote_rpc,
+        ) {
+            Ok(client) => {
+                match timeout(config.probe_timeout, client.mining_job_template_unchecked()).await {
+                    Ok(Ok(template)) => match fork_economics_from_template(&template) {
+                        Ok(economics) => return economics,
+                        Err(_) => {
+                            return DashboardForkEconomics {
+                                source: "next-height Bitcoin template is invalid".to_string(),
+                                ..DashboardForkEconomics::default()
+                            };
+                        }
+                    },
+                    Ok(Err(_)) => {}
+                    Err(_) => {
+                        return DashboardForkEconomics {
+                            source: "next-height Bitcoin template probe timed out".to_string(),
+                            ..DashboardForkEconomics::default()
+                        };
+                    }
+                }
+            }
+            Err(_) => {
+                return DashboardForkEconomics {
+                    source: "Bitcoin RPC URL is invalid".to_string(),
+                    ..DashboardForkEconomics::default()
+                };
+            }
+        }
+    }
+
+    let Some(client) = config.fork_explorer_client.as_ref() else {
+        return DashboardForkEconomics::default();
+    };
+    let result = timeout(config.probe_timeout, async {
+        let status = client.status().await?;
+        let block_hash = client
+            .active_block_hash(status.tip_height)
+            .await?
+            .context("fork explorer has no active tip block")?;
+        let block = client
+            .block_summary(block_hash)
+            .await?
+            .context("fork explorer has no active tip summary")?;
+        let current_subsidy = block_subsidy_sats(block.height);
+        let next_subsidy = block_subsidy_sats(status.tip_height.saturating_add(1));
+        let claimed_fees = block.coinbase_value_sats.saturating_sub(current_subsidy);
+        Ok::<_, anyhow::Error>(DashboardForkEconomics {
+            block_subsidy_sats: Some(next_subsidy),
+            estimated_fees_sats: Some(claimed_fees),
+            expected_hashes_per_block: None,
+            source: "next-height subsidy plus latest-block fees; next template target unavailable"
+                .to_string(),
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(economics)) => economics,
+        Ok(Err(_)) => DashboardForkEconomics {
+            source: "fork explorer reward context unavailable".to_string(),
+            ..DashboardForkEconomics::default()
+        },
+        Err(_) => DashboardForkEconomics {
+            source: "fork explorer reward probe timed out".to_string(),
+            ..DashboardForkEconomics::default()
+        },
+    }
+}
+
+fn fork_economics_from_template(
+    template: &BitcoinMiningJobTemplate,
+) -> Result<DashboardForkEconomics> {
+    let subsidy = block_subsidy_sats(template.height);
+    let fees = template
+        .coinbase_value_sats
+        .checked_sub(subsidy)
+        .context("next-height coinbase value is below the block subsidy")?;
+    Ok(DashboardForkEconomics {
+        block_subsidy_sats: Some(subsidy),
+        estimated_fees_sats: Some(fees),
+        expected_hashes_per_block: Some(expected_hashes_for_compact_target(&template.bits)?),
+        source: "next-height subsidy, fees, and target from authenticated getblocktemplate"
+            .to_string(),
+    })
+}
+
+fn expected_hashes_for_compact_target(bits: &str) -> Result<f64> {
+    if bits.len() != 8 || !bits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("fork target bits must be exactly four hexadecimal bytes");
+    }
+    let bits = u32::from_str_radix(bits, 16).context("failed to parse fork target bits")?;
+    let target = Target::from_compact(CompactTarget::from_consensus(bits));
+    expected_hashes_for_target(target)
+}
+
+fn expected_hashes_for_target_hex(target: &str) -> Result<f64> {
+    let bytes = hex::decode(target).context("failed to decode share target")?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("share target must be exactly 32 bytes"))?;
+    expected_hashes_for_target(Target::from_be_bytes(bytes))
+}
+
+fn expected_hashes_for_target(target: Target) -> Result<f64> {
+    if target == Target::ZERO {
+        bail!("proof-of-work target must be nonzero");
+    }
+    let expected_hashes = 2f64.powf(target.to_work().log2());
+    if !expected_hashes.is_finite() || expected_hashes <= 0.0 {
+        bail!("proof-of-work target does not produce a finite work estimate");
+    }
+    Ok(expected_hashes)
+}
+
+fn mining_odds(
+    pool_hashrate_hps: f64,
+    expected_hashes_per_block: Option<f64>,
+) -> (String, f64, f64) {
+    let Some(expected_hashes) = expected_hashes_per_block else {
+        return ("fork target unavailable".to_string(), 0.0, 0.0);
+    };
+    if !pool_hashrate_hps.is_finite() || pool_hashrate_hps <= 0.0 {
+        return ("waiting for submitted share work".to_string(), 0.0, 0.0);
+    }
+    let interval_seconds = expected_hashes / pool_hashrate_hps;
+    if !interval_seconds.is_finite() || interval_seconds <= 0.0 {
+        return ("fork mining estimate unavailable".to_string(), 0.0, 0.0);
+    }
+    let thirty_days_seconds = (30 * SECONDS_PER_DAY) as f64;
+    let expected_blocks30d = thirty_days_seconds / interval_seconds;
+    let chance30d = (-(-expected_blocks30d).exp_m1() * 100.0).clamp(0.0, 100.0);
+    (
+        format_duration_estimate(interval_seconds),
+        chance30d,
+        expected_blocks30d,
+    )
+}
+
+fn format_duration_estimate(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("~{seconds:.1} seconds at the observed pool rate")
+    } else if seconds < 60.0 * 60.0 {
+        format!("~{:.1} minutes at the observed pool rate", seconds / 60.0)
+    } else if seconds < SECONDS_PER_DAY as f64 {
+        format!("~{:.1} hours at the observed pool rate", seconds / 3_600.0)
+    } else if seconds < 365.25 * SECONDS_PER_DAY as f64 {
+        format!(
+            "~{:.1} days at the observed pool rate",
+            seconds / SECONDS_PER_DAY as f64
+        )
+    } else {
+        format!(
+            "~{:.1} years at the observed pool rate",
+            seconds / (365.25 * SECONDS_PER_DAY as f64)
+        )
+    }
+}
+
+fn count_shares(shares: &[SharechainShareSummary], miner_id: Option<&str>, active: bool) -> usize {
+    shares
+        .iter()
+        .filter(|share| {
+            share.active == active
+                && match miner_id {
+                    Some(miner_id) => share.miner_id.eq_ignore_ascii_case(miner_id),
+                    None => true,
+                }
+        })
+        .count()
+}
+
+fn dashboard_share_windows(
+    shares: &[SharechainShareSummary],
+    miner_id: Option<&str>,
+    now: i64,
+) -> Result<DashboardShareWindows> {
+    let earliest = shares
+        .iter()
+        .filter_map(|share| share.template_created_at_unix)
+        .filter(|timestamp| *timestamp <= now)
+        .min()
+        .unwrap_or(now);
+    Ok(DashboardShareWindows {
+        hours_24: dashboard_share_window(
+            shares,
+            miner_id,
+            now,
+            now.saturating_sub(SECONDS_PER_DAY),
+            "hours",
+        )?,
+        days_7: dashboard_share_window(
+            shares,
+            miner_id,
+            now,
+            now.saturating_sub(7 * SECONDS_PER_DAY),
+            "days",
+        )?,
+        epoch: dashboard_share_window(shares, miner_id, now, earliest, "epoch")?,
+    })
+}
+
+fn dashboard_share_window(
+    shares: &[SharechainShareSummary],
+    miner_id: Option<&str>,
+    now: i64,
+    start: i64,
+    label_mode: &str,
+) -> Result<DashboardShareWindow> {
+    let measurement_seconds = u64::try_from(now.saturating_sub(start).max(1))
+        .context("share measurement window does not fit u64")?;
+    let mut points = (0..SHARE_CHART_BUCKETS)
+        .map(|index| DashboardSharePoint {
+            label: share_bucket_label(start, measurement_seconds, index, label_mode),
+            accepted: 0,
+            stale: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut accepted_shares = 0usize;
+    let mut stale_shares = 0usize;
+    let mut pool_accepted_shares = 0usize;
+    let mut pool_stale_shares = 0usize;
+    let mut user_expected_hashes = 0.0f64;
+    let mut pool_expected_hashes = 0.0f64;
+    let mut earliest_user_share = None::<i64>;
+    let mut earliest_pool_share = None::<i64>;
+
+    for share in shares {
+        let Some(timestamp) = share.template_created_at_unix else {
+            continue;
+        };
+        if timestamp < start || timestamp > now {
+            continue;
+        }
+        let expected_hashes = expected_hashes_for_target_hex(&share.target)?;
+        pool_expected_hashes += expected_hashes;
+        earliest_pool_share = Some(
+            earliest_pool_share
+                .map(|earliest| earliest.min(timestamp))
+                .unwrap_or(timestamp),
+        );
+        if share.active {
+            pool_accepted_shares += 1;
+        } else {
+            pool_stale_shares += 1;
+        }
+        let selected =
+            miner_id.is_some_and(|miner_id| share.miner_id.eq_ignore_ascii_case(miner_id));
+        if !selected {
+            continue;
+        }
+        user_expected_hashes += expected_hashes;
+        earliest_user_share = Some(
+            earliest_user_share
+                .map(|earliest| earliest.min(timestamp))
+                .unwrap_or(timestamp),
+        );
+        let elapsed = u64::try_from(timestamp.saturating_sub(start)).unwrap_or(0);
+        let bucket = usize::try_from(
+            elapsed
+                .saturating_mul(SHARE_CHART_BUCKETS as u64)
+                .checked_div(measurement_seconds)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+        .min(SHARE_CHART_BUCKETS - 1);
+        if share.active {
+            accepted_shares += 1;
+            points[bucket].accepted += 1;
+        } else {
+            stale_shares += 1;
+            points[bucket].stale += 1;
+        }
+    }
+
+    let pool_measurement_seconds = observed_share_seconds(now, start, earliest_pool_share);
+    let user_measurement_seconds = observed_share_seconds(now, start, earliest_user_share);
+    let pool_seconds = pool_measurement_seconds.max(1) as f64;
+    let user_seconds = user_measurement_seconds.max(1) as f64;
+    Ok(DashboardShareWindow {
+        accepted_shares,
+        stale_shares,
+        pool_accepted_shares,
+        pool_stale_shares,
+        user_hashrate_ths: user_expected_hashes / user_seconds / 1_000_000_000_000.0,
+        pool_hashrate_ths: pool_expected_hashes / pool_seconds / 1_000_000_000_000.0,
+        measurement_seconds,
+        user_measurement_seconds,
+        pool_measurement_seconds,
+        recent_shares: points,
+    })
+}
+
+fn observed_share_seconds(now: i64, window_start: i64, earliest: Option<i64>) -> u64 {
+    let Some(earliest) = earliest else {
+        return 0;
+    };
+    u64::try_from(now.saturating_sub(earliest.max(window_start)).max(1)).unwrap_or(u64::MAX)
+}
+
+fn share_bucket_label(start: i64, duration: u64, index: usize, mode: &str) -> String {
+    let midpoint = start.saturating_add(
+        i64::try_from(
+            duration
+                .saturating_mul((index * 2 + 1) as u64)
+                .checked_div((SHARE_CHART_BUCKETS * 2) as u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    );
+    let Some(timestamp) = DateTime::<Utc>::from_timestamp(midpoint, 0) else {
+        return (index + 1).to_string();
+    };
+    match mode {
+        "hours" => timestamp.format("%H:%M").to_string(),
+        "days" => timestamp.format("%a").to_string(),
+        _ => timestamp.format("%m-%d").to_string(),
     }
 }
 
@@ -989,7 +1415,7 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let raw_target = parts.next().unwrap_or("");
-    let target = match parse_request_target(raw_target) {
+    let transport_target = match parse_request_target(raw_target) {
         Ok(target) => target,
         Err(_) => {
             return Ok(http_response(
@@ -1000,9 +1426,15 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
             ));
         }
     };
-    let public_explorer_request =
-        method == "GET" && config.public_explorer && target.path.starts_with("/api/v1/");
-    if method != "OPTIONS" && !public_explorer_request && !request_is_authorized(request, config) {
+    let authenticated_proxy =
+        method == "GET" && transport_target.path == "/internal/dashboard-proxy";
+    let public_explorer_request = method == "GET"
+        && config.public_explorer
+        && !authenticated_proxy
+        && transport_target.path.starts_with("/api/v1/");
+    let protected_request_is_authorized = request_is_authorized(request, config)
+        && (!authenticated_proxy || config.api_token.is_some());
+    if method != "OPTIONS" && !public_explorer_request && !protected_request_is_authorized {
         return Ok(http_response(
             "401 Unauthorized",
             "application/json",
@@ -1026,6 +1458,14 @@ async fn handle_http_request(request: &str, config: &DashboardApiConfig) -> Resu
         }
     } else {
         None
+    };
+    let target = if authenticated_proxy {
+        match dashboard_proxy_target(request) {
+            Ok(target) => target,
+            Err(_) => return Ok(bad_explorer_request(cors_origin.as_deref())),
+        }
+    } else {
+        transport_target
     };
     match (method, target.path.as_str()) {
         ("OPTIONS", _) => Ok(http_response(
@@ -1701,6 +2141,29 @@ fn parse_request_target(raw: &str) -> Result<ParsedRequestTarget> {
     })
 }
 
+fn dashboard_proxy_target(request: &str) -> Result<ParsedRequestTarget> {
+    let encoded = request_header(request, "x-pohw-dashboard-target-hex")
+        .map_err(|_| anyhow::anyhow!("duplicate dashboard proxy target header"))?
+        .context("dashboard proxy target header is missing")?;
+    if encoded.is_empty()
+        || encoded.len() > 4096
+        || encoded.len() % 2 != 0
+        || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("dashboard proxy target encoding is invalid");
+    }
+    let decoded = hex::decode(encoded).context("dashboard proxy target is not hexadecimal")?;
+    if decoded.len() > 2048 || decoded.iter().any(|byte| *byte <= b' ' || *byte == 0x7f) {
+        bail!("dashboard proxy target is unsafe");
+    }
+    let raw = std::str::from_utf8(&decoded).context("dashboard proxy target is not UTF-8")?;
+    let target = parse_request_target(raw)?;
+    if target.path != "/dashboard.json" && !target.path.starts_with("/api/v1/") {
+        bail!("dashboard proxy target route is not allowed");
+    }
+    Ok(target)
+}
+
 fn explorer_pagination(query: &BTreeMap<String, String>) -> Result<(Option<String>, usize)> {
     if query.keys().any(|key| key != "cursor" && key != "limit") {
         bail!("unsupported explorer query parameter");
@@ -2091,18 +2554,6 @@ fn http_response(
     response
 }
 
-fn recent_share_points(applied_message_count: usize) -> Vec<DashboardSharePoint> {
-    ["00", "03", "06", "09", "12", "15", "18", "21"]
-        .into_iter()
-        .enumerate()
-        .map(|(idx, label)| DashboardSharePoint {
-            label: label.to_string(),
-            accepted: if idx == 7 { applied_message_count } else { 0 },
-            stale: 0,
-        })
-        .collect()
-}
-
 fn ratio(value: u128, total: u128) -> f64 {
     if total == 0 {
         0.0
@@ -2200,9 +2651,12 @@ mod tests {
         let snapshot = build_dashboard_snapshot_with_statuses(
             &datadir,
             None,
-            service_status("Bitcoin", "pending", "not configured"),
-            service_status("Idena", "pending", "not configured"),
-            service_status("Snapshot", "pending", "not configured"),
+            DashboardProbeContext {
+                bitcoin_status: service_status("Bitcoin", "pending", "not configured"),
+                idena_status: service_status("Idena", "pending", "not configured"),
+                snapshot_status: service_status("Snapshot", "pending", "not configured"),
+                fork_economics: DashboardForkEconomics::default(),
+            },
             &DashboardAccountSelector::default(),
             None,
         )
@@ -2213,6 +2667,102 @@ mod tests {
         assert_eq!(snapshot.account.sharechain.accepted_shares, 0);
         assert_eq!(snapshot.account.pool.active_nodes, 1);
         fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[test]
+    fn share_windows_use_real_timestamps_targets_and_selected_miner_counts() {
+        let now = 1_800_000_000;
+        let target = hex::encode(Target::MAX_ATTAINABLE_REGTEST.to_be_bytes());
+        let shares = vec![
+            dashboard_share("alice", true, now - 3_600, &target),
+            dashboard_share("alice", false, now - 1_800, &target),
+            dashboard_share("bob", true, now - 900, &target),
+            dashboard_share("alice", true, now - (2 * SECONDS_PER_DAY), &target),
+        ];
+
+        let windows = dashboard_share_windows(&shares, Some("ALICE"), now).unwrap();
+        assert_eq!(windows.hours_24.accepted_shares, 1);
+        assert_eq!(windows.hours_24.stale_shares, 1);
+        assert_eq!(windows.hours_24.pool_accepted_shares, 2);
+        assert_eq!(windows.hours_24.pool_stale_shares, 1);
+        assert_eq!(windows.hours_24.measurement_seconds, SECONDS_PER_DAY as u64);
+        assert_eq!(windows.hours_24.user_measurement_seconds, 3_600);
+        assert_eq!(windows.hours_24.pool_measurement_seconds, 3_600);
+        assert_eq!(windows.days_7.accepted_shares, 2);
+        assert!(windows.hours_24.user_hashrate_ths > 0.0);
+        assert!(windows.hours_24.pool_hashrate_ths > windows.hours_24.user_hashrate_ths);
+        assert!(windows.days_7.user_hashrate_ths < windows.hours_24.user_hashrate_ths);
+        assert_eq!(
+            windows
+                .hours_24
+                .recent_shares
+                .iter()
+                .map(|point| point.accepted)
+                .sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn new_miner_hashrate_uses_observed_span_not_the_full_window() {
+        let now = 1_800_000_000;
+        let target = hex::encode(Target::MAX_ATTAINABLE_REGTEST.to_be_bytes());
+        let shares = vec![dashboard_share("alice", true, now - 60, &target)];
+
+        let windows = dashboard_share_windows(&shares, Some("alice"), now).unwrap();
+        let expected_hashes = expected_hashes_for_target_hex(&target).unwrap();
+        let expected_ths = expected_hashes / 60.0 / 1_000_000_000_000.0;
+
+        assert_eq!(windows.hours_24.user_measurement_seconds, 60);
+        assert_eq!(windows.hours_24.pool_measurement_seconds, 60);
+        assert!((windows.hours_24.user_hashrate_ths - expected_ths).abs() < 1e-12);
+        assert!((windows.hours_24.pool_hashrate_ths - expected_ths).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fork_economics_uses_next_template_height_fees_and_bits() {
+        let height = 958_080;
+        let subsidy = block_subsidy_sats(height);
+        let template = BitcoinMiningJobTemplate {
+            version: 1,
+            previous_block_hash: "11".repeat(32),
+            curtime: 1_800_000_000,
+            bits: "207fffff".to_string(),
+            height,
+            coinbase_value_sats: subsidy + 1_234,
+            transaction_hashes: Vec::new(),
+            transactions: Vec::new(),
+            default_witness_commitment: None,
+            pohw_replay_marker: None,
+            pohw_idena_authorization: None,
+        };
+
+        let economics = fork_economics_from_template(&template).unwrap();
+
+        assert_eq!(economics.block_subsidy_sats, Some(subsidy));
+        assert_eq!(economics.estimated_fees_sats, Some(1_234));
+        assert_eq!(
+            economics.expected_hashes_per_block,
+            Some(expected_hashes_for_compact_target("207fffff").unwrap())
+        );
+        assert!(economics.source.contains("getblocktemplate"));
+    }
+
+    #[test]
+    fn mining_odds_keep_expected_count_separate_from_at_least_one_probability() {
+        let thirty_days = (30 * SECONDS_PER_DAY) as f64;
+        let (interval, chance, expected_blocks) = mining_odds(1.0, Some(thirty_days));
+        assert!(interval.contains("days"));
+        assert!((expected_blocks - 1.0).abs() < 1e-12);
+        assert!((chance - 63.212_055_882_855_765).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bitcoin_subsidy_uses_height_halvings() {
+        assert_eq!(block_subsidy_sats(0), 5_000_000_000);
+        assert_eq!(block_subsidy_sats(210_000), 2_500_000_000);
+        assert_eq!(block_subsidy_sats(840_000), 312_500_000);
+        assert_eq!(block_subsidy_sats(64 * 210_000), 0);
     }
 
     #[tokio::test]
@@ -2234,6 +2784,29 @@ mod tests {
         assert!(response.contains("Cross-Origin-Opener-Policy: same-origin"));
         assert!(response.contains("\"source\": \"local-p2pool-node\""));
         fs::remove_dir_all(datadir).unwrap();
+    }
+
+    fn dashboard_share(
+        miner_id: &str,
+        active: bool,
+        timestamp: i64,
+        target: &str,
+    ) -> SharechainShareSummary {
+        SharechainShareSummary {
+            share_hash: "11".repeat(32),
+            height: 1,
+            active,
+            miner_id: miner_id.to_string(),
+            parent_share_hash: "00".repeat(32),
+            bitcoin_template_hash: "22".repeat(32),
+            work_hash: "00".repeat(32),
+            target: target.to_string(),
+            hashrate_score_delta: "1".to_string(),
+            cumulative_score: Some("1".to_string()),
+            idena_snapshot_id: "2026-07-19".to_string(),
+            idena_snapshot_proof_root: "33".repeat(32),
+            template_created_at_unix: Some(timestamp),
+        }
     }
 
     #[tokio::test]
@@ -2470,7 +3043,7 @@ mod tests {
         };
         accounts.push(selected.clone());
 
-        let route = projected_payout_route(&accounts, Some(&selected));
+        let route = projected_payout_route(&accounts, Some(&selected), 312_500_000);
 
         assert_eq!(route.direct_rank, 101);
         assert!(!route.direct_payout_eligible);
@@ -2677,6 +3250,70 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 401 Unauthorized"));
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dashboard_proxy_requires_authentication_and_an_allowed_target() {
+        let datadir = temp_datadir("dashboard_proxy_requires_authentication");
+        let mut config = test_config(datadir.clone());
+        config.public_explorer = true;
+        let overview_target = hex::encode("/api/v1/overview");
+
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 401 Unauthorized"));
+
+        config.api_token = Some("secret".to_string());
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"apiVersion\": \"pohw-explorer-v1\""));
+
+        for target in [
+            hex::encode("/health"),
+            "not-hexadecimal".to_string(),
+            String::new(),
+        ] {
+            let response = handle_http_request(
+                &format!(
+                    "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {target}\r\n\r\n"
+                ),
+                &config,
+            )
+            .await
+            .unwrap();
+            assert!(String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 400 Bad Request"));
+        }
+
+        let response = handle_http_request(
+            &format!(
+                "GET /internal/dashboard-proxy HTTP/1.1\r\nHost: localhost\r\nX-PoHW-Dashboard-Token: secret\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\nX-PoHW-Dashboard-Target-Hex: {overview_target}\r\n\r\n"
+            ),
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 400 Bad Request"));
         fs::remove_dir_all(datadir).unwrap();
     }
 

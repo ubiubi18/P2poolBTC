@@ -409,7 +409,7 @@ class Experiment1ManifestTests(unittest.TestCase):
         self.assertLess(evidence_call, install_call)
         self.assertIn("install path contains a symlink", source)
         self.assertIn("--use-verified-build is intentionally disabled", source)
-        self.assertIn("pohw-bitcoin-core-build-evidence/v4", source)
+        self.assertIn("pohw-bitcoin-core-build-evidence/v5", source)
         self.assertIn("O_NOFOLLOW", source)
         self.assertIn('run_as_build_user "$SCRIPT_DIR/pohw-build-bitcoin-core-fork.sh"', source)
         self.assertIn("verify_exact_patched_source", source)

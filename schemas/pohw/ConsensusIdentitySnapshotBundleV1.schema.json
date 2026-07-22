@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/ConsensusIdentitySnapshotBundleV1.schema.json",
+  "title": "ConsensusIdentitySnapshotBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "experiment_id",
+    "registry_contract_address",
+    "source_input_hash",
+    "idena_finalized_height",
+    "idena_finalized_timestamp",
+    "idena_finalized_block_hash",
+    "idena_identity_root",
+    "idena_finality_height",
+    "idena_finality_block_hash",
+    "finality_confirmations",
+    "idena_next_validation_timestamp",
+    "authorization_root",
+    "authorized_identity_count",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": { "const": "pohw-consensus-identity-snapshot-bundle/v1" },
+    "status": { "const": "finalized-inactive-input" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2" },
+    "registry_contract_address": { "$ref": "#/$defs/address" },
+    "source_input_hash": { "$ref": "#/$defs/hash" },
+    "idena_finalized_height": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finalized_timestamp": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finalized_block_hash": { "$ref": "#/$defs/prefixedHash" },
+    "idena_identity_root": { "$ref": "#/$defs/prefixedHash" },
+    "idena_finality_height": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finality_block_hash": { "$ref": "#/$defs/prefixedHash" },
+    "finality_confirmations": { "type": "integer", "minimum": 6, "maximum": 120 },
+    "idena_next_validation_timestamp": { "$ref": "#/$defs/positiveInteger" },
+    "authorization_root": { "$ref": "#/$defs/hash" },
+    "authorized_identity_count": { "type": "integer", "minimum": 1, "maximum": 48 },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 48,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "prefixedHash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "address": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idena_address",
+        "identity_state",
+        "mining_pubkey_xonly",
+        "registry_commitment",
+        "registration_sequence",
+        "registration_block",
+        "registration_epoch"
+      ],
+      "properties": {
+        "idena_address": { "$ref": "#/$defs/address" },
+        "identity_state": { "enum": ["Newbie", "Verified", "Human"] },
+        "mining_pubkey_xonly": { "$ref": "#/$defs/hash" },
+        "registry_commitment": { "$ref": "#/$defs/hash" },
+        "registration_sequence": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "registration_block": { "$ref": "#/$defs/positiveInteger" },
+        "registration_epoch": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leaf_index", "siblings"],
+      "properties": {
+        "leaf_index": { "type": "integer", "minimum": 0, "maximum": 47 },
+        "siblings": {
+          "type": "array",
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/hash" }
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leaf", "proof"],
+      "properties": {
+        "leaf": { "$ref": "#/$defs/leaf" },
+        "proof": { "$ref": "#/$defs/proof" }
+      }
+    }
+  }
+}
