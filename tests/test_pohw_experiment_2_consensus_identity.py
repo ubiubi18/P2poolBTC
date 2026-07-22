@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import json
+import re
 import runpy
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ LOCK = ROOT / "compatibility" / "experiment-2-bitcoin-core-patch-lock.json"
 BUILD_EVIDENCE = ROOT / "scripts" / "pohw-bitcoin-core-build-evidence.py"
 BUILDER = ROOT / "scripts" / "pohw-build-bitcoin-core-fork.sh"
 SOURCE_VERIFIER = ROOT / "scripts" / "pohw-verify-bitcoin-core-source.sh"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def load_validator():
@@ -196,6 +198,37 @@ class Experiment2ConsensusIdentityTests(unittest.TestCase):
         self.assertIn("-DPOHW2_ACTIVATION_ID=$POHW2_ACTIVATION_ID", builder)
         self.assertIn("run_profile_step consensus_identity", builder)
         self.assertIn("feature_pohw_identity_auth.py", builder)
+
+    def test_ci_builds_and_tests_the_locked_bitcoin_core_consensus_patch(self):
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        marker = "  bitcoin-core-consensus:\n"
+        self.assertEqual(workflow.count(marker), 1)
+        job_start = workflow.index(marker)
+        next_job = re.search(
+            r"^  [a-z0-9-]+:\n",
+            workflow[job_start + len(marker) :],
+            re.MULTILINE,
+        )
+        job_end = (
+            len(workflow)
+            if next_job is None
+            else job_start + len(marker) + next_job.start()
+        )
+        job = workflow[job_start:job_end]
+        required_commands = (
+            "pohw-experiment-2-consensus-identity.py",
+            "pohw-verify-bitcoin-core-source.sh",
+            "experiment-2-bitcoin-core-patch-lock.json",
+            "-DPOHW2_ACTIVATION_ID=$POHW2_ACTIVATION_ID",
+            "cmake --build",
+            "--run_test=pohw_identity_auth_tests",
+            "feature_pohw_replay.py",
+            "feature_pohw_identity_auth.py",
+            "ctest --test-dir",
+        )
+        for command in required_commands:
+            with self.subTest(command=command):
+                self.assertIn(command, job)
 
     def test_snapshot_and_build_assurance_cannot_be_downgraded(self):
         weak_snapshot = copy.deepcopy(self.lock)
