@@ -140,6 +140,7 @@ class IdenaModernRuntimeTest(unittest.TestCase):
         self.assertIn('runuser -u idena-relay -- test ! -x', installer)
         self.assertIn("PROVENANCE_FILES=(", installer)
         self.assertIn("--legacy-provenance-file", installer)
+        self.assertIn('python3 -I - "$config" "$datadir"', installer)
         self.assertNotIn("\nsystemctl enable", installer)
 
         result = subprocess.run(

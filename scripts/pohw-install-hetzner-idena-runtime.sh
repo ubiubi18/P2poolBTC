@@ -97,7 +97,7 @@ require_metadata() {
 validate_config() {
   local config=$1
   local datadir=$2
-  python3 - "$config" "$datadir" <<'PY'
+  python3 -I - "$config" "$datadir" <<'PY'
 import json
 import sys
 
