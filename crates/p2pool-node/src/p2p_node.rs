@@ -1742,10 +1742,20 @@ async fn append_gossip_envelope_after_template_admission_with_authorization(
     datadir: &Path,
     envelope: GossipEnvelope,
     max_future_skew_seconds: i64,
-    _max_age_seconds: i64,
+    max_age_seconds: i64,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
     authorization: HistoricalReplayAuthorization,
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
+    if !authorization.checkpoint_authorized() {
+        return append_live_gossip_envelope_after_template_admission(
+            datadir,
+            envelope,
+            max_future_skew_seconds,
+            max_age_seconds,
+            work_template_admission,
+        )
+        .await;
+    }
     authenticate_durable_envelope(datadir, &envelope, max_future_skew_seconds)?;
     let (historical_chain_material, require_current_idena_eligibility) =
         historical_admission_flags(authorization);
@@ -3306,19 +3316,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historical_sync_append_accepts_stale_signed_non_template_envelope() {
-        let datadir = temp_dir("historical-sync-envelope");
+    async fn uncheckpointed_sync_append_enforces_max_age() {
+        let datadir = temp_dir("uncheckpointed-sync-envelope");
         let keypair = keypair(8);
         let mut old = envelope(&keypair);
         old.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
         old.sign(&keypair).unwrap();
 
-        let appended =
+        let error =
             append_gossip_envelope_after_template_admission(&datadir, old, 300, 86_400, None)
                 .await
-                .unwrap();
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("older than max age"));
+        assert!(local_node::gossip_inventory(&datadir).unwrap().is_empty());
+
+        let appended = append_gossip_envelope_after_template_admission(
+            &datadir,
+            envelope(&keypair),
+            300,
+            86_400,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(appended.message_result.outcome, ApplyOutcome::Applied);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalized_checkpoint_authorization_preserves_durable_replay() {
+        let datadir = temp_dir("checkpoint-authorized-sync-envelope");
+        let keypair = keypair(8);
+        let mut old = envelope(&keypair);
+        old.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
+        old.sign(&keypair).unwrap();
+
+        let appended = append_gossip_envelope_after_template_admission_with_authorization(
+            &datadir,
+            old,
+            300,
+            86_400,
+            None,
+            HistoricalReplayAuthorization::FinalizedCheckpoint,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(appended.message_result.outcome, ApplyOutcome::Applied);
+        fs::remove_dir_all(datadir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncheckpointed_stale_template_is_rejected_before_admission() {
+        let datadir = temp_dir("stale-template-before-admission");
+        let (_registration, mining_keypair) = signed_registration();
+        let share = mined_test_share(&"11".repeat(32), ZERO_SHARE_PARENT_HASH, &mining_keypair);
+        let template = signed_work_template(&share, &mining_keypair);
+        let envelope_keypair = keypair(8);
+        let mut envelope = envelope_for_message(
+            SharechainMessage::BitcoinWorkTemplate(template),
+            &envelope_keypair,
+            0x08,
+        );
+        envelope.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
+        envelope.sign(&envelope_keypair).unwrap();
+
+        let error =
+            append_gossip_envelope_after_template_admission(&datadir, envelope, 300, 86_400, None)
+                .await
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("older than max age"));
+        assert!(local_node::gossip_inventory(&datadir).unwrap().is_empty());
+        assert!(local_node::replay_state(&datadir)
+            .unwrap()
+            .bitcoin_work_templates()
+            .is_empty());
         fs::remove_dir_all(datadir).unwrap();
     }
 
