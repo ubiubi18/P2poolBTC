@@ -12,6 +12,14 @@ SYNTHETIC_AUTHKEY = "".join(("ts", "key", "-", "auth", "-", "synthetic-fixture")
 
 
 class TailscaleRemoteAccessTest(unittest.TestCase):
+    def test_installer_uses_unique_temporary_file(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+
+        self.assertIn('mktemp "${INSTALLER_PATH}.XXXXXX"', source)
+        self.assertIn("trap 'rm -f \"$installer_path\"' EXIT", source)
+        self.assertNotIn('-o "$INSTALLER_PATH"', source)
+        self.assertNotIn('sh "$INSTALLER_PATH"', source)
+
     def write_fake_tailscale(self, root: Path, *, backend_state: str = "NeedsLogin") -> Path:
         (root / "tailscale.state").write_text(backend_state, encoding="utf-8")
         fake = root / "tailscale"

@@ -183,6 +183,7 @@ run_cmd() {
 }
 
 ensure_tailscale_installed() {
+  local installer_path
   if command -v "$TAILSCALE_BIN" >/dev/null 2>&1; then
     return 0
   fi
@@ -194,9 +195,19 @@ ensure_tailscale_installed() {
     echo "curl is required to install Tailscale automatically" >&2
     exit 1
   fi
-  run_cmd "$CURL_BIN" -fsSL "$INSTALLER_URL" -o "$INSTALLER_PATH"
-  run_cmd chmod 700 "$INSTALLER_PATH"
-  run_cmd sh "$INSTALLER_PATH"
+  if is_truthy "$DRY_RUN"; then
+    installer_path="${INSTALLER_PATH}.XXXXXX"
+  else
+    installer_path="$(mktemp "${INSTALLER_PATH}.XXXXXX")"
+  fi
+  (
+    if ! is_truthy "$DRY_RUN"; then
+      trap 'rm -f "$installer_path"' EXIT
+    fi
+    run_cmd "$CURL_BIN" -fsSL "$INSTALLER_URL" -o "$installer_path"
+    run_cmd chmod 700 "$installer_path"
+    run_cmd sh "$installer_path"
+  )
 }
 
 tailscale_authenticated() {
