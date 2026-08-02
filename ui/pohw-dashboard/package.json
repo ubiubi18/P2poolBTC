@@ -14,7 +14,7 @@
     "test": "node --test tests/miningEconomics.test.ts"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^6.0.3",
+    "@vitejs/plugin-react": "^6.0.4",
     "lucide-react": "^1.24.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
