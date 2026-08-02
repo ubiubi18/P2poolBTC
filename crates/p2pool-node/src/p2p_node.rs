@@ -1742,11 +1742,17 @@ async fn append_gossip_envelope_after_template_admission_with_authorization(
     datadir: &Path,
     envelope: GossipEnvelope,
     max_future_skew_seconds: i64,
-    _max_age_seconds: i64,
+    max_age_seconds: i64,
     work_template_admission: Option<&WorkTemplateAdmissionConfig>,
     authorization: HistoricalReplayAuthorization,
 ) -> Result<local_node::AppendGossipEnvelopeResult> {
-    authenticate_durable_envelope(datadir, &envelope, max_future_skew_seconds)?;
+    if authorization.checkpoint_authorized() {
+        authenticate_durable_envelope(datadir, &envelope, max_future_skew_seconds)?;
+    } else {
+        let now = current_unix_timestamp()?;
+        envelope.verify_at(now, max_future_skew_seconds, max_age_seconds)?;
+        verify_envelope_network_binding(datadir, &envelope)?;
+    }
     let (historical_chain_material, require_current_idena_eligibility) =
         historical_admission_flags(authorization);
     admit_gossip_bitcoin_material(
@@ -1757,7 +1763,16 @@ async fn append_gossip_envelope_after_template_admission_with_authorization(
         require_current_idena_eligibility,
     )
     .await?;
-    local_node::append_historical_gossip_envelope(datadir, envelope, max_future_skew_seconds)
+    if authorization.checkpoint_authorized() {
+        local_node::append_historical_gossip_envelope(datadir, envelope, max_future_skew_seconds)
+    } else {
+        local_node::append_gossip_envelope(
+            datadir,
+            envelope,
+            max_future_skew_seconds,
+            max_age_seconds,
+        )
+    }
 }
 
 async fn append_live_gossip_envelope_after_template_admission(
@@ -3306,19 +3321,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historical_sync_append_accepts_stale_signed_non_template_envelope() {
+    async fn uncheckpointed_sync_rejects_stale_signed_envelope() {
         let datadir = temp_dir("historical-sync-envelope");
         let keypair = keypair(8);
         let mut old = envelope(&keypair);
         old.created_at_unix = current_unix_timestamp().unwrap() - 172_800;
         old.sign(&keypair).unwrap();
 
-        let appended =
+        let error =
             append_gossip_envelope_after_template_admission(&datadir, old, 300, 86_400, None)
                 .await
-                .unwrap();
+                .unwrap_err();
 
-        assert_eq!(appended.message_result.outcome, ApplyOutcome::Applied);
+        assert!(error.to_string().contains("older than max age"));
+        assert!(local_node::gossip_inventory(&datadir).unwrap().is_empty());
         fs::remove_dir_all(datadir).unwrap();
     }
 
