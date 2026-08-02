@@ -365,7 +365,7 @@
         {
           "repository": "P2poolBTC",
           "path": "ui/pohw-dashboard/pnpm-lock.yaml",
-          "sha256": "ca5aa34e4e8dc041d0d64f7280bffa889593ed480d10ccd04d4edfde90ad8d25",
+          "sha256": "dd034fd42b09a4dd62c6081abf1d781e515504116f965212f16a3f6d396a7f76",
           "format": "pnpm-lock"
         }
       ],
