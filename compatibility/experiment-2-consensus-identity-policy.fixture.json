@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "experiment_id": "p2poolbtc-experiment-2",
+  "bitcoin_network": "pohw2",
+  "bitcoin_fork_activation_id": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
+  "share_work_activation_id": "6528bfa616769d93d67b89aa4df7a3580949d610a4f7eb4711e791ca61dc3380",
+  "registry_contract_address": "0x3333333333333333333333333333333333333333",
+  "idena_finalized_height": 12345,
+  "idena_finalized_timestamp": 1784404800,
+  "idena_finalized_block_hash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+  "idena_next_validation_timestamp": 1786219200,
+  "authorization_root": "2430c7f7ab395c27c67ed7d4bfc6e55f4db2cbd72ce8dc1876b1c5ebc9411e38",
+  "authorized_identity_count": 3,
+  "bitcoin_activation_height": 958176,
+  "bitcoin_expiry_height": 959184,
+  "bitcoin_expiry_mtp": 1786219200,
+  "max_proof_depth": 8,
+  "require_share_work_commitment": true
+}

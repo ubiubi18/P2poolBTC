@@ -614,6 +614,7 @@ impl ForkChainStore {
             transactions,
             default_witness_commitment,
             pohw_replay_marker: None,
+            pohw_idena_authorization: None,
         })
     }
 
@@ -3699,7 +3700,7 @@ fn validate_coinbase_reward(
     Ok(())
 }
 
-fn block_subsidy_sats(height: u64) -> u64 {
+pub(crate) fn block_subsidy_sats(height: u64) -> u64 {
     let halvings = height / 210_000;
     if halvings >= 64 {
         0

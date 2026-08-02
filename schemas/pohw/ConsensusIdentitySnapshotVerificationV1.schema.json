@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/ConsensusIdentitySnapshotVerificationV1.schema.json",
+  "title": "ConsensusIdentitySnapshotVerificationV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "experiment_id",
+    "registry_contract_address",
+    "source_input_hash",
+    "idena_finalized_height",
+    "idena_finalized_timestamp",
+    "idena_finalized_block_hash",
+    "idena_identity_root",
+    "idena_finality_height",
+    "idena_finality_block_hash",
+    "finality_confirmations",
+    "idena_next_validation_timestamp",
+    "authorization_root",
+    "authorized_identity_count"
+  ],
+  "properties": {
+    "schema_version": { "const": "pohw-consensus-identity-snapshot-verification/v1" },
+    "status": { "const": "verified-inactive-input" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2" },
+    "registry_contract_address": { "$ref": "#/$defs/address" },
+    "source_input_hash": { "$ref": "#/$defs/hash" },
+    "idena_finalized_height": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finalized_timestamp": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finalized_block_hash": { "$ref": "#/$defs/prefixedHash" },
+    "idena_identity_root": { "$ref": "#/$defs/prefixedHash" },
+    "idena_finality_height": { "$ref": "#/$defs/positiveInteger" },
+    "idena_finality_block_hash": { "$ref": "#/$defs/prefixedHash" },
+    "finality_confirmations": { "type": "integer", "minimum": 6, "maximum": 120 },
+    "idena_next_validation_timestamp": { "$ref": "#/$defs/positiveInteger" },
+    "authorization_root": { "$ref": "#/$defs/hash" },
+    "authorized_identity_count": { "type": "integer", "minimum": 1, "maximum": 48 }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "prefixedHash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "address": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+  }
+}

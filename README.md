@@ -30,6 +30,18 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > historical profiles. Read
 > [Experiment 1](EXPERIMENT-1.md) before building or connecting a miner.
 
+> **Experiment 2 is implemented but inactive.** The source-only `pohw2`
+> successor makes finalized-Idena miner authorization a Bitcoin block-consensus
+> rule through a pinned Merkle root and signed `P2IA1` coinbase commitment. It
+> has separate network identity, ports, datadir, a source- and patch-bound
+> activation ID committed by every miner signature, height and parent-MTP
+> snapshot expiry, Core unit plus real
+> `submitblock` chainstate tests, P2Pool template integration, and an offline
+> cross-file verifier. Its checked-in policy contains dummy Idena data and
+> public fixture keys, `launch_enabled=false`, and Core refuses normal startup.
+> It is not a network invitation or release. See
+> [Experiment 2](EXPERIMENT-2.md).
+
 > **Public-join status: blocked technical preview.** The idea, source, tests,
 > and sanitized screenshots may be shared for review. Do not advertise an open
 > mining network yet. The checked-in launch policy remains
@@ -68,7 +80,7 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > and consensus implementation; existing Experiment 1 history is never silently
 > reinterpreted.
 
-> **Share-work successor candidate:** the repository now implements a distinct,
+> **Share-work successor candidate:** the repository implements a distinct,
 > inactive sharechain profile in which each Bitcoin header commits through a
 > `P2SW1` coinbase output to its parent share, assigned target, Idena snapshot,
 > finalized Idena anchor, and policy. Peer admission and replay verify the
@@ -76,8 +88,9 @@ This repo is not a production Bitcoin node, not a token bridge, and not ready fo
 > the Bitcoin block target. The candidate has a new network and activation ID,
 > requires a fresh datadir, and cannot launch while its manifest says
 > `experimental-candidate`. This closes retrospective share assignment inside
-> P2Pool but is not yet a Bitcoin-consensus identity rule, so it does not remove
-> the public-join block. See
+> P2Pool. Experiment 2 composes `P2SW1` with the separate consensus-enforced
+> `P2IA1` authorization rule, but remains an inactive fixture and therefore does
+> not remove the public-join block. See
 > [Share-work binding successor](docs/share-work-binding.md).
 
 > **Bitcoin and Idena risk remain real.** Fork coins have no promised value,
@@ -571,6 +584,18 @@ The dashboard intentionally shows an offline state if the local API is unavailab
 ```sh
 VITE_POHW_DASHBOARD_DEMO=true corepack pnpm@11.11.0 --dir ui/pohw-dashboard dev
 ```
+
+Live dashboard accounting keeps selected-miner and pool-wide share totals
+separate. The 24-hour, 7-day, and active-sharechain views bucket stored template
+timestamps and estimate hashrate from each submitted share's target-derived
+expected work divided by the complete displayed interval. A stopped miner's
+rate therefore decays instead of remaining frozen at its last burst. Fork block
+subsidy, fees claimed by the latest active fork coinbase, and the latest target
+come from the configured fork explorer; unavailable data is shown as unavailable
+and contributes zero rather than falling back to a plausible constant. The
+30-day chance is the Poisson probability of at least one block, while 30-day EV
+uses the separate expected block count. Neither is a profit promise, and fork
+coins have no promised value.
 
 ## Core Commands
 

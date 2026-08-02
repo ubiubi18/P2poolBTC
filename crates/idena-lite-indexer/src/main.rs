@@ -1,12 +1,23 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use idena_lite_indexer::consensus_identity_snapshot::{
+    capture_consensus_identity_snapshot, ConsensusIdentityCaptureOptions,
+};
 use idena_lite_indexer::rpc::IdenaRpcClient;
 use idena_lite_indexer::snapshot_builder::{build_current_snapshot, SnapshotBuildOptions};
+use pohw_core::consensus_identity::{
+    ConsensusIdentitySnapshotBundleV1, ConsensusIdentitySnapshotInputV1,
+};
 use pohw_core::replay::{RewardEvent, RewardReplay};
+use pohw_core::sharechain::MinerRegistration;
 use pohw_core::FORMULA_VERSION;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const MAX_REWARD_EVENTS_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_REGISTRATIONS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CONSENSUS_SNAPSHOT_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CONSENSUS_SNAPSHOT_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "idena-lite-indexer")]
@@ -33,6 +44,39 @@ enum Command {
         reward_events_file: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         allow_empty_reward_replay: bool,
+    },
+    /// Capture a stable public identity/registry view and wait for an exact confirmation chain.
+    ConsensusIdentityCapture {
+        #[arg(long, default_value = "http://127.0.0.1:9009", env = "IDENA_RPC_URL")]
+        rpc_url: String,
+        #[arg(long, default_value_t = false)]
+        allow_remote_rpc: bool,
+        #[arg(long, env = "IDENA_API_KEY_FILE")]
+        api_key_file: PathBuf,
+        #[arg(long)]
+        experiment_id: String,
+        #[arg(long)]
+        registry_contract_address: String,
+        #[arg(long)]
+        registrations_file: PathBuf,
+        #[arg(long, default_value_t = 6)]
+        finality_confirmations: u16,
+        #[arg(long, default_value_t = 15)]
+        poll_seconds: u64,
+        #[arg(long, default_value_t = 1_800)]
+        max_wait_seconds: u64,
+    },
+    /// Verify a captured input and derive the canonical authorization root and proofs offline.
+    ConsensusIdentityBuild {
+        #[arg(long)]
+        input_file: PathBuf,
+    },
+    /// Rebuild and verify an externally supplied inactive snapshot bundle offline.
+    ConsensusIdentityVerify {
+        #[arg(long)]
+        input_file: PathBuf,
+        #[arg(long)]
+        bundle_file: PathBuf,
     },
 }
 
@@ -67,8 +111,96 @@ async fn main() -> Result<()> {
             .await?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
+        Command::ConsensusIdentityCapture {
+            rpc_url,
+            allow_remote_rpc,
+            api_key_file,
+            experiment_id,
+            registry_contract_address,
+            registrations_file,
+            finality_confirmations,
+            poll_seconds,
+            max_wait_seconds,
+        } => {
+            let client = IdenaRpcClient::from_api_key_file_with_remote_policy(
+                rpc_url,
+                api_key_file,
+                allow_remote_rpc,
+            )?;
+            let registrations: Vec<MinerRegistration> = read_strict_json_file(
+                &registrations_file,
+                "public miner registrations file",
+                MAX_REGISTRATIONS_FILE_BYTES,
+            )?;
+            let input = capture_consensus_identity_snapshot(
+                &client,
+                registrations,
+                ConsensusIdentityCaptureOptions {
+                    experiment_id,
+                    registry_contract_address,
+                    finality_confirmations,
+                    poll_interval: Duration::from_secs(poll_seconds),
+                    max_wait: Duration::from_secs(max_wait_seconds),
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&input)?);
+        }
+        Command::ConsensusIdentityBuild { input_file } => {
+            let input: ConsensusIdentitySnapshotInputV1 = read_strict_json_file(
+                &input_file,
+                "consensus identity snapshot input",
+                MAX_CONSENSUS_SNAPSHOT_INPUT_BYTES,
+            )?;
+            let bundle = input.build_bundle()?;
+            println!("{}", serde_json::to_string_pretty(&bundle)?);
+        }
+        Command::ConsensusIdentityVerify {
+            input_file,
+            bundle_file,
+        } => {
+            let input: ConsensusIdentitySnapshotInputV1 = read_strict_json_file(
+                &input_file,
+                "consensus identity snapshot input",
+                MAX_CONSENSUS_SNAPSHOT_INPUT_BYTES,
+            )?;
+            let bundle: ConsensusIdentitySnapshotBundleV1 = read_strict_json_file(
+                &bundle_file,
+                "consensus identity snapshot bundle",
+                MAX_CONSENSUS_SNAPSHOT_BUNDLE_BYTES,
+            )?;
+            bundle.validate_against_input(&input)?;
+            let report = serde_json::json!({
+                "schema_version": "pohw-consensus-identity-snapshot-verification/v1",
+                "status": "verified-inactive-input",
+                "experiment_id": bundle.experiment_id,
+                "registry_contract_address": bundle.registry_contract_address,
+                "source_input_hash": bundle.source_input_hash,
+                "idena_finalized_height": bundle.idena_finalized_height,
+                "idena_finalized_timestamp": bundle.idena_finalized_timestamp,
+                "idena_finalized_block_hash": bundle.idena_finalized_block_hash,
+                "idena_identity_root": bundle.idena_identity_root,
+                "idena_finality_height": bundle.idena_finality_height,
+                "idena_finality_block_hash": bundle.idena_finality_block_hash,
+                "finality_confirmations": bundle.finality_confirmations,
+                "idena_next_validation_timestamp": bundle.idena_next_validation_timestamp,
+                "authorization_root": bundle.authorization_root,
+                "authorized_identity_count": bundle.authorized_identity_count,
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
     }
     Ok(())
+}
+
+fn read_strict_json_file<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    label: &str,
+    max_bytes: u64,
+) -> Result<T> {
+    let value = read_bounded_regular_text_file(path, label, max_bytes)?;
+    idena_lite_indexer::strict_json::from_str(&value)
+        .with_context(|| format!("failed to parse {label} {}", path.display()))
 }
 
 fn load_reward_replay(

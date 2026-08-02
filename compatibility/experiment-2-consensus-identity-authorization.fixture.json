@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "policy_hash": "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3",
+  "leaf": {
+    "idena_address": "0x0000000000000000000000000000000000000002",
+    "identity_state": "Verified",
+    "mining_pubkey_xonly": "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337",
+    "registry_commitment": "000000000000000000000000000000000000000000000000000000000000000c",
+    "registration_sequence": 3,
+    "registration_block": 10002,
+    "registration_epoch": 122
+  },
+  "proof": {
+    "leaf_index": 1,
+    "siblings": [
+      "700120a51a4650ccc1193ef4d4a379a79db691390dd66547eb2a7d1788fe37f5",
+      "48332a7eacc21076edca496211fb712f6bc05fb1c3774284e891adc5b949bf37"
+    ]
+  },
+  "block_signature_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}

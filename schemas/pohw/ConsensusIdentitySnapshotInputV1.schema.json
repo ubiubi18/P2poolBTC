@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/ConsensusIdentitySnapshotInputV1.schema.json",
+  "title": "ConsensusIdentitySnapshotInputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "experiment_id",
+    "identity_rows_assurance",
+    "registry_contract_address",
+    "capture_epoch",
+    "next_validation_timestamp",
+    "finality_confirmations",
+    "capture_block",
+    "finality_chain",
+    "identities",
+    "registry_registered_count",
+    "registry_registered_miners",
+    "registrations"
+  ],
+  "properties": {
+    "schema_version": { "const": "pohw-consensus-identity-snapshot-input/v1" },
+    "status": { "const": "finalized-candidate-input" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2" },
+    "identity_rows_assurance": { "const": "compatible-rpc-unproven" },
+    "registry_contract_address": { "$ref": "#/$defs/address" },
+    "capture_epoch": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "next_validation_timestamp": { "$ref": "#/$defs/positiveInteger" },
+    "finality_confirmations": { "type": "integer", "minimum": 6, "maximum": 120 },
+    "capture_block": { "$ref": "#/$defs/block" },
+    "finality_chain": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 121,
+      "items": { "$ref": "#/$defs/block" }
+    },
+    "identities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/identity" }
+    },
+    "registry_registered_count": { "type": "integer", "minimum": 0, "maximum": 48 },
+    "registry_registered_miners": {
+      "type": "array",
+      "maxItems": 48,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/minerId" }
+    },
+    "registrations": {
+      "type": "array",
+      "maxItems": 48,
+      "items": { "$ref": "#/$defs/registrationRecord" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "prefixedHash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "address": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "minerId": { "type": "string", "pattern": "^[a-z0-9._-]{1,64}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["height", "hash", "parent_hash", "timestamp", "identity_root"],
+      "properties": {
+        "height": { "$ref": "#/$defs/positiveInteger" },
+        "hash": { "$ref": "#/$defs/prefixedHash" },
+        "parent_hash": { "$ref": "#/$defs/prefixedHash" },
+        "timestamp": { "$ref": "#/$defs/positiveInteger" },
+        "identity_root": { "$ref": "#/$defs/prefixedHash" }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "state"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "state": {
+          "enum": [
+            "Invite",
+            "Candidate",
+            "Newbie",
+            "Verified",
+            "Suspended",
+            "Zombie",
+            "Killed",
+            "Human",
+            "Undefined"
+          ]
+        }
+      }
+    },
+    "registryAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_address",
+        "experiment_id",
+        "registration_sequence",
+        "registration_block",
+        "registration_epoch",
+        "registration_timestamp",
+        "registration_commitment"
+      ],
+      "properties": {
+        "contract_address": { "$ref": "#/$defs/address" },
+        "experiment_id": { "const": "p2poolbtc-experiment-2" },
+        "registration_sequence": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "registration_block": { "$ref": "#/$defs/positiveInteger" },
+        "registration_epoch": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "registration_timestamp": { "$ref": "#/$defs/positiveInteger" },
+        "registration_commitment": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "minerRegistration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "miner_id",
+        "idena_address",
+        "btc_payout_script_hex",
+        "claim_owner_pubkey_hex",
+        "mining_pubkey_hex",
+        "registry_anchor",
+        "idena_signature_hex",
+        "mining_signature_hex"
+      ],
+      "properties": {
+        "version": { "const": 2 },
+        "miner_id": { "$ref": "#/$defs/minerId" },
+        "idena_address": { "$ref": "#/$defs/address" },
+        "btc_payout_script_hex": { "type": "string", "pattern": "^[0-9a-f]{44}$|^[0-9a-f]{68}$" },
+        "claim_owner_pubkey_hex": { "$ref": "#/$defs/hash" },
+        "mining_pubkey_hex": { "$ref": "#/$defs/hash" },
+        "registry_anchor": { "$ref": "#/$defs/registryAnchor" },
+        "idena_signature_hex": { "type": "string", "pattern": "^(0x)?[0-9a-f]{130}$" },
+        "mining_signature_hex": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+      }
+    },
+    "registrationRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_address", "current_sequence", "contract_record", "registration"],
+      "properties": {
+        "owner_address": { "$ref": "#/$defs/address" },
+        "current_sequence": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "contract_record": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "registration": { "$ref": "#/$defs/minerRegistration" }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/Experiment2BuildComparisonV1.schema.json",
+  "title": "Experiment2BuildComparisonV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "experiment_id",
+    "activation_id",
+    "lock_sha256",
+    "source_snapshot_sha256",
+    "artifact_set_sha256",
+    "matching_build_count",
+    "minimum_matching_builds",
+    "evidence_sha256",
+    "operator_independence_verified",
+    "release_authorized",
+    "next_gate"
+  ],
+  "properties": {
+    "schema_version": { "const": "pohw-experiment-2-build-comparison/v1" },
+    "status": { "const": "matching-build-evidence-unattributed" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2-consensus-idena-candidate-1" },
+    "activation_id": { "$ref": "#/$defs/hash" },
+    "lock_sha256": { "$ref": "#/$defs/hash" },
+    "source_snapshot_sha256": { "$ref": "#/$defs/hash" },
+    "artifact_set_sha256": { "$ref": "#/$defs/hash" },
+    "matching_build_count": { "type": "integer", "minimum": 3 },
+    "minimum_matching_builds": { "type": "integer", "minimum": 3 },
+    "evidence_sha256": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hash" }
+    },
+    "operator_independence_verified": { "const": false },
+    "release_authorized": { "const": false },
+    "next_gate": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

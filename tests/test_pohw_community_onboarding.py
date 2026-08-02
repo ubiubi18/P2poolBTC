@@ -235,6 +235,7 @@ class CommunityOnboardingTests(unittest.TestCase):
                 "activation_parent_hash"
             ],
         )
+        self.assertEqual(profile["roles"]["pruned-miner"]["minimum_free_storage_gib"], 90)
         for schema_path in (PROFILE_SCHEMA, RECEIPT_SCHEMA):
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
             self.assertFalse(schema["additionalProperties"])

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://p2poolbtc.invalid/schemas/pohw/ConsensusIdentityActivationManifestV1.schema.json",
+  "title": "ConsensusIdentityActivationManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_revision", "status", "launch_enabled", "activation_id", "experiment_id", "predecessor_activation_id", "consensus_ruleset", "bitcoin_core_upstream_commit", "bitcoin_core_patch_series_sha256", "authorization_parent_height", "authorization_parent_hash", "bitcoin_network", "bitcoin_datadir", "p2p_port", "rpc_port", "message_start_hex", "consensus_policy_hash", "require_fresh_datadir", "history_reinterpreted"],
+  "properties": {
+    "schema_version": { "const": "pohw-consensus-identity-activation/v1" },
+    "profile_revision": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "status": { "enum": ["experimental-candidate", "experimental-active"] },
+    "launch_enabled": { "type": "boolean" },
+    "activation_id": { "$ref": "#/$defs/hash" },
+    "experiment_id": { "const": "p2poolbtc-experiment-2" },
+    "predecessor_activation_id": { "$ref": "#/$defs/hash" },
+    "consensus_ruleset": { "const": "pohw2-p2ia1-p2sw1-v1" },
+    "bitcoin_core_upstream_commit": { "$ref": "#/$defs/commit" },
+    "bitcoin_core_patch_series_sha256": { "$ref": "#/$defs/hash" },
+    "authorization_parent_height": { "const": 958175 },
+    "authorization_parent_hash": { "$ref": "#/$defs/hash" },
+    "bitcoin_network": { "const": "pohw2" },
+    "bitcoin_datadir": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "p2p_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "rpc_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "message_start_hex": { "type": "string", "pattern": "^[0-9a-f]{8}$" },
+    "consensus_policy_hash": { "$ref": "#/$defs/hash" },
+    "require_fresh_datadir": { "const": true },
+    "history_reinterpreted": { "const": false }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "experimental-candidate" } } },
+      "then": { "properties": { "launch_enabled": { "const": false } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "experimental-active" } } },
+      "then": { "properties": { "launch_enabled": { "const": true } } }
+    }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+  }
+}

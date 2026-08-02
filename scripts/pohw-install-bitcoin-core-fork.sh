@@ -312,7 +312,7 @@ def write_new(path, payload, mode):
 
 evidence_bytes, _, _ = read_nofollow(evidence_path)
 evidence = json.loads(evidence_bytes, object_pairs_hook=pairs)
-if evidence.get("schema_version") != "pohw-bitcoin-core-build-evidence/v4":
+if evidence.get("schema_version") != "pohw-bitcoin-core-build-evidence/v5":
     raise SystemExit("unsupported build evidence schema")
 manifest_bytes, manifest_digest, _ = read_nofollow(manifest_path)
 if manifest_digest != evidence.get("manifest_sha256"):

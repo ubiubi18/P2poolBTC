@@ -8,20 +8,23 @@ SOURCE_DIR=
 BUILD_DIR=
 SNAPSHOT_DIR=
 JOBS=
+TARGET=
 
 usage() {
   cat <<'EOF'
 Usage: scripts/pohw-build-bitcoin-core-fork.sh --source-dir DIR [options]
 
-Build Experiment 1 as an unprivileged user from a deterministic, read-only
-snapshot of the exact upstream revision plus pinned patch. Every configure,
-build, and test command is captured in fail-closed provenance evidence.
+Build Experiment 1 or the inactive Experiment 2 candidate as an unprivileged
+user from a deterministic, read-only snapshot of the exact upstream revision
+plus pinned patch series. Every configure, build, and test command is captured
+in fail-closed provenance evidence.
 
 Options:
   --source-dir DIR   Bitcoin Core checkout at the pinned commit (required)
   --build-dir DIR    New or empty build directory (default: SOURCE_DIR/build-pohw)
   --snapshot-dir DIR New snapshot destination (default: BUILD_DIR.source-snapshot)
   --manifest FILE    Activation manifest
+  --target TRIPLET   Exact Bitcoin Core depends target (default: native target)
   --jobs N           Parallel build jobs
 EOF
 }
@@ -32,6 +35,7 @@ while (($#)); do
     --build-dir) BUILD_DIR=${2:?}; shift 2 ;;
     --snapshot-dir) SNAPSHOT_DIR=${2:?}; shift 2 ;;
     --manifest) MANIFEST=${2:?}; shift 2 ;;
+    --target) TARGET=${2:?}; shift 2 ;;
     --jobs) JOBS=${2:?}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -106,6 +110,28 @@ EVIDENCE="$BUILD_DIR/pohw-build-evidence.json"
   --snapshot-metadata "$SNAPSHOT_METADATA" \
   --manifest "$MANIFEST"
 
+BUILD_PROFILE_INFO=$(python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+
+def pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle, object_pairs_hook=pairs)
+if manifest.get("schema_version") == "pohw-bitcoin-core-patch-series-lock/v1":
+    print("experiment-2", manifest["network"]["candidate_activation_id"], sep="\t")
+else:
+    print("experiment-1", "-", sep="\t")
+PY
+)
+IFS=$'\t' read -r BUILD_PROFILE POHW2_ACTIVATION_ID <<<"$BUILD_PROFILE_INFO"
+
 resolve_tool() {
   local name=$1
   local located
@@ -138,6 +164,12 @@ run_step() {
     "$@"
 }
 
+# Keep profile-only steps out of the Experiment 1 static step list while still
+# recording them through the same fail-closed runner.
+run_profile_step() {
+  run_step "$@"
+}
+
 CMAKE_FLAGS=(
   -DBUILD_GUI=OFF
   -DBUILD_TESTS=ON
@@ -145,6 +177,13 @@ CMAKE_FLAGS=(
   -DBUILD_FUZZ_BINARY=OFF
   -DENABLE_IPC=OFF
 )
+if [[ "$BUILD_PROFILE" == experiment-2 ]]; then
+  [[ "$POHW2_ACTIVATION_ID" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Experiment 2 activation ID is invalid" >&2
+    exit 1
+  }
+  CMAKE_FLAGS+=("-DPOHW2_ACTIVATION_ID=$POHW2_ACTIVATION_ID")
+fi
 
 DEPENDS_ROOT="$BUILD_DIR/pohw-depends"
 DEPENDS_SOURCE="$DEPENDS_ROOT/source"
@@ -160,7 +199,8 @@ CONFIG_SUB="$DEPENDS_SOURCE/config.sub"
   echo "verified source snapshot is missing executable depends host tools" >&2
   exit 1
 }
-DEPENDS_HOST=$("$CONFIG_SUB" "$("$CONFIG_GUESS")")
+NATIVE_HOST=$("$CONFIG_SUB" "$("$CONFIG_GUESS")")
+DEPENDS_HOST=$("$CONFIG_SUB" "${TARGET:-$NATIVE_HOST}")
 [[ "$DEPENDS_HOST" =~ ^[A-Za-z0-9_.+]+-[A-Za-z0-9_.+]+-[A-Za-z0-9_.+-]+$ ]] || {
   echo "depends host triplet is invalid: $DEPENDS_HOST" >&2
   exit 1
@@ -248,6 +288,10 @@ run_step script_cache_domain --env "TMPDIR=$TEST_TMPDIR" -- \
   "$TEST_BITCOIN" --run_test=txvalidationcache_tests
 run_step block_file_reader --env "TMPDIR=$TEST_TMPDIR" -- \
   "$TEST_BITCOIN" --run_test=streams_tests/streams_buffered_file_find_any_byte
+if [[ "$BUILD_PROFILE" == experiment-2 ]]; then
+  run_profile_step consensus_identity --env "TMPDIR=$TEST_TMPDIR" -- \
+    "$TEST_BITCOIN" --run_test=pohw_identity_auth_tests
+fi
 FUNCTIONAL_RUNNER="$SNAPSHOT_DIR/test/functional/test_runner.py"
 FUNCTIONAL_TESTS_DIR="$SNAPSHOT_DIR/test/functional"
 FUNCTIONAL_CONFIG="$BUILD_DIR/test/config.ini"
@@ -267,6 +311,16 @@ run_step replay_functional --env "TMPDIR=$TEST_TMPDIR" -- \
   "$PYTHON3" "$FUNCTIONAL_RUNNER" feature_pohw_replay.py \
   --jobs=1 --tmpdirprefix="$TEST_TMPDIR" \
   --configfile="$FUNCTIONAL_CONFIG" --testsdir="$FUNCTIONAL_TESTS_DIR"
+if [[ "$BUILD_PROFILE" == experiment-2 ]]; then
+  [[ -f "$FUNCTIONAL_TESTS_DIR/feature_pohw_identity_auth.py" ]] || {
+    echo "verified Experiment 2 snapshot lacks the identity authorization functional test" >&2
+    exit 1
+  }
+  run_profile_step consensus_identity_functional --env "TMPDIR=$TEST_TMPDIR" -- \
+    "$PYTHON3" "$FUNCTIONAL_RUNNER" feature_pohw_identity_auth.py \
+    --jobs=1 --tmpdirprefix="$TEST_TMPDIR" \
+    --configfile="$FUNCTIONAL_CONFIG" --testsdir="$FUNCTIONAL_TESTS_DIR"
+fi
 run_step ctest --env "TMPDIR=$TEST_TMPDIR" -- \
   "$CTEST" --test-dir "$BUILD_DIR" --output-on-failure
 

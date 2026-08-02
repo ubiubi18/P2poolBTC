@@ -9,6 +9,7 @@ User=pohw-explorer-ui
 Group=pohw-explorer-ui
 WorkingDirectory=/opt/p2pool/ui/pohw-dashboard
 EnvironmentFile=/etc/pohw/explorer.env
+LoadCredential=dashboard-api.token:/etc/pohw/dashboard-api.token
 ExecStart=/opt/p2pool/scripts/pohw-run-dashboard-ui.sh
 Restart=always
 RestartSec=5

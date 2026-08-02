@@ -87,10 +87,12 @@ does not query Idena while validating a block. A modified miner outside the
 supported adapter can therefore still produce a proof-of-work-valid Experiment
 1 block without an eligible identity, although it cannot obtain an admitted
 P2Pool share or payout through conforming nodes. Strict identity-gated block
-consensus is not implemented. It would require a separately identified
-successor profile with deterministic Idena proof verification, activation and
-migration rules, and cross-node replay tests; it must not silently reinterpret
-this chain.
+consensus is not part of Experiment 1. A separate source-only implementation
+now exists as the inactive `pohw2` candidate in
+[Experiment 2](EXPERIMENT-2.md). It has deterministic Idena proof verification,
+new network identity, a pinned activation boundary, and a hard snapshot expiry.
+Its dummy policy and public fixture keys are not authorized for deployment, and
+it never silently reinterprets this chain.
 
 ## Replay Isolation
 

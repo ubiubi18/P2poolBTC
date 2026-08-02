@@ -69,6 +69,10 @@ class ExplorerHostProfileTest(unittest.TestCase):
         self.assertIn("User=pohw-explorer-ui", ui)
         self.assertIn("Group=pohw-explorer-ui", ui)
         self.assertIn("EnvironmentFile=/etc/pohw/explorer.env", ui)
+        self.assertIn(
+            "LoadCredential=dashboard-api.token:/etc/pohw/dashboard-api.token",
+            ui,
+        )
         self.assertNotIn("/etc/pohw/p2pool.env", api + ui)
         for unit in (api, ui):
             self.assertIn("ProtectSystem=strict", unit)

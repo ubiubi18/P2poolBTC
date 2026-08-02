@@ -1,4 +1,5 @@
 pub mod commitment;
+pub mod consensus_identity;
 pub mod dkg_transport;
 pub mod fork;
 pub mod gossip;

@@ -13,7 +13,8 @@ usage() {
 Usage: scripts/pohw-verify-bitcoin-core-source.sh --source-dir DIR [options]
 
 Verify the pinned Bitcoin Core commit and create a deterministic, read-only
-Experiment 1 source snapshot from a fresh Git object database and index. The
+Experiment 1 or inactive Experiment 2 source snapshot from a fresh Git object
+database and index. The
 caller's Git index is inspected for hiding flags but is never trusted to create
 or verify the snapshot.
 
@@ -149,10 +150,7 @@ PY
 
 MANIFEST_COPY="$TMP_ROOT/experiment-manifest.json"
 MANIFEST_SHA256=$(secure_copy "$MANIFEST" "$MANIFEST_COPY")
-python3 "$SCRIPT_DIR/pohw-experiment-1-manifest.py" verify \
-  "$MANIFEST_COPY" --repo-root "$REPO_ROOT"
-
-PINNED=$(python3 - "$MANIFEST_COPY" <<'PY'
+MANIFEST_SCHEMA=$(python3 - "$MANIFEST_COPY" <<'PY'
 import json
 import sys
 
@@ -166,18 +164,67 @@ def pairs(items):
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     manifest = json.load(handle, object_pairs_hook=pairs)
-print(
-    manifest["upstream"]["commit"],
-    manifest["build"]["patch_path"],
-    manifest["build"]["patch_sha256"],
-    sep="\t",
-)
+print(manifest.get("schema_version", ""))
 PY
 )
-IFS=$'\t' read -r UPSTREAM_COMMIT PATCH_REL PATCH_SHA256 <<<"$PINNED"
-PATCH_SOURCE="$REPO_ROOT/$PATCH_REL"
-PATCH="$TMP_ROOT/pinned.patch"
-secure_copy "$PATCH_SOURCE" "$PATCH" "$PATCH_SHA256" >/dev/null
+case "$MANIFEST_SCHEMA" in
+  pohw-bitcoin-core-fork-manifest/v1)
+    BUILD_PROFILE=experiment-1
+    python3 "$SCRIPT_DIR/pohw-experiment-1-manifest.py" verify \
+      "$MANIFEST_COPY" --repo-root "$REPO_ROOT"
+    ;;
+  pohw-bitcoin-core-patch-series-lock/v1)
+    BUILD_PROFILE=experiment-2
+    python3 "$SCRIPT_DIR/pohw-experiment-2-consensus-identity.py" \
+      --repo-root "$REPO_ROOT" --lock "$MANIFEST_COPY"
+    ;;
+  *)
+    echo "unsupported Bitcoin Core source manifest schema" >&2
+    exit 1
+    ;;
+esac
+
+PINNED=$(python3 - "$MANIFEST_COPY" "$BUILD_PROFILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+if sys.argv[2] == "experiment-1":
+    print(manifest["upstream"]["commit"], manifest["build"]["patch_sha256"], sep="\t")
+else:
+    print(manifest["upstream"]["commit"], manifest["patch_series_sha256"], sep="\t")
+PY
+)
+IFS=$'\t' read -r UPSTREAM_COMMIT PATCH_SHA256 <<<"$PINNED"
+PATCHES=()
+while IFS=$'\t' read -r PATCH_REL EXPECTED_PATCH_SHA256; do
+  [[ -n "$PATCH_REL" && -n "$EXPECTED_PATCH_SHA256" ]] || {
+    echo "source manifest contains an empty patch entry" >&2
+    exit 1
+  }
+  PATCH="$TMP_ROOT/pinned-patch-${#PATCHES[@]}.patch"
+  secure_copy "$REPO_ROOT/$PATCH_REL" "$PATCH" "$EXPECTED_PATCH_SHA256" >/dev/null
+  PATCHES+=("$PATCH")
+done < <(python3 - "$MANIFEST_COPY" "$BUILD_PROFILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+if sys.argv[2] == "experiment-1":
+    print(manifest["build"]["patch_path"], manifest["build"]["patch_sha256"], sep="\t")
+else:
+    for expected_order, entry in enumerate(manifest["patch_series"], 1):
+        if entry["order"] != expected_order:
+            raise SystemExit("patch series is not canonically ordered")
+        print(entry["path"], entry["sha256"], sep="\t")
+PY
+)
+[[ ${#PATCHES[@]} -gt 0 ]] || {
+  echo "source manifest contains no patches" >&2
+  exit 1
+}
 
 ACTUAL_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
 [[ "$ACTUAL_COMMIT" == "$UPSTREAM_COMMIT" ]] || {
@@ -227,7 +274,9 @@ if worktree_matches_index; then
   SOURCE_STATE=clean-upstream
 fi
 
-"${GIT[@]}" apply --cached --whitespace=nowarn "$PATCH"
+for PATCH in "${PATCHES[@]}"; do
+  "${GIT[@]}" apply --cached --whitespace=nowarn "$PATCH"
+done
 PATCHED_TREE=$("${GIT[@]}" write-tree)
 if [[ -z "$SOURCE_STATE" ]] && worktree_matches_index; then
   SOURCE_STATE=exact-patched
@@ -350,7 +399,7 @@ if [[ -n "$SNAPSHOT_DIR" ]]; then
     exit 1
   }
   SNAPSHOT_STAGING=
-  echo "Experiment 1 source snapshot created: $SNAPSHOT_DIR"
+  echo "$BUILD_PROFILE source snapshot created: $SNAPSHOT_DIR"
 else
-  echo "Experiment 1 source verified from independent snapshot ($SOURCE_STATE)"
+  echo "$BUILD_PROFILE source verified from independent snapshot ($SOURCE_STATE)"
 fi

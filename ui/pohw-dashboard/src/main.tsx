@@ -26,17 +26,23 @@ import {
   Wallet
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import {
+  SATS_PER_BTC,
+  acceptedSharePercent,
+  calculateRewardView,
+  chancePercentForDays,
+  expectedBlocksForChancePercent
+} from "./miningEconomics";
+import type { ProspectMode, RewardView } from "./miningEconomics";
 import "./styles.css";
 
 type ServiceState = "connected" | "syncing" | "pending" | "warning";
 type TimeWindow = "24h" | "7d" | "epoch";
-type ProspectMode = "block-now" | "30d-ev";
 type SectionId = "overview" | "sharechain" | "idena" | "payouts" | "vault" | "next-step" | "audit-numbers";
 type AppView = "dashboard" | "explorer" | "governance";
 type ExplorerTab = "overview" | "bitcoin" | "fork" | "sharechain" | "idena";
 type ExplorerLoadState = "loading" | "ready" | "unavailable";
 
-const SATS_PER_BTC = 100_000_000;
 const README_CAPTURE_MODE = new URLSearchParams(window.location.search).get("capture") === "final";
 const CAPTURE_MASK = "[masked]";
 
@@ -52,6 +58,19 @@ interface SharePoint {
   stale: number;
 }
 
+interface ShareWindow {
+  acceptedShares: number;
+  staleShares: number;
+  poolAcceptedShares: number;
+  poolStaleShares: number;
+  userHashrateThs: number;
+  poolHashrateThs: number;
+  measurementSeconds: number;
+  userMeasurementSeconds?: number;
+  poolMeasurementSeconds?: number;
+  recentShares: SharePoint[];
+}
+
 interface PoolSnapshot {
   identity: {
     idenaAddress: string;
@@ -65,12 +84,15 @@ interface PoolSnapshot {
   sharechain: {
     acceptedShares: number;
     staleShares: number;
+    poolAcceptedShares?: number;
+    poolStaleShares?: number;
     hashrateScore: number;
     poolHashrateScore: number;
     poolHashrateThs: number;
     userHashrateThs: number;
     relativeHashrateShare: number;
     recentShares: SharePoint[];
+    windows?: Record<TimeWindow, ShareWindow>;
   };
   idenaAccounting: {
     validationScore: number;
@@ -92,12 +114,14 @@ interface PoolSnapshot {
     coinbaseOutputBudgetVb: number;
     directFeeBasisSatVb: number;
     vaultClaimSats: number;
-    estimatedWithdrawalFeeSats: number;
+    estimatedWithdrawalFeeSats: number | null;
     minPayoutSats: number;
+    blockRewardSource?: string;
   };
   pool: {
     expectedBlockInterval: string;
     chance30d: number;
+    expectedBlocks30d?: number;
     bitcoinNetworkHashrateEhs: number;
     vaultEpoch: string;
     frostThreshold: string;
@@ -107,6 +131,7 @@ interface PoolSnapshot {
     lastVaultRotation: string;
     vaultKey: string;
     activeNodes: number;
+    miningEstimateSource?: string;
   };
 }
 
@@ -812,6 +837,47 @@ const fallbackServiceStatuses: ServiceStatus[] = [
   { label: "Snapshot", state: "pending", detail: "gated until sync" }
 ];
 
+const sampleSharePoints: SharePoint[] = [
+  { label: "00", accepted: 18, stale: 1 },
+  { label: "03", accepted: 24, stale: 0 },
+  { label: "06", accepted: 31, stale: 2 },
+  { label: "09", accepted: 28, stale: 0 },
+  { label: "12", accepted: 36, stale: 1 },
+  { label: "15", accepted: 39, stale: 0 },
+  { label: "18", accepted: 41, stale: 1 },
+  { label: "21", accepted: 34, stale: 0 }
+];
+
+const emptySharePoints: SharePoint[] = ["00", "03", "06", "09", "12", "15", "18", "21"].map(
+  (label) => ({ label, accepted: 0, stale: 0 })
+);
+
+const sampleShareWindow: ShareWindow = {
+  acceptedShares: 251,
+  staleShares: 5,
+  poolAcceptedShares: 64_830,
+  poolStaleShares: 940,
+  userHashrateThs: 5.19,
+  poolHashrateThs: 1340,
+  measurementSeconds: 7 * 24 * 60 * 60,
+  userMeasurementSeconds: 7 * 24 * 60 * 60,
+  poolMeasurementSeconds: 7 * 24 * 60 * 60,
+  recentShares: sampleSharePoints
+};
+
+const emptyShareWindow: ShareWindow = {
+  acceptedShares: 0,
+  staleShares: 0,
+  poolAcceptedShares: 0,
+  poolStaleShares: 0,
+  userHashrateThs: 0,
+  poolHashrateThs: 0,
+  measurementSeconds: 0,
+  userMeasurementSeconds: 0,
+  poolMeasurementSeconds: 0,
+  recentShares: emptySharePoints
+};
+
 const fallbackAccount: PoolSnapshot = {
   identity: {
     idenaAddress: "0xc0Bc...3c9B",
@@ -825,21 +891,29 @@ const fallbackAccount: PoolSnapshot = {
   sharechain: {
     acceptedShares: 1284,
     staleShares: 17,
+    poolAcceptedShares: 331_280,
+    poolStaleShares: 4_270,
     hashrateScore: 920420,
     poolHashrateScore: 237_645_236,
     poolHashrateThs: 1340,
     userHashrateThs: 5.19,
     relativeHashrateShare: 0.003873,
-    recentShares: [
-      { label: "00", accepted: 18, stale: 1 },
-      { label: "03", accepted: 24, stale: 0 },
-      { label: "06", accepted: 31, stale: 2 },
-      { label: "09", accepted: 28, stale: 0 },
-      { label: "12", accepted: 36, stale: 1 },
-      { label: "15", accepted: 39, stale: 0 },
-      { label: "18", accepted: 41, stale: 1 },
-      { label: "21", accepted: 34, stale: 0 }
-    ]
+    recentShares: sampleSharePoints,
+    windows: {
+      "24h": {
+        ...sampleShareWindow,
+        measurementSeconds: 24 * 60 * 60,
+        userMeasurementSeconds: 24 * 60 * 60,
+        poolMeasurementSeconds: 24 * 60 * 60
+      },
+      "7d": sampleShareWindow,
+      epoch: {
+        ...sampleShareWindow,
+        measurementSeconds: 14 * 24 * 60 * 60,
+        userMeasurementSeconds: 14 * 24 * 60 * 60,
+        poolMeasurementSeconds: 14 * 24 * 60 * 60
+      }
+    }
   },
   idenaAccounting: {
     validationScore: 712300,
@@ -862,11 +936,13 @@ const fallbackAccount: PoolSnapshot = {
     directFeeBasisSatVb: 3,
     vaultClaimSats: 0,
     estimatedWithdrawalFeeSats: 96,
-    minPayoutSats: 10000
+    minPayoutSats: 10000,
+    blockRewardSource: "sample fork reward context"
   },
   pool: {
     expectedBlockInterval: "~9.7 years at current pool rate",
     chance30d: 0.84,
+    expectedBlocks30d: 0.00843548,
     bitcoinNetworkHashrateEhs: 690,
     vaultEpoch: "2026-W27",
     frostThreshold: "67% of online epoch signers",
@@ -875,13 +951,10 @@ const fallbackAccount: PoolSnapshot = {
     pendingWithdrawals: 6,
     lastVaultRotation: "2026-06-24",
     vaultKey: "tr(frost...9a4c)",
-    activeNodes: 19
+    activeNodes: 19,
+    miningEstimateSource: "sample 24h submitted share work"
   }
 };
-
-const emptySharePoints: SharePoint[] = ["00", "03", "06", "09", "12", "15", "18", "21"].map(
-  (label) => ({ label, accepted: 0, stale: 0 })
-);
 
 const offlineDashboardData: DashboardApiResponse = {
   generatedAtUnix: null,
@@ -905,12 +978,19 @@ const offlineDashboardData: DashboardApiResponse = {
     sharechain: {
       acceptedShares: 0,
       staleShares: 0,
+      poolAcceptedShares: 0,
+      poolStaleShares: 0,
       hashrateScore: 0,
       poolHashrateScore: 0,
       poolHashrateThs: 0,
       userHashrateThs: 0,
       relativeHashrateShare: 0,
-      recentShares: emptySharePoints
+      recentShares: emptySharePoints,
+      windows: {
+        "24h": emptyShareWindow,
+        "7d": emptyShareWindow,
+        epoch: emptyShareWindow
+      }
     },
     idenaAccounting: {
       validationScore: 0,
@@ -923,7 +1003,7 @@ const offlineDashboardData: DashboardApiResponse = {
     },
     payout: {
       combinedRewardWeight: 0,
-      blockSubsidyBtc: 3.125,
+      blockSubsidyBtc: 0,
       estimatedFeesBtc: 0,
       directPayoutEligible: false,
       directRank: 0,
@@ -932,12 +1012,14 @@ const offlineDashboardData: DashboardApiResponse = {
       coinbaseOutputBudgetVb: 3_100,
       directFeeBasisSatVb: 3,
       vaultClaimSats: 0,
-      estimatedWithdrawalFeeSats: 0,
-      minPayoutSats: 10_000
+      estimatedWithdrawalFeeSats: null,
+      minPayoutSats: 10_000,
+      blockRewardSource: "fork explorer unavailable"
     },
     pool: {
       expectedBlockInterval: "local API offline",
       chance30d: 0,
+      expectedBlocks30d: 0,
       bitcoinNetworkHashrateEhs: 0,
       vaultEpoch: "not available",
       frostThreshold: "not available",
@@ -946,7 +1028,8 @@ const offlineDashboardData: DashboardApiResponse = {
       pendingWithdrawals: 0,
       lastVaultRotation: "not available",
       vaultKey: "not available",
-      activeNodes: 0
+      activeNodes: 0,
+      miningEstimateSource: "fork explorer unavailable"
     }
   }
 };
@@ -1063,7 +1146,7 @@ function App() {
   const [governanceLoadState, setGovernanceLoadState] = useState<ExplorerLoadState>("loading");
   const [loadingMoreFork, setLoadingMoreFork] = useState(false);
   const [loadingMoreShares, setLoadingMoreShares] = useState(false);
-  const prospectMode: ProspectMode = "block-now";
+  const [prospectMode, setProspectMode] = useState<ProspectMode>("block-now");
   const account = dashboardData.account;
   const participation = useMemo(() => getParticipationStatus(account), [account]);
 
@@ -1169,7 +1252,10 @@ function App() {
 
     void loadOverview();
     void loadPages();
-    const interval = globalThis.setInterval(loadOverview, 15_000);
+    const interval = globalThis.setInterval(() => {
+      void loadOverview();
+      void loadPages();
+    }, 15_000);
     return () => {
       cancelled = true;
       globalThis.clearInterval(interval);
@@ -1263,6 +1349,7 @@ function App() {
   };
 
   const blockNowView = useMemo(() => getRewardView(account, "block-now"), [account]);
+  const expected30dView = useMemo(() => getRewardView(account, "30d-ev"), [account]);
   const forecastView = useMemo(() => getRewardView(account, prospectMode), [account, prospectMode]);
   const totals = useMemo(() => getContributionTotals(account), [account]);
 
@@ -1299,27 +1386,30 @@ function App() {
                   <SourceNotice source={dashboardData.source} />
                 ) : null}
 
-                <JoinSummary participation={participation} totals={totals} view={blockNowView} />
+                <MiningSnapshot
+                  blockView={blockNowView}
+                  expected30dView={expected30dView}
+                  participation={participation}
+                  totals={totals}
+                />
 
                 <JourneyStrip participation={participation} view={blockNowView} />
 
                 <section className="focus-grid">
                   <RewardForecast
+                    onProspectModeChange={setProspectMode}
                     participation={participation}
                     prospectMode={prospectMode}
                     view={forecastView}
                   />
                   <ContributionSplit totals={totals} />
                 </section>
-
-                <PoolNote />
-
                 <DetailsPanel
                   auditOpen={auditOpen}
                   onAuditOpenChange={setAuditOpen}
                   onWindowChange={setWindow}
                   participation={participation}
-                  view={forecastView}
+                  view={blockNowView}
                   window={window}
                 />
               </section>
@@ -2965,51 +3055,173 @@ function SourceNotice({ source }: { source: string }) {
   );
 }
 
-function JoinSummary({
+function MiningSnapshot({
+  blockView,
+  expected30dView,
   participation,
-  totals,
-  view
+  totals
 }: {
+  blockView: RewardView;
+  expected30dView: RewardView;
   participation: ParticipationStatus;
   totals: ContributionTotals;
-  view: RewardView;
 }) {
-  const metrics = [
+  const { account, source } = useDashboardData();
+  const hasHashrate = hasLiveHashrateEstimate(account);
+  const hasChance = account.pool.chance30d > 0;
+  const isLiveEstimate = hasHashrate && source === "local-p2pool-node";
+  const estimateLabel = isLiveEstimate
+    ? "Live hashrate estimate"
+    : source === "demo-fallback" && hasHashrate
+      ? "Sample estimate"
+      : hasHashrate
+        ? "Local estimate"
+        : "Awaiting accepted shares";
+  const shareQuality = acceptedSharePercent(
+    account.sharechain.acceptedShares,
+    account.sharechain.staleShares
+  );
+  const userMeasurementSeconds = account.sharechain.windows?.["24h"]?.userMeasurementSeconds ?? 0;
+  const metrics: {
+    detail: string;
+    icon: LucideIcon;
+    label: string;
+    value: string;
+  }[] = [
     {
-      detail: `${formatSats(view.grossSats)} sats before route fees`,
-      icon: Bitcoin,
-      label: participation.isReady ? "BTC if block lands" : "Possible BTC reward",
-      tone: "orange",
-      value: `${formatBtcFromSats(view.grossSats)} BTC`
+      detail: hasHashrate
+        ? `${formatPercent(account.sharechain.relativeHashrateShare * 100, 3)} of active score; ${formatMeasurementSpan(userMeasurementSeconds)} observed`
+        : "Measured after accepted sharechain work",
+      icon: Gauge,
+      label: "Your hashrate",
+      value: formatHashrateOrPending(account.sharechain.userHashrateThs)
     },
     {
-      detail: "50% hashrate + 50% human score",
+      detail: account.pool.bitcoinNetworkHashrateEhs > 0
+        ? `Compared with ${formatInt(account.pool.bitcoinNetworkHashrateEhs)} EH/s Bitcoin network`
+        : account.pool.miningEstimateSource ?? "Fork mining estimate unavailable",
+      icon: Network,
+      label: "Pool hashrate",
+      value: formatHashrateOrPending(account.sharechain.poolHashrateThs)
+    },
+    {
+      detail: account.sharechain.acceptedShares > 0
+        ? `${formatPercent(shareQuality, 2)} accepted; ${formatInt(account.sharechain.staleShares)} stale`
+        : "No accepted shares recorded yet",
+      icon: Activity,
+      label: "Accepted work",
+      value: `${formatInt(account.sharechain.acceptedShares)} shares`
+    },
+    {
+      detail: "50% Bitcoin work + 50% verified human-work score",
       icon: Percent,
-      label: "Your pool share",
-      tone: "green",
+      label: "Your payout weight",
       value: formatPercent(totals.combinedPercent, 3)
-    },
-    {
-      detail: participation.isReady ? "Ready for payout accounting" : "Finish pledge before shares count",
-      icon: participation.isReady ? CheckCircle2 : KeyRound,
-      label: participation.isReady ? "Status" : "Next action",
-      tone: "blue",
-      value: participation.isReady ? "Ready" : "Pledge"
     }
+  ];
+  const chanceWindows = [
+    ["24 hours", chancePercentForDays(account.pool.chance30d, 1)],
+    ["7 days", chancePercentForDays(account.pool.chance30d, 7)],
+    ["30 days", chancePercentForDays(account.pool.chance30d, 30)],
+    ["1 year", chancePercentForDays(account.pool.chance30d, 365)]
   ] as const;
+  const payoutRoute = blockView.direct ? "Direct coinbase payout" : "FROST vault claim";
+  const blockDisplaySats = blockView.netSats ?? blockView.grossSats;
+  const expected30dDisplaySats = expected30dView.netSats ?? expected30dView.grossSats;
+  const blockAmountLabel = blockView.netSats === null
+    ? "gross before withdrawal fee"
+    : "estimated net";
 
   return (
-    <section className="join-summary" aria-label="Simple joining summary">
-      {metrics.map((metric) => (
-        <div className={`key-metric ${metric.tone}`} key={metric.label}>
-          <metric.icon size={20} />
-          <div>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-            <small>{metric.detail}</small>
-          </div>
+    <section className="mining-snapshot" aria-labelledby="mining-snapshot-title">
+      <header className="mining-snapshot-heading">
+        <div>
+          <span className="section-kicker">Your mining outlook</span>
+          <h2 id="mining-snapshot-title">Hashrate, odds and payout at a glance</h2>
+          <p>Live sharechain measurements and transparent probability, not a guaranteed return.</p>
         </div>
-      ))}
+        <span className={isLiveEstimate ? "snapshot-state live" : "snapshot-state waiting"}>
+          <span className="state-dot" />
+          {estimateLabel}
+        </span>
+      </header>
+
+      <div className="mining-snapshot-grid">
+        <section className="mining-reward" aria-label="Potential block reward">
+          <div className="mining-reward-label">
+            <Bitcoin size={20} />
+            <span>{participation.isReady ? "Your reward if the pool finds a block" : "Potential reward after registration"}</span>
+          </div>
+          <strong>{formatBtcFromSats(blockDisplaySats)} BTC</strong>
+          <span className="mining-reward-sats">{formatSats(blockDisplaySats)} sats {blockAmountLabel}</span>
+          <div className="mining-reward-equation" aria-label="Reward calculation">
+            <span>{formatBtc(blockView.blockValueBtc)} BTC block value</span>
+            <span>x {formatPercent(totals.combinedPercent, 3)} payout weight</span>
+            <strong>= {formatSats(blockView.blockGrossSats)} sats gross</strong>
+          </div>
+          <div className={participation.isReady ? "mining-route active" : "mining-route pending"}>
+            {participation.isReady ? <CheckCircle2 size={16} /> : <KeyRound size={16} />}
+            <span>{participation.isReady ? payoutRoute : "Registration required before rewards are active"}</span>
+          </div>
+        </section>
+
+        <section className="mining-capacity" aria-label="Mining capacity">
+          <div className="mining-column-heading">
+            <Gauge size={18} />
+            <div>
+              <span>Current capability</span>
+              <strong>Your miner versus the pool</strong>
+            </div>
+          </div>
+          <dl className="capacity-grid">
+            {metrics.map((metric) => (
+              <div key={metric.label}>
+                <metric.icon size={17} />
+                <dt>{metric.label}</dt>
+                <dd>{metric.value}</dd>
+                <small>{metric.detail}</small>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="mining-chance" aria-label="Block probability">
+          <div className="mining-column-heading">
+            <Clock3 size={18} />
+            <div>
+              <span>Pool block chance</span>
+              <strong>{hasChance ? `${formatChancePercent(account.pool.chance30d)} in 30 days` : "Not available yet"}</strong>
+            </div>
+          </div>
+          <div className="chance-grid">
+            {chanceWindows.map(([label, chance]) => (
+              <div key={label}>
+                <span>{label}</span>
+                <strong>{hasChance ? formatChancePercent(chance) : "Pending"}</strong>
+              </div>
+            ))}
+          </div>
+          <dl className="chance-summary">
+            <div>
+              <dt>Expected block interval</dt>
+              <dd>{account.pool.expectedBlockInterval}</dd>
+            </div>
+            <div>
+              <dt>Your 30 day {expected30dView.netSats === null ? "gross estimate" : "expected value"}</dt>
+              <dd>{formatBtcFromSats(expected30dDisplaySats)} BTC</dd>
+            </div>
+          </dl>
+          <p>The chance applies to the whole pool. Your payout then follows the weight shown at left.</p>
+        </section>
+      </div>
+
+      <div className="mining-disclosure">
+        <AlertTriangle size={16} />
+        <span>
+          Experiment fork BTC has no promised market value. Hardware, electricity, tax and downtime
+          are excluded, so this is a possible reward estimate, not profit.
+        </span>
+      </div>
     </section>
   );
 }
@@ -3220,19 +3432,31 @@ function TopBar({
 }
 
 function RewardForecast({
+  onProspectModeChange,
   participation,
   prospectMode,
   view
 }: {
+  onProspectModeChange: (mode: ProspectMode) => void;
   participation: ParticipationStatus;
   prospectMode: ProspectMode;
   view: RewardView;
 }) {
   const { account } = useDashboardData();
   const isExpectedValue = prospectMode === "30d-ev";
+  const displaySats = view.netSats ?? view.grossSats;
+  const amountLabel = view.netSats === null
+    ? isExpectedValue
+      ? "30-day gross estimate before withdrawal fee"
+      : "gross before withdrawal fee"
+    : isExpectedValue
+      ? "30-day expected value"
+      : "estimated net";
   const routeCopy = view.direct
     ? `Direct coinbase payout, current unpaid rank #${account.payout.directRank}`
     : "Vault claim, manual withdrawal needed";
+  const expectedBlocks30d = account.pool.expectedBlocks30d
+    ?? expectedBlocksForChancePercent(account.pool.chance30d);
   const headline = isExpectedValue
     ? participation.isReady
       ? "30 Day Expected Value"
@@ -3253,15 +3477,27 @@ function RewardForecast({
             {!participation.isReady
               ? "Estimate only. Complete the pledge before these shares can earn payout."
               : isExpectedValue
-                ? "Your block-now claim weighted by the current 30 day pool chance."
+                ? "Your block-now claim multiplied by the current 30 day expected block count."
                 : "Block value multiplied by your combined 50/50 reward weight."}
           </p>
         </div>
       </div>
 
+      <div className="forecast-controls">
+        <span>Estimate</span>
+        <SegmentedControl<ProspectMode>
+          value={prospectMode}
+          onChange={onProspectModeChange}
+          options={[
+            { value: "block-now", label: "If block found" },
+            { value: "30d-ev", label: "30 day EV" }
+          ]}
+        />
+      </div>
+
       <div className="forecast-amount">
-        <strong>{formatBtcFromSats(view.netSats)} BTC</strong>
-        <span>{formatSats(view.netSats)} sats estimated net</span>
+        <strong>{formatBtcFromSats(displaySats)} BTC</strong>
+        <span>{formatSats(displaySats)} sats {amountLabel}</span>
       </div>
 
       <div className="forecast-equation">
@@ -3269,14 +3505,18 @@ function RewardForecast({
         <span>x {formatPercent(account.payout.combinedRewardWeight * 100, 3)} share</span>{" "}
         {isExpectedValue ? (
           <>
-            <span>x {account.pool.chance30d.toFixed(2)}% 30 day chance</span>{" "}
+            <span>x {formatExpectedBlocks(expectedBlocks30d)} expected blocks / 30d</span>{" "}
           </>
         ) : null}
-        <strong>= {formatBtcFromSats(view.netSats)} BTC</strong>
+        <strong>= {formatBtcFromSats(displaySats)} BTC</strong>
       </div>
 
       <div className="forecast-sats">
-        {formatSats(view.netSats)} sats {isExpectedValue ? "probability-weighted EV" : "estimated net"}
+        {formatSats(displaySats)} sats {amountLabel}
+      </div>
+
+      <div className="forecast-sats">
+        Reward source: {account.payout.blockRewardSource ?? "not reported by the local API"}
       </div>
 
       <div className={participation.isReady ? "forecast-route" : "forecast-route warning"}>
@@ -3367,16 +3607,6 @@ function FormulaRow({
         <span>{weight} weight</span>
         <span>adds {formatPercent(weightedShare, 3)}</span>
       </div>
-    </div>
-  );
-}
-
-function PoolNote() {
-  const { account } = useDashboardData();
-  return (
-    <div className="pool-note">
-      <Clock3 size={16} />
-      <span>{poolChanceCopy(account)}</span>
     </div>
   );
 }
@@ -3558,14 +3788,20 @@ function PayoutTable({
     ],
     [
       "Withdrawal fee",
-      `${formatSats(activeFeeSats)} sats`,
-      participation.isReady ? "deducted from vault claim" : "not active"
+      activeFeeSats === null ? "Pending" : `${formatSats(activeFeeSats)} sats`,
+      participation.isReady
+        ? activeFeeSats === null
+          ? "known only when a withdrawal batch and fee rate are selected"
+          : "deducted from vault claim"
+        : "not active"
     ],
     [
       "Estimated net",
-      `${formatSats(activeNetSats)} sats`,
+      activeNetSats === null ? "Pending" : `${formatSats(activeNetSats)} sats`,
       participation.isReady
-        ? `${formatBtcFromSats(view.netSats)} BTC`
+        ? view.netSats === null
+          ? "gross claim shown above; withdrawal fee is not known"
+          : `${formatBtcFromSats(view.netSats)} BTC`
         : "not active until pledge"
     ]
   ];
@@ -3626,6 +3862,19 @@ function DetailsPanel({
     label: "P2Pool",
     state: "warning" as const
   };
+  const shareWindow = account.sharechain.windows?.[window] ?? {
+    acceptedShares: account.sharechain.acceptedShares,
+    staleShares: account.sharechain.staleShares,
+    poolAcceptedShares: account.sharechain.poolAcceptedShares ?? 0,
+    poolStaleShares: account.sharechain.poolStaleShares ?? 0,
+    userHashrateThs: account.sharechain.userHashrateThs,
+    poolHashrateThs: account.sharechain.poolHashrateThs,
+    measurementSeconds: 0,
+    userMeasurementSeconds: 0,
+    poolMeasurementSeconds: 0,
+    recentShares: account.sharechain.recentShares
+  };
+  const windowLabel = window === "epoch" ? "active chain" : window;
   return (
     <details
       className="details-panel"
@@ -3646,20 +3895,25 @@ function DetailsPanel({
             options={[
               { value: "24h", label: "24h" },
               { value: "7d", label: "7d" },
-              { value: "epoch", label: "Epoch" }
+              { value: "epoch", label: "Active chain" }
             ]}
           />
         </div>
       </div>
       <div className="details-grid">
-        <Panel id="sharechain" title="Sharechain Work" action={`${window} window`}>
-          <SharechainChart shares={account.sharechain.recentShares} />
+        <Panel id="sharechain" title="Sharechain Work" action={`${windowLabel} window`}>
+          <SharechainChart shares={shareWindow.recentShares} />
           <MetricGrid
             metrics={[
-              ["Accepted shares", formatInt(account.sharechain.acceptedShares)],
-              ["Stale shares", formatInt(account.sharechain.staleShares)],
-              ["My hashrate", formatHashrateOrPending(account.sharechain.userHashrateThs)],
-              ["Pool hashrate", formatHashrateOrPending(account.sharechain.poolHashrateThs)],
+              ["My accepted shares", formatInt(shareWindow.acceptedShares)],
+              ["My stale shares", formatInt(shareWindow.staleShares)],
+              ["Pool accepted shares", formatInt(shareWindow.poolAcceptedShares)],
+              ["Pool stale shares", formatInt(shareWindow.poolStaleShares)],
+              ["Chart window", formatMeasurementSpan(shareWindow.measurementSeconds)],
+              ["My observed span", formatMeasurementSpan(shareWindow.userMeasurementSeconds)],
+              ["Pool observed span", formatMeasurementSpan(shareWindow.poolMeasurementSeconds)],
+              ["My hashrate", formatHashrateOrPending(shareWindow.userHashrateThs)],
+              ["Pool hashrate", formatHashrateOrPending(shareWindow.poolHashrateThs)],
               ["My score", formatScore(account.sharechain.hashrateScore)],
               ["Pool score", formatScore(account.sharechain.poolHashrateScore)]
             ]}
@@ -3972,16 +4226,6 @@ interface ParticipationStatus {
   nextAction: string;
 }
 
-interface RewardView {
-  blockValueBtc: number;
-  blockValueSats: number;
-  direct: boolean;
-  feeSats: number;
-  grossSats: number;
-  netSats: number;
-  vaultSats: number;
-}
-
 function getParticipationStatus(account: PoolSnapshot): ParticipationStatus {
   const pledgeReady = account.identity.pledgeStatus === "verified";
   return {
@@ -4007,27 +4251,18 @@ function getContributionTotals(account: PoolSnapshot): ContributionTotals {
 }
 
 function getRewardView(account: PoolSnapshot, prospectMode: ProspectMode): RewardView {
-  const multiplier = prospectMode === "30d-ev" ? account.pool.chance30d / 100 : 1;
-  const blockValueBtc = account.payout.blockSubsidyBtc + account.payout.estimatedFeesBtc;
-  const blockValueSats = Math.round(blockValueBtc * SATS_PER_BTC);
-  const grossSats = Math.round(blockValueSats * account.payout.combinedRewardWeight * multiplier);
-  const direct =
-    account.payout.directPayoutEligible &&
-    account.payout.directRank <= account.payout.directLimit &&
-    grossSats >= account.payout.minPayoutSats;
-  const vaultSats = direct ? 0 : grossSats;
-  const feeSats = vaultSats > 0 ? Math.min(account.payout.estimatedWithdrawalFeeSats, vaultSats) : 0;
-  const netSats = direct ? grossSats : Math.max(0, vaultSats - feeSats);
-
-  return {
-    blockValueBtc,
-    blockValueSats,
-    direct,
-    feeSats,
-    grossSats,
-    netSats,
-    vaultSats
-  };
+  return calculateRewardView({
+    blockSubsidyBtc: account.payout.blockSubsidyBtc,
+    estimatedFeesBtc: account.payout.estimatedFeesBtc,
+    combinedRewardWeight: account.payout.combinedRewardWeight,
+    expectedBlocks30d: account.pool.expectedBlocks30d
+      ?? expectedBlocksForChancePercent(account.pool.chance30d),
+    directPayoutEligible: account.payout.directPayoutEligible,
+    directRank: account.payout.directRank,
+    directLimit: account.payout.directLimit,
+    minPayoutSats: account.payout.minPayoutSats,
+    estimatedWithdrawalFeeSats: account.payout.estimatedWithdrawalFeeSats
+  }, prospectMode);
 }
 
 function isConnectedExperimentOne(overview: ExplorerOverview | null) {
@@ -4171,20 +4406,6 @@ function hasLiveHashrateEstimate(account: PoolSnapshot) {
   return account.sharechain.poolHashrateThs > 0 || account.sharechain.userHashrateThs > 0;
 }
 
-function miningWorkDetail(account: PoolSnapshot) {
-  if (hasLiveHashrateEstimate(account)) {
-    return `${formatHashrateThs(account.sharechain.userHashrateThs)} of ${formatHashrateThs(
-      account.sharechain.poolHashrateThs
-    )}`;
-  }
-  if (account.sharechain.poolHashrateScore > 0) {
-    return `${formatScore(account.sharechain.hashrateScore)} of ${formatScore(
-      account.sharechain.poolHashrateScore
-    )} share score`;
-  }
-  return "waiting for accepted sharechain work";
-}
-
 function miningWorkValue(account: PoolSnapshot) {
   if (hasLiveHashrateEstimate(account)) {
     return `${formatHashrateThs(account.sharechain.userHashrateThs)} accepted`;
@@ -4195,21 +4416,31 @@ function miningWorkValue(account: PoolSnapshot) {
   return "No accepted shares yet";
 }
 
-function poolChanceCopy(account: PoolSnapshot) {
-  if (hasLiveHashrateEstimate(account) && account.pool.chance30d > 0) {
-    return `Pool chance is ${account.pool.chance30d.toFixed(2)}% in 30 days at ${formatHashrateThs(
-      account.sharechain.poolHashrateThs
-    )}.`;
+function formatMeasurementSpan(seconds?: number) {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) {
+    return "Not available";
   }
-  return "Block chance waits for live pool hashrate and Bitcoin work templates.";
-}
-
-function formatNetworkHashrate(valueEhs: number) {
-  return `${formatInt(valueEhs)} EH/s network`;
+  const days = seconds / (24 * 60 * 60);
+  if (days >= 1) return `${days.toFixed(days < 10 ? 1 : 0)} days`;
+  const hours = seconds / (60 * 60);
+  if (hours >= 1) return `${hours.toFixed(hours < 10 ? 1 : 0)} hours`;
+  return `${Math.max(1, Math.round(seconds / 60))} minutes`;
 }
 
 function formatPercent(value: number, digits = 2) {
   return `${value.toFixed(digits)}%`;
+}
+
+function formatChancePercent(value: number) {
+  const digits = value < 0.01 ? 4 : value < 1 ? 2 : 1;
+  return formatPercent(value, digits);
+}
+
+function formatExpectedBlocks(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value < 0.01) return value.toFixed(4);
+  if (value < 1) return value.toFixed(3);
+  return value.toFixed(2);
 }
 
 function formatBtc(value: number) {

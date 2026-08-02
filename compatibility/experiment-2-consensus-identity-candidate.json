@@ -1,0 +1,22 @@
+{
+  "schema_version": "pohw-consensus-identity-activation/v1",
+  "profile_revision": 1,
+  "status": "experimental-candidate",
+  "launch_enabled": false,
+  "activation_id": "194a60f81ecf2719d4c47b129311a181b81172d3e1742b2b3f4c53707d2d499f",
+  "experiment_id": "p2poolbtc-experiment-2",
+  "predecessor_activation_id": "86dfc3ff2736717781cdf007727bfc6bc3ec56a87f27a1d09703885adca434d8",
+  "consensus_ruleset": "pohw2-p2ia1-p2sw1-v1",
+  "bitcoin_core_upstream_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+  "bitcoin_core_patch_series_sha256": "5ea5540993adcbd5953b6c2b70bc0c4798bf1e4b19db56580240a93fd0a92810",
+  "authorization_parent_height": 958175,
+  "authorization_parent_hash": "09b71e8e2ff0fbac330838ad82f71f21c73bc6e420f1bbd17aba05bb03bc4bd6",
+  "bitcoin_network": "pohw2",
+  "bitcoin_datadir": "pohw-experiment-2",
+  "p2p_port": 40422,
+  "rpc_port": 40424,
+  "message_start_hex": "f2b1d4c3",
+  "consensus_policy_hash": "4f727128f49d0f4cd1e1fcca85cbfcb5b9b5f0f3877787be8d33f4c0384d5ab3",
+  "require_fresh_datadir": true,
+  "history_reinterpreted": false
+}
