@@ -21,7 +21,7 @@
         {
           "repository": "P2poolBTC",
           "path": "Cargo.lock",
-          "sha256": "b10548f7d3bc28f5b45d1a0997831ce0c47657f3c6a624a18c7a8671940c271f",
+          "sha256": "f088982ab96fa8aeeb60fb764a8a7b98130840b0768f7a2fc9bc5c7610e5a6c4",
           "format": "cargo-lock"
         }
       ],
