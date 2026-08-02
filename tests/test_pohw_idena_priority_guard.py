@@ -56,6 +56,31 @@ class IdenaPriorityGuardTest(unittest.TestCase):
 
         self.assertEqual(cfg.state_dir, Path("/var/lib/pohw/idena-priority"))
 
+    def test_rpc_url_is_loopback_by_default(self) -> None:
+        self.assertEqual(
+            guard.validate_rpc_url("http://127.0.0.1:9009"),
+            "http://127.0.0.1:9009",
+        )
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            guard.validate_rpc_url("https://rpc.example.com")
+
+    def test_remote_rpc_url_requires_explicit_opt_in(self) -> None:
+        self.assertEqual(
+            guard.validate_rpc_url("https://rpc.example.com", allow_remote_rpc=True),
+            "https://rpc.example.com",
+        )
+        with self.assertRaisesRegex(ValueError, "https"):
+            guard.validate_rpc_url("http://rpc.example.com", allow_remote_rpc=True)
+
+    def test_rpc_url_rejects_untrusted_url_components(self) -> None:
+        for url in (
+            "http://user:password@127.0.0.1:9009",
+            "http://127.0.0.1:9009/?query=value",
+            "http://127.0.0.1:9009/#fragment",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                guard.validate_rpc_url(url, allow_remote_rpc=True)
+
     def config(self, root: Path, *, lead: int = 3600, cooldown: int = 1800) -> guard.GuardConfig:
         state = root / "idena-priority"
         return guard.GuardConfig(
