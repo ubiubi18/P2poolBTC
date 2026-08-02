@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,6 +133,33 @@ def parse_keywords(raw: str | None) -> tuple[str, ...]:
     if raw is None or not raw.strip():
         return DEFAULT_PERIOD_KEYWORDS
     return tuple(part.strip().lower() for part in raw.replace(",", " ").split() if part.strip())
+
+
+def validate_rpc_url(raw_url: str, *, allow_remote_rpc: bool = False) -> str:
+    if not raw_url or len(raw_url) > 2048 or any(ord(ch) < 32 for ch in raw_url):
+        raise ValueError("Idena RPC URL is empty, too long, or contains control characters")
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Idena RPC URL scheme must be http or https")
+    if not parsed.hostname:
+        raise ValueError("Idena RPC URL must include a host")
+    if parsed.username or parsed.password:
+        raise ValueError("Idena RPC URL must not include userinfo")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Idena RPC URL must not include query or fragment data")
+    host = parsed.hostname
+    if host.lower() == "localhost":
+        return raw_url
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return raw_url
+    except ValueError:
+        pass
+    if allow_remote_rpc and parsed.scheme == "https":
+        return raw_url
+    if allow_remote_rpc:
+        raise ValueError("Remote Idena RPC URL must use https")
+    raise ValueError("Idena RPC URL must be loopback unless POHW_ALLOW_REMOTE_RPC=true")
 
 
 def load_config(env: dict[str, str] | None = None) -> GuardConfig:
@@ -338,8 +367,12 @@ def main() -> int:
             "POHW_IDENA_PRIORITY_RPC_TIMEOUT_SECONDS",
             default=8,
         )
+        rpc_url = validate_rpc_url(
+            os.getenv("IDENA_RPC_URL", "http://127.0.0.1:9009"),
+            allow_remote_rpc=parse_bool(os.getenv("POHW_ALLOW_REMOTE_RPC")),
+        )
         client = IdenaRPCClientMinimal(
-            url=os.getenv("IDENA_RPC_URL", "http://127.0.0.1:9009"),
+            url=rpc_url,
             api_key_file=os.getenv("IDENA_API_KEY_FILE", "/mnt/ssd/idena/idena-data/api.key"),
             timeout=max(timeout, 1),
         )
