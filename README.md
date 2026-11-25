@@ -1,5 +1,11 @@
 # P2poolBTC
 
+### Reliability and consensus
+
+Please treat the software in this repository as potentially unreliable. To the best of my knowledge, concerns relevant to Idena’s consensus security remain unresolved upstream.
+
+As long as the chain continues to operate under its current rules, I will not change those rules on my own. I welcome working with upstream maintainers, node operators, and the wider Idena community to review any proposed consensus change and coordinate its adoption.
+
 P2poolBTC is a no-value Bitcoin P2Pool-style experiment with Idena proof-of-human-work accounting.
 It explores a voluntary mining layer where every node can replay the same sharechain, Idena snapshots, reward scores, payout schedules, and vault claims locally.
 
